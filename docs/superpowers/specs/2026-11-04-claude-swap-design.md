@@ -52,9 +52,12 @@ claude-swap is a small web app on his own local network. It holds his accounts, 
    - Accounts: log in to each account; usage left; reset date.
    - Hosts and sessions: every host with an agent, and its running Claude sessions.
    - Swap: choose an account for a host; the swap and the plugin reload happen together.
+   - Pending connections (added by Decision 13): agents waiting for approval, with Allow and Deny per entry.
 9. **Plugin reload:** version one marks each affected running session "needs reload" in the UI. Matthew presses `/reload-plugins` or restarts that session. A separate research item looks for a way to automate this (see Open items).
 10. **Multi-machine accounts (decided by Matthew, builder check):** one account may be active on several machines at once. Each account has exactly one token owner: the server, or the machine that most recently swapped it in. Other machines using that account are marked "shared" and may need a re-swap if a refresh rotates the token. This replaces the stricter "one active host per account" reading of the hybrid ownership proposal below.
 11. **Day-one hosts (decided by Matthew, builder check):** this Windows desktop (`dadeush-desktop`) and the Linux laptop. Each WSL install is its own host with its own `~/.claude`. Later: `dadeush-buntun` (Linux) and `dadeush-legion` (Windows).
+12. **Log redaction is an allowlist (decided by Matthew, 2026-11-04).** The logger emits only allowlisted safe keys and withholds every other attribute. Allowlisted free-text values (message, reason, error) pass through `Redact` and are capped at 256 bytes. A denylist of known secret key names is not enough: a new field name would leak by default.
+13. **"Who is trying to connect" approval menu (decided by Matthew, 2026-11-04).** An agent that dials the server with no valid token is not rejected silently. It appears in a **Pending connections** list in the web UI showing host name, OS, source IP, time, and a short fingerprint derived from its hello. The owner clicks **Allow** or **Deny** per entry. Allow issues a per-agent token, delivered over that same pending connection, and the host becomes enrolled. Deny closes the connection and suppresses that fingerprint for a period. This is the default enrolment path. The one-time code stays as an optional pre-approved path (Claude's call, see Builder-check resolutions).
 
 ## Builder-visible calls by Claude, not decided by Matthew
 
@@ -91,11 +94,13 @@ These are Claude's proposals. Matthew has not approved them.
 - **Running sessions keep the old token in memory.** After a swap, a running Claude session may keep using its old login until it restarts. Whether a session re-reads the file was not confirmed. This is why Decision 9 uses a "needs reload" badge.
 - **Token staleness.** If an account is refreshed by two parties, one copy breaks. The hybrid ownership call above exists to prevent this. If a crash leaves a copy one rotation behind, that account needs a fresh login. Machines marked "shared" (Decision 10) can go stale when the owner refreshes; they then need a re-swap.
 - **Concentrated secret.** The server holds every account's login. Encryption at rest, LAN-only binding and an agent auth token are the minimum.
+- **Pending-connection surface (Decision 13).** An unauthenticated agent can now open a connection and occupy a list entry. A LAN device could flood the queue, or impersonate a real host's name so the owner approves the wrong machine. The security calls under "Pending connections" below exist for this; the fingerprint match on the new agent's console is the control against impersonation.
 
 ## Left to the builder
 
 - Package layout, protocol message shapes and versioning.
-- Agent and server authentication details (shared token, per-agent token, optional TLS on the LAN) and where each secret lives.
+- Agent and server authentication details (per-agent token issued by Allow, optional TLS on the LAN) and where each secret lives.
+- Fingerprint derivation from the hello (what it hashes, how many characters), as long as the agent can print the same value the UI shows.
 - Encrypted file format and cipher choice, as long as the key comes from an environment variable.
 - How the agent runs as a service: Windows service or scheduled task, systemd unit on Linux.
 - Atomic write and rollback for the credentials file: write temp file, fsync, rename, keep a backup of the previous block, restore on failure. Preserve file mode 0600 on Linux.
@@ -111,7 +116,16 @@ These are Claude's proposals. Matthew has not approved them.
 
 ### Claude's call, not decided by Matthew
 
-- **Agents and enrollment (Claude's call, not decided by Matthew).** One agent per OS user per host. The UI generates a one-time code; the agent exchanges it for a long-lived per-agent token. The UI can revoke that token.
+- **Agents and enrollment.** One agent per OS user per host. Default path is Decision 13: the agent dials with no token, lands in Pending connections, and the owner approves it. Optional pre-approved path (Claude's call, not decided by Matthew): the UI generates a one-time code (single use, 10 minutes); an agent that presents a valid code in its hello skips the queue and is enrolled at once. Either path yields a long-lived per-agent token, stored hashed on the server. The UI can revoke that token.
+- **Pending connections, security calls (Claude's call, not decided by Matthew).** This is a LAN server holding login tokens, so the approval menu gets these controls:
+  1. Viewing the pending list and clicking Allow or Deny require an authenticated admin session. Unauthenticated: HTTP 401.
+  2. Allow and Deny are POSTs carrying a CSRF token. Wrong or missing token: HTTP 403, nothing changes.
+  3. The queue is capped at 20 entries; a 21st hello is closed with a "queue full" reason. Each source IP may add at most 3 pending entries per 10 minutes; beyond that the connection is closed before it is listed.
+  4. A pending entry expires after 10 minutes. An expired entry cannot be approved; the agent must dial again.
+  5. A pending connection may send exactly one message, the hello. Any other message before approval drops the connection and removes the entry. A pending connection receives no account, host or session data: only Pending, Approved or Denied.
+  6. The fingerprint is derived from the hello (host name, OS and a per-attempt agent nonce). The agent prints it on its console; the UI shows it next to the Allow button and asks the owner to match them before clicking. A LAN device spoofing a host name produces a different fingerprint. The nonce travels inside TLS.
+  7. Deny closes the connection and suppresses that fingerprint for 1 hour: a re-dial with the same fingerprint is closed without being listed. A fresh nonce makes a fresh fingerprint, so a legitimate retry still works after the owner changes their mind.
+  8. Every Allow and Deny writes one audit log line with allowlisted keys only (action, fingerprint, host name, OS, source IP, result). The issued token never appears in a log, in the UI or in an API response other than the single Approved message to the agent.
 - **Spike first (Claude's call, not decided by Matthew).** Plan a spike before the build to verify the three unverified paths: web-UI OAuth login, refresh-token rotation behaviour, and process scanning. Fallback if web login fails: import an account from a machine already logged in; the agent uploads that machine's `claudeAiOauth` block.
 - **Account identity (Claude's call, not decided by Matthew).** Use the account or email identifier from `~/.claude.json` (`oauthAccount`) if present, with the spike verifying it. Otherwise use a label the user chooses at import.
 - **Swap states (Claude's call, not decided by Matthew).**
@@ -120,7 +134,7 @@ These are Claude's proposals. Matthew has not approved them.
   - Live tokens expired: try a refresh; if that fails, fail the swap and restore the previous block (rollback).
   - Every swap writes a backup of the previous block first.
 - **mcpOAuth (Claude's call, not decided by Matthew).** `mcpOAuth` is never swapped (already decided to preserve it). MCP logins may belong to a different account than the active one; document this in the UI and README.
-- **v1 done (Claude's call, not decided by Matthew).** Accounts addable (web login or import); usage left and reset date shown per account; hosts and sessions listed; swap works on one Windows and one Linux host; "needs reload" badge per session; encrypted token file; LAN-only.
+- **v1 done (Claude's call, not decided by Matthew).** Accounts addable (web login or import); usage left and reset date shown per account; hosts and sessions listed; swap works on one Windows and one Linux host; "needs reload" badge per session; encrypted token file; LAN-only; a new agent enrols through the Pending connections panel with a fingerprint match (Decision 13), and Deny suppresses it; logs emit allowlisted keys only (Decision 12).
 
 ### Still open
 
