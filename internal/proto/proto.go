@@ -119,6 +119,15 @@ type SwapRes struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// Reason goes on the wire as-is; logging redacts it (callers should still logx.Redact before setting).
+func (r SwapRes) String() string {
+	return fmt.Sprintf("SwapRes{OK:%t Reason:%s}", r.OK, logx.Redact(r.Reason))
+}
+func (r SwapRes) GoString() string { return r.String() }
+func (r SwapRes) LogValue() slog.Value {
+	return slog.GroupValue(slog.Bool("ok", r.OK), slog.String("reason", logx.Redact(r.Reason)))
+}
+
 // Encode marshals body into an envelope of the current Version.
 func Encode(typ, id string, body any) ([]byte, error) {
 	env := Envelope{V: Version, Type: typ, ID: id}

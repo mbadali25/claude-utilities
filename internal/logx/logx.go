@@ -18,29 +18,34 @@ const redacted = "[redacted]"
 var secretKeys = map[string]bool{
 	"code": true, "key": true, "email": true, "authorization": true, "auth": true,
 	"cookie": true, "credentials": true, "creds": true, "block": true,
-	"bearer": true, "refresh": true,
+	"bearer": true, "refresh": true, "cred": true, "pw": true, "pwd": true, "pass": true,
 }
+
+// benignSuffixes mark counters and limits (tokenCount, maxTokens) that merely contain a secret word.
+var benignSuffixes = []string{"count", "len", "length", "limit"}
 
 // secretKeyParts are substrings of a normalised key that mark it secret.
 var secretKeyParts = []string{
 	"token", "secret", "password", "passwd", "credential", "apikey", "privatekey", "sessionkey",
 }
 
-const keyNames = `access_token|refresh_token|id_token|token|api_key|apikey|password|passwd|secret|client_secret|session_key|sessionkey|authorization|cookie|credentials|block|key`
-
 var (
 	bearerRe = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+|sk-ant-[A-Za-z0-9_-]+`)
 	jwtRe    = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
 	emailRe  = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`)
 	authRe   = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(?:(?:basic|bearer|digest|token)\s+)?[^\s"',;]+`)
-	// kvRe masks name=value and name: value. A bare "code" is excluded: it collides with
-	// benign text such as "exit code=1"; OAuth codes are caught by codeRe.
-	kvRe   = regexp.MustCompile(`(?i)\b((?:access_token|refresh_token|id_token|token|api_key|apikey|password|passwd|secret|client_secret|session_key|sessionkey)\s*[:=]\s*)[^&\s"',;]+`)
+	// kvRe finds name=value and name: value pairs (any name, camelCase included); kvSecret
+	// decides which are masked. A bare "code" is never masked here: it collides with benign
+	// text such as "exit code=1"; OAuth codes are caught by codeRe. Quoted values are masked
+	// whole; an unquoted value is masked up to the next whitespace or delimiter only, so
+	// "password = hunter2 extra words" leaves "extra words" visible.
+	kvRe   = regexp.MustCompile(`\b([A-Za-z][A-Za-z0-9_-]*)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^&\s"',;]+)`)
 	codeRe = regexp.MustCompile(`(?i)([?&]code=)[^&\s"']+`)
-	// jsonKvRe masks plain JSON members: string, flat object, flat array, or number values.
-	jsonKvRe = regexp.MustCompile(`(?i)("(?:` + keyNames + `)"\s*:\s*)(?:"(?:[^"\\]|\\.)*"|\{[^{}]*\}|\[[^\[\]]*\]|-?\d[\w.+-]*)`)
-	// escJSONKvRe masks JSON that was backslash-escaped inside another string.
-	escJSONKvRe = regexp.MustCompile(`(?i)(\\"(?:` + keyNames + `)\\"\s*:\s*)\\"[^"\\]*\\"`)
+	// jsonMemberRe / escJSONMemberRe find `"key":` in plain JSON and in JSON that was
+	// backslash-escaped inside another string. redactJSON masks the whole value (string,
+	// nested object or array, number) of every secret-named key.
+	jsonMemberRe    = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"\s*:\s*`)
+	escJSONMemberRe = regexp.MustCompile(`\\"([A-Za-z0-9_.-]*)\\"\s*:\s*`)
 )
 
 func normKey(k string) string {
@@ -52,6 +57,11 @@ func secretKey(k string) bool {
 	n := normKey(k)
 	if secretKeys[n] {
 		return true
+	}
+	for _, b := range benignSuffixes {
+		if strings.HasSuffix(n, b) || strings.HasPrefix(n, "max") {
+			return false
+		}
 	}
 	for _, p := range secretKeyParts {
 		if strings.Contains(n, p) {
@@ -71,12 +81,105 @@ func Redact(s string) string {
 		return redacted
 	})
 	s = jwtRe.ReplaceAllString(s, redacted)
-	s = kvRe.ReplaceAllString(s, "${1}"+redacted)
+	s = kvRe.ReplaceAllStringFunc(s, func(m string) string {
+		p := kvRe.FindStringSubmatch(m)
+		if !kvSecret(p[1]) {
+			return m
+		}
+		return p[1] + p[2] + redacted
+	})
 	s = codeRe.ReplaceAllString(s, "${1}"+redacted)
-	s = jsonKvRe.ReplaceAllString(s, `${1}"`+redacted+`"`)
-	s = escJSONKvRe.ReplaceAllString(s, `${1}\"`+redacted+`\"`)
+	s = redactJSON(s, jsonMemberRe, `"`)
+	s = redactJSON(s, escJSONMemberRe, `\"`)
 	s = emailRe.ReplaceAllString(s, redacted)
 	return s
+}
+
+// kvSecret reports whether a free-text name=value key is secret. Bare exact names such as
+// "code" or "key" are left alone in free text (see kvRe); keys containing a secret word match.
+func kvSecret(k string) bool {
+	switch normKey(k) {
+	case "code", "key", "email", "auth", "block", "bearer", "refresh":
+		return false
+	}
+	return secretKey(k)
+}
+
+// redactJSON replaces the whole value of every secret-named member found by memberRe.
+// quote is the string delimiter in this encoding (`"` or `\"`).
+func redactJSON(s string, memberRe *regexp.Regexp, quote string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range memberRe.FindAllStringSubmatchIndex(s, -1) {
+		if m[0] < last { // inside a value that is already masked
+			continue
+		}
+		if !secretKey(s[m[2]:m[3]]) {
+			continue
+		}
+		end := jsonValueEnd(s, m[1], quote)
+		b.WriteString(s[last:m[1]])
+		b.WriteString(quote + redacted + quote)
+		last = end
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// jsonValueEnd returns the index just past the JSON value starting at i. On malformed input it
+// returns len(s), masking to the end (the safe side).
+func jsonValueEnd(s string, i int, quote string) int {
+	if i >= len(s) {
+		return len(s)
+	}
+	skipString := func(j int) int { // s[j:] starts with quote; return index past the closing quote
+		j += len(quote)
+		for j < len(s) {
+			switch {
+			case quote == `"` && s[j] == '\\' && j+1 < len(s):
+				j += 2
+			case quote == `\"` && strings.HasPrefix(s[j:], `\\`):
+				j += 2
+			case strings.HasPrefix(s[j:], quote):
+				return j + len(quote)
+			default:
+				j++
+			}
+		}
+		return len(s)
+	}
+	if strings.HasPrefix(s[i:], quote) {
+		return skipString(i)
+	}
+	switch s[i] {
+	case '{', '[':
+		depth := 0
+		for j := i; j < len(s); {
+			if strings.HasPrefix(s[j:], quote) {
+				j = skipString(j)
+				continue
+			}
+			switch s[j] {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					return j + 1
+				}
+			}
+			j++
+		}
+		return len(s)
+	}
+	j := i
+	for j < len(s) && !strings.ContainsRune(",}] \t\r\n\\", rune(s[j])) {
+		j++
+	}
+	return j
 }
 
 // safe runs f and returns a placeholder if it panics (e.g. a typed-nil receiver).
@@ -112,9 +215,14 @@ func redactAny(v any) string {
 // New returns a JSON logger that redacts secret attributes and token-like strings.
 func New(w io.Writer) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
-		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if secretKey(a.Key) {
 				return slog.String(a.Key, redacted)
+			}
+			for _, g := range groups { // children of a secret-named group are secret
+				if secretKey(g) {
+					return slog.String(a.Key, redacted)
+				}
 			}
 			switch a.Value.Kind() {
 			case slog.KindString:
