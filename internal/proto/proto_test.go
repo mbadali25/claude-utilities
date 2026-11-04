@@ -70,6 +70,48 @@ func TestSwapResNeverCarriesBlock(t *testing.T) {
 	}
 }
 
+func TestEnvelopeNeverLeaksBody(t *testing.T) {
+	env := Envelope{V: 1, Type: TypeSwapReq, ID: "i1", Body: json.RawMessage(`{"block":"envsecret","token":"envsecret"}`)}
+	for _, v := range []any{env, &env} {
+		for _, s := range []string{fmt.Sprintf("%v", v), fmt.Sprintf("%+v", v), fmt.Sprintf("%#v", v)} {
+			if strings.Contains(s, "envsecret") || !strings.Contains(s, "i1") {
+				t.Fatalf("bad render: %s", s)
+			}
+		}
+		var buf bytes.Buffer
+		slog.New(slog.NewJSONHandler(&buf, nil)).Info("x", "env", v)
+		if strings.Contains(buf.String(), "envsecret") {
+			t.Fatalf("leaked via slog: %s", buf.String())
+		}
+	}
+}
+
+func TestPIIFieldsRedactedWhenRendered(t *testing.T) {
+	r := SwapReq{Account: "me@example.com"}
+	e := ExportRes{Identity: "me@example.com"}
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("x", "r", r, "e", e)
+	for _, s := range []string{r.String(), e.String(), buf.String()} {
+		if strings.Contains(s, "me@example.com") {
+			t.Fatalf("PII leaked: %s", s)
+		}
+	}
+}
+
+func TestDecodeRejectsOversize(t *testing.T) {
+	big := `{"v":1,"type":"report","body":"` + strings.Repeat("a", MaxMessageSize) + `"}`
+	if _, err := Decode([]byte(big)); err == nil {
+		t.Fatal("expected size error")
+	}
+}
+
+func TestSwapResOnlyOKAndReason(t *testing.T) {
+	rt := reflect.TypeOf(SwapRes{})
+	if rt.NumField() != 2 || rt.Field(0).Name != "OK" || rt.Field(1).Name != "Reason" {
+		t.Fatalf("SwapRes fields changed; review for credential leakage: %v", rt)
+	}
+}
+
 func TestDecodeRejectsEmptyType(t *testing.T) {
 	if _, err := Decode([]byte(`{"v":1}`)); err == nil {
 		t.Fatal("expected error for empty type")

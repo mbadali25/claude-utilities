@@ -57,7 +57,8 @@ type Report struct {
 type ExportRes struct {
 	Block    json.RawMessage `json:"block,omitempty"`
 	Identity string          `json:"identity,omitempty"`
-	Err      string          `json:"err,omitempty"`
+	// Err goes on the wire as-is: callers must logx.Redact it before setting.
+	Err string `json:"err,omitempty"`
 }
 
 type SwapReq struct {
@@ -77,28 +78,39 @@ func (r Report) MarshalJSON() ([]byte, error) {
 
 // Credential-bearing types never print their secrets via fmt or slog.
 
+// Identity-like strings (account, identity, host) may be email addresses, so they pass through logx.Redact.
+
+func (e Envelope) String() string {
+	return fmt.Sprintf("Envelope{V:%d Type:%s ID:%s Body:%s}", e.V, logx.Redact(e.Type), logx.Redact(e.ID), mask)
+}
+func (e Envelope) GoString() string { return e.String() }
+func (e Envelope) LogValue() slog.Value {
+	return slog.GroupValue(slog.Int("v", e.V), slog.String("type", logx.Redact(e.Type)),
+		slog.String("id", logx.Redact(e.ID)), slog.String("body", mask))
+}
+
 func (h Hello) String() string {
-	return fmt.Sprintf("Hello{HostName:%s OS:%s Token:%s}", h.HostName, h.OS, mask)
+	return fmt.Sprintf("Hello{HostName:%s OS:%s Token:%s}", logx.Redact(h.HostName), logx.Redact(h.OS), mask)
 }
 func (h Hello) GoString() string { return h.String() }
 func (h Hello) LogValue() slog.Value {
-	return slog.GroupValue(slog.String("hostName", h.HostName), slog.String("os", h.OS), slog.String("token", mask))
+	return slog.GroupValue(slog.String("hostName", logx.Redact(h.HostName)), slog.String("os", logx.Redact(h.OS)), slog.String("token", mask))
 }
 
 func (r ExportRes) String() string {
-	return fmt.Sprintf("ExportRes{Identity:%s Block:%s Err:%s}", r.Identity, mask, logx.Redact(r.Err))
+	return fmt.Sprintf("ExportRes{Identity:%s Block:%s Err:%s}", logx.Redact(r.Identity), mask, logx.Redact(r.Err))
 }
 func (r ExportRes) GoString() string { return r.String() }
 func (r ExportRes) LogValue() slog.Value {
-	return slog.GroupValue(slog.String("identity", r.Identity), slog.String("block", mask), slog.String("err", logx.Redact(r.Err)))
+	return slog.GroupValue(slog.String("identity", logx.Redact(r.Identity)), slog.String("block", mask), slog.String("err", logx.Redact(r.Err)))
 }
 
 func (r SwapReq) String() string {
-	return fmt.Sprintf("SwapReq{Account:%s Block:%s}", r.Account, mask)
+	return fmt.Sprintf("SwapReq{Account:%s Block:%s}", logx.Redact(r.Account), mask)
 }
 func (r SwapReq) GoString() string { return r.String() }
 func (r SwapReq) LogValue() slog.Value {
-	return slog.GroupValue(slog.String("account", r.Account), slog.String("block", mask))
+	return slog.GroupValue(slog.String("account", logx.Redact(r.Account)), slog.String("block", mask))
 }
 
 // SwapRes deliberately has no credential field: results never echo secrets.
@@ -120,8 +132,16 @@ func Encode(typ, id string, body any) ([]byte, error) {
 	return json.Marshal(env)
 }
 
-// Decode parses an envelope and rejects any version other than Version.
+// MaxMessageSize bounds a decoded frame (bytes).
+const MaxMessageSize = 1 << 20
+
+// Decode parses an envelope and rejects oversize frames and any version other than Version.
+// It does not check ID presence: request/response dispatchers must reject an empty ID
+// on export_req, export_res, swap_req and swap_res.
 func Decode(b []byte) (Envelope, error) {
+	if len(b) > MaxMessageSize {
+		return Envelope{}, fmt.Errorf("message too large: %d bytes", len(b))
+	}
 	var env Envelope
 	if err := json.Unmarshal(b, &env); err != nil {
 		return Envelope{}, fmt.Errorf("decode envelope: %w", err)

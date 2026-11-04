@@ -2,6 +2,7 @@ package logx
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -98,5 +99,83 @@ func TestRedactMasksBearer(t *testing.T) {
 	}
 	if Redact("") != "" || Redact("plain text") != "plain text" {
 		t.Fatal("should leave benign text alone")
+	}
+}
+
+type nilStringer struct{ s string }
+
+func (n *nilStringer) String() string { return n.s }
+
+func TestLoggerNilStringerDoesNotPanic(t *testing.T) {
+	var buf bytes.Buffer
+	var p *nilStringer
+	New(&buf).Info("x", "p", p)
+	if buf.Len() == 0 {
+		t.Fatal("log line dropped")
+	}
+}
+
+func TestLoggerRedactsRawBytesMapsAndStructs(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(&buf)
+	type wrap struct {
+		Body json.RawMessage `json:"body"`
+	}
+	l.Info("x",
+		"raw", json.RawMessage(`{"access_token":"rawsecret1"}`),
+		"bytes", []byte(`token=bytesecret2`),
+		"m", map[string]string{"auth": "Bearer mapsecret3", "block": "mapsecret4"},
+		"w", wrap{Body: json.RawMessage(`{"block":{"a":"structsecret5"}}`)},
+		"ptr", &wrap{Body: json.RawMessage(`{"password":"ptrsecret6"}`)},
+		"ok", map[string]int{"n": 1})
+	out := buf.String()
+	for _, leak := range []string{"rawsecret1", "bytesecret2", "mapsecret3", "mapsecret4", "structsecret5", "ptrsecret6"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("leaked %q: %s", leak, out)
+		}
+	}
+}
+
+func TestRedactEscapedJSONAndOtherForms(t *testing.T) {
+	in := `err: {\"access_token\":\"esc1\",\"id_token\":\"esc2\"} token: colon3 Authorization: Basic basic4 refresh_token=r5 sessionKey=sess6 x=1`
+	out := Redact(in)
+	for _, leak := range []string{"esc1", "esc2", "colon3", "basic4", "r5", "sess6"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("leaked %q: %s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "x=1") {
+		t.Fatalf("over-masked: %s", out)
+	}
+}
+
+func TestRedactKeepsBenignCodeAndMasksOAuthCode(t *testing.T) {
+	out := Redact("exit code=1 status code=500 GET /cb?state=s&code=oauthcode7")
+	if !strings.Contains(out, "exit code=1") || !strings.Contains(out, "status code=500") {
+		t.Fatalf("over-masked: %s", out)
+	}
+	if strings.Contains(out, "oauthcode7") {
+		t.Fatalf("leaked: %s", out)
+	}
+}
+
+func TestRedactEmail(t *testing.T) {
+	if out := Redact("login failed for me@example.com now"); strings.Contains(out, "me@example.com") {
+		t.Fatalf("leaked: %s", out)
+	}
+}
+
+func TestLoggerRedactsKeyFamilies(t *testing.T) {
+	var buf bytes.Buffer
+	New(&buf).Info("x", "authToken", "fam1", "idtoken", "fam2", "privateKey", "fam3", "sessionKey", "fam4",
+		"creds", "fam5", "bearer", "fam6", "auth", "fam7", "hostToken", "fam8", "userPassword", "fam9", "status_code", 404)
+	out := buf.String()
+	for _, v := range []string{"fam1", "fam2", "fam3", "fam4", "fam5", "fam6", "fam7", "fam8", "fam9"} {
+		if strings.Contains(out, v) {
+			t.Fatalf("leaked %s: %s", v, out)
+		}
+	}
+	if !strings.Contains(out, "404") {
+		t.Fatalf("over-redacted status_code: %s", out)
 	}
 }
