@@ -53,10 +53,11 @@ func TestRedactDoesNotMaskCounters(t *testing.T) {
 	if out := Redact(in); out != in {
 		t.Fatalf("over-redacted: %s", out)
 	}
+	// Attribute keys are allowlisted, so counters that merely look secret are dropped, never masked as secrets.
 	var buf bytes.Buffer
-	New(&buf).Info("x", "tokenCount", 5, "maxTokens", 100)
-	if strings.Contains(buf.String(), "redacted") {
-		t.Fatalf("over-redacted attrs: %s", buf.String())
+	New(&buf).Info("x", "tokenCount", 5, "maxTokens", 100, "count", 7)
+	if out := buf.String(); strings.Contains(out, "redacted") || !strings.Contains(out, `"tokenCount":"[dropped]"`) || !strings.Contains(out, `"count":7`) {
+		t.Fatalf("unexpected attrs: %s", out)
 	}
 }
 

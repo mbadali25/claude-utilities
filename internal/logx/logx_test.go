@@ -13,14 +13,14 @@ func TestLoggerRedactsSecretAttrs(t *testing.T) {
 	var buf bytes.Buffer
 	l := New(&buf)
 	l.Info("x", "accessToken", "sk-ant-oat01-abc", "refreshToken", "rrr-secret", "token", "ttt-secret",
-		"code", "ccc-secret", "key", "kkk-secret", "password", "ppp-secret", "email", "me@example.com", "host", "box1")
+		"oauthCode", "ccc-secret", "key", "kkk-secret", "password", "ppp-secret", "email", "me@example.com", "host", "box1", "code", "E42")
 	out := buf.String()
 	for _, leak := range []string{"abc", "rrr-secret", "ttt-secret", "ccc-secret", "kkk-secret", "ppp-secret", "me@example.com"} {
 		if strings.Contains(out, leak) {
 			t.Fatalf("leaked %q in %s", leak, out)
 		}
 	}
-	if !strings.Contains(out, "[redacted]") || !strings.Contains(out, "box1") {
+	if !strings.Contains(out, "[dropped]") || !strings.Contains(out, "box1") || !strings.Contains(out, `"code":"E42"`) {
 		t.Fatalf("unexpected output: %s", out)
 	}
 }
@@ -36,13 +36,17 @@ func TestLoggerRedactsNestedGroupAttr(t *testing.T) {
 func TestLoggerRedactsErrorAndStringer(t *testing.T) {
 	var buf bytes.Buffer
 	l := New(&buf)
-	l.Error("x", "err", fmt.Errorf("auth failed: Bearer abc123tok"), "s", stringer("sk-ant-oat01-zzz"), "n", 5)
+	l.Error("x", Err(fmt.Errorf("auth failed: Bearer abc123tok")), "s", stringer("sk-ant-oat01-zzz"), "count", 5,
+		"reason", stringer("sk-ant-oat01-yyy"))
 	out := buf.String()
-	if strings.Contains(out, "abc123tok") || strings.Contains(out, "zzz") {
+	if strings.Contains(out, "abc123tok") || strings.Contains(out, "zzz") || strings.Contains(out, "yyy") {
 		t.Fatalf("leaked: %s", out)
 	}
-	if !strings.Contains(out, "auth failed") || !strings.Contains(out, `"n":5`) {
+	if !strings.Contains(out, `"err":"auth failed: Bearer [redacted]"`) || !strings.Contains(out, `"count":5`) {
 		t.Fatalf("over-redacted: %s", out)
+	}
+	if Err(nil).Value.String() != "" || Err(nil).Key != "err" {
+		t.Fatalf("Err(nil) = %v", Err(nil))
 	}
 }
 

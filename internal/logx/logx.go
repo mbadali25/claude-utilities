@@ -1,18 +1,93 @@
-// Package logx provides a JSON logger that redacts secrets.
+// Package logx provides a JSON logger that emits only allowlisted attribute keys and redacts
+// secret-looking substrings from the free text it does emit.
+//
+// Attribute keys are an ALLOWLIST (see allowed): a key not on the list is written as
+// "[dropped]" so a reader sees that a field was withheld, never its value. String values of
+// allowlisted keys, and the message, still pass through Redact and are capped at
+// maxValueBytes. Under an allowlisted key only primitive kinds (string, int, uint, float,
+// bool, duration, time) are written; groups, structs, maps, errors and Any values are dropped
+// as a whole. Attributes nested under a group are always dropped.
 //
 // logx must never import proto: proto imports logx, so the reverse is an import cycle.
 package logx
 
 import (
-	"encoding/json"
-	"fmt"
+	"context"
 	"io"
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
+	"unicode/utf8"
 )
 
-const redacted = "[redacted]"
+const (
+	redacted = "[redacted]"
+	dropped  = "[dropped]"
+	// maxValueBytes caps every emitted string (message included) so a leak that slips past
+	// Redact is bounded and a log line cannot carry a whole credential file.
+	maxValueBytes = 256
+	truncMark     = "...[truncated]"
+)
+
+// allowed holds normalised (lowercase, no "_" or "-") attribute keys whose values may be
+// written. Every key names an operational fact, never a credential, identity or payload.
+// "account" is an opaque account label (never an email); "code" is a small result code.
+var allowed = map[string]bool{
+	"time": true, "level": true, "msg": true, "component": true, "host": true, "hostid": true,
+	"agent": true, "task": true, "taskid": true, "account": true, "result": true, "reason": true,
+	"code": true, "action": true, "event": true, "attempt": true, "count": true, "durationms": true,
+	"status": true, "statuscode": true, "pid": true, "sessioncount": true, "version": true,
+	"err": true, "error": true,
+}
+
+var allowedMu sync.RWMutex
+
+// forbiddenKeyParts are substrings a key registered via Allow may never contain.
+var forbiddenKeyParts = []string{
+	"token", "secret", "password", "passwd", "pwd", "key", "cookie", "session", "authorization",
+	"auth", "email", "credential", "cred", "bearer", "block", "code", "identity", "refresh",
+}
+
+// Allow registers extra attribute keys to be emitted. Call it at init time only. A key must
+// never carry a secret, an email or a payload; Allow panics on an empty key or on one that
+// contains an obvious secret word (token, secret, password, key, cookie, session,
+// authorization, email, credential, code, ...). Keys already allowed are accepted unchanged.
+func Allow(keys ...string) {
+	allowedMu.Lock()
+	defer allowedMu.Unlock()
+	for _, k := range keys {
+		n := normKey(k)
+		if allowed[n] {
+			continue
+		}
+		if n == "" {
+			panic("logx.Allow: empty key")
+		}
+		for _, p := range forbiddenKeyParts {
+			if strings.Contains(n, p) {
+				panic("logx.Allow: key " + k + " looks secret-bearing (" + p + ")")
+			}
+		}
+		allowed[n] = true
+	}
+}
+
+func isAllowed(k string) bool {
+	allowedMu.RLock()
+	defer allowedMu.RUnlock()
+	return allowed[normKey(k)]
+}
+
+// Err returns a string attribute "err" holding the redacted, capped error text, or "" for nil.
+// Error values themselves are dropped by the logger (an error may wrap a struct or body that
+// carries a secret), so this is the one way to log one.
+func Err(err error) slog.Attr {
+	if err == nil {
+		return slog.String("err", "")
+	}
+	return slog.String("err", clean(safe(err.Error)))
+}
 
 // secretKeys holds normalised attribute keys (lowercase, no "_" or "-") matched exactly.
 var secretKeys = map[string]bool{
@@ -30,6 +105,13 @@ var secretKeyParts = []string{
 }
 
 var (
+	// pemRe masks a whole PEM block, or from an unterminated BEGIN line to the end of the text.
+	pemRe = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]+-----.*?(?:-----END [A-Z0-9 ]+-----|\z)`)
+	// userinfoRe masks the user:password part of a URL (https://u:pass@host).
+	userinfoRe = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@]+@`)
+	// vendorRe masks tokens with a vendor prefix: GitHub (ghp_/gho_/ghu_/ghs_/ghr_, github_pat_),
+	// AWS access key ids (AKIA/ASIA), Slack (xox?-), GitLab (glpat-).
+	vendorRe = regexp.MustCompile(`\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bglpat-[A-Za-z0-9_-]{20,}`)
 	bearerRe = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+|sk-ant-[A-Za-z0-9_-]+`)
 	jwtRe    = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
 	emailRe  = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`)
@@ -71,8 +153,12 @@ func secretKey(k string) bool {
 	return false
 }
 
-// Redact masks bearer-token-looking substrings, JWTs, emails, and token-like key/value pairs.
+// Redact masks PEM blocks, URL userinfo, vendor-prefixed tokens, bearer-token-looking
+// substrings, JWTs, emails, and token-like key/value pairs (free text, JSON, escaped JSON).
 func Redact(s string) string {
+	s = pemRe.ReplaceAllString(s, redacted)
+	s = userinfoRe.ReplaceAllString(s, "${1}"+redacted+"@")
+	s = vendorRe.ReplaceAllString(s, redacted)
 	s = authRe.ReplaceAllString(s, "${1}"+redacted)
 	s = bearerRe.ReplaceAllStringFunc(s, func(m string) string {
 		if len(m) >= 6 && strings.EqualFold(m[:6], "bearer") {
@@ -192,47 +278,79 @@ func safe(f func() string) (s string) {
 	return f()
 }
 
-func redactAny(v any) string {
-	switch t := v.(type) {
-	case error:
-		return Redact(safe(t.Error))
-	case fmt.Stringer:
-		return Redact(safe(t.String))
-	case json.RawMessage:
-		return Redact(string(t))
-	case []byte:
-		return Redact(string(t))
+// clean redacts free text and caps it at maxValueBytes on a rune boundary.
+func clean(s string) string {
+	s = Redact(s)
+	if len(s) <= maxValueBytes {
+		return s
 	}
-	return Redact(safe(func() string {
-		b, err := json.Marshal(v)
-		if err != nil {
-			return fmt.Sprintf("%v", v)
-		}
-		return string(b)
-	}))
+	n := maxValueBytes - len(truncMark)
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + truncMark
 }
 
-// New returns a JSON logger that redacts secret attributes and token-like strings.
+// handler sanitises every attribute before the JSON handler sees it. Doing this in a wrapper
+// rather than ReplaceAttr lets a group be dropped as one value instead of leaf by leaf.
+type handler struct {
+	inner slog.Handler
+	// grouped is set once WithGroup has been called: every later attribute is nested, so dropped.
+	grouped bool
+}
+
+// New returns a JSON logger that writes only allowlisted attribute keys (others appear as
+// "[dropped]"), redacts and caps the strings it does write, and drops non-primitive values.
 func New(w io.Writer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if secretKey(a.Key) {
-				return slog.String(a.Key, redacted)
-			}
-			for _, g := range groups { // children of a secret-named group are secret
-				if secretKey(g) {
-					return slog.String(a.Key, redacted)
-				}
-			}
-			switch a.Value.Kind() {
-			case slog.KindString:
-				return slog.String(a.Key, Redact(a.Value.String()))
-			case slog.KindAny:
-				if v := a.Value.Any(); v != nil {
-					return slog.String(a.Key, redactAny(v))
-				}
-			}
-			return a
-		},
-	}))
+	return slog.New(&handler{inner: slog.NewJSONHandler(w, nil)})
+}
+
+func (h *handler) Enabled(ctx context.Context, l slog.Level) bool { return h.inner.Enabled(ctx, l) }
+
+func (h *handler) Handle(ctx context.Context, r slog.Record) error {
+	nr := slog.NewRecord(r.Time, r.Level, clean(r.Message), r.PC)
+	r.Attrs(func(a slog.Attr) bool {
+		nr.AddAttrs(h.sanitize(a))
+		return true
+	})
+	return h.inner.Handle(ctx, nr)
+}
+
+func (h *handler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	out := make([]slog.Attr, 0, len(attrs))
+	for _, a := range attrs {
+		out = append(out, h.sanitize(a))
+	}
+	return &handler{inner: h.inner.WithAttrs(out), grouped: h.grouped}
+}
+
+func (h *handler) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+	return &handler{inner: h.inner.WithGroup(name), grouped: true}
+}
+
+// sanitize returns the attribute as it may be written: dropped when nested or not allowlisted,
+// cleaned when a string, as-is for other primitive kinds, dropped for everything else.
+func (h *handler) sanitize(a slog.Attr) slog.Attr {
+	v := a.Value.Resolve()                         // LogValuer is resolved here, with slog's own panic recovery
+	if a.Key == "" && v.Kind() == slog.KindGroup { // an inlined group: its children are top-level
+		g := v.Group()
+		out := make([]slog.Attr, 0, len(g))
+		for _, c := range g {
+			out = append(out, h.sanitize(c))
+		}
+		return slog.Attr{Value: slog.GroupValue(out...)}
+	}
+	if h.grouped || !isAllowed(a.Key) {
+		return slog.String(a.Key, dropped)
+	}
+	switch v.Kind() {
+	case slog.KindString:
+		return slog.String(a.Key, clean(v.String()))
+	case slog.KindInt64, slog.KindUint64, slog.KindFloat64, slog.KindBool, slog.KindDuration, slog.KindTime:
+		return slog.Attr{Key: a.Key, Value: v}
+	}
+	return slog.String(a.Key, dropped)
 }
