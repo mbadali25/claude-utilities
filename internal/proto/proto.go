@@ -3,9 +3,15 @@ package proto
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
+
+	"claude-utilities/internal/logx"
 )
+
+const mask = "[redacted]"
 
 // Version is the only protocol version accepted by Decode.
 const Version = 1
@@ -59,6 +65,42 @@ type SwapReq struct {
 	Account string          `json:"account"`
 }
 
+// MarshalJSON emits an empty array, never null, for absent sessions.
+func (r Report) MarshalJSON() ([]byte, error) {
+	type plain Report
+	p := plain(r)
+	if p.Sessions == nil {
+		p.Sessions = []Session{}
+	}
+	return json.Marshal(p)
+}
+
+// Credential-bearing types never print their secrets via fmt or slog.
+
+func (h Hello) String() string {
+	return fmt.Sprintf("Hello{HostName:%s OS:%s Token:%s}", h.HostName, h.OS, mask)
+}
+func (h Hello) GoString() string { return h.String() }
+func (h Hello) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("hostName", h.HostName), slog.String("os", h.OS), slog.String("token", mask))
+}
+
+func (r ExportRes) String() string {
+	return fmt.Sprintf("ExportRes{Identity:%s Block:%s Err:%s}", r.Identity, mask, logx.Redact(r.Err))
+}
+func (r ExportRes) GoString() string { return r.String() }
+func (r ExportRes) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("identity", r.Identity), slog.String("block", mask), slog.String("err", logx.Redact(r.Err)))
+}
+
+func (r SwapReq) String() string {
+	return fmt.Sprintf("SwapReq{Account:%s Block:%s}", r.Account, mask)
+}
+func (r SwapReq) GoString() string { return r.String() }
+func (r SwapReq) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("account", r.Account), slog.String("block", mask))
+}
+
 // SwapRes deliberately has no credential field: results never echo secrets.
 type SwapRes struct {
 	OK     bool   `json:"ok"`
@@ -86,6 +128,9 @@ func Decode(b []byte) (Envelope, error) {
 	}
 	if env.V != Version {
 		return Envelope{}, fmt.Errorf("unsupported protocol version %d", env.V)
+	}
+	if env.Type == "" {
+		return Envelope{}, errors.New("missing message type")
 	}
 	return env, nil
 }
