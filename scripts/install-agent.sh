@@ -75,7 +75,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --system) FORCE_SYSTEM=1 ;;
     --reconfigure) RECONFIGURE=1 ;;
-    -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR>1 && /^#/ {print; next} NR>1 {exit}' "$0"; exit 0 ;;
     *) die "unknown argument '$1'; only --system, --reconfigure and --help are flags, everything else arrives in the environment" ;;
   esac
   shift
@@ -299,14 +299,32 @@ as_run_as() {
   fi
 }
 
-# own hands a path to the run-as user. A no-op unless we are root installing for
-# somebody else; without it the unit's User= cannot exec the binary or read
-# agent.json, and systemd fails with a bare status=203/EXEC.
+# own hands a path, and every directory between the home and it, to the run-as
+# user. A no-op unless we are root installing for somebody else.
+#
+# The ancestors matter as much as the target. `mkdir -p` under this script's
+# umask 077 creates a missing ~/.local or ~/.config as root:root 0700, which the
+# run-as user cannot even traverse: the binary is then unexecutable and
+# agent.json unreadable, and systemd reports both as a bare status=203/EXEC that
+# names nothing. A fresh service account hits this every time.
+#
+# Ancestors are chowned one at a time, never -R: the user's own ~/.local/share
+# and the rest of their home are none of this installer's business.
 own() { # <path...>
   if [ "$run_uid" = "$invoking_uid" ] || [ "$invoking_uid" != "0" ]; then
     return 0
   fi
-  act chown -R "$run_uid:$run_gid" "$@"
+  local p cur
+  for p in "$@"; do
+    if under_dir "$p" "$run_home"; then
+      cur="$(dirname "$p")"
+      while [ "$cur" != "$run_home" ] && [ "$cur" != "/" ] && [ "$cur" != "." ]; do
+        act chown "$run_uid:$run_gid" "$cur"
+        cur="$(dirname "$cur")"
+      done
+    fi
+    act chown -R "$run_uid:$run_gid" "$p"
+  done
 }
 
 # ------------------------------------------------------------- reconfigure
@@ -394,12 +412,16 @@ own "$bin_dir"
 
 if [ -n "$migrate_from" ]; then
   if [ "$DRY_RUN" = "1" ]; then
-    printf 'DRY-RUN: copy %s to %s so the host stays enrolled\n' "$migrate_from/agent.json" "$state_dir"
+    printf 'DRY-RUN: copy the contents of %s to %s so the host stays enrolled\n' "$migrate_from" "$state_dir"
   else
     mkdir -p "$state_dir"
     chmod 0700 "$state_dir"
-    cp -p -- "$migrate_from/agent.json" "$state_dir/agent.json"
-    step "kept the enrolment: copied agent.json into $state_dir"
+    # The whole directory, not just agent.json: the agent also keeps its swap
+    # journal here and settles a leftover one on start. Migrating the token alone
+    # would drop an unsettled swap silently, and the host would come back looking
+    # clean with its credentials half-written.
+    cp -a -- "$migrate_from/." "$state_dir/"
+    step "kept the enrolment: copied the state dir into $state_dir"
   fi
   own "$state_dir"
 fi

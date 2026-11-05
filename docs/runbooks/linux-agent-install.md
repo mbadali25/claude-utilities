@@ -51,7 +51,7 @@ Only root may install for another user: there is no way to write somebody else's
 | `CLAUDESWAP_RUN_AS` names a user that does not exist | refused: `user '<name>' does not exist: getent passwd found no entry for it` |
 | `CLAUDESWAP_RUN_AS` names a nologin or sub-1000 account | refused, naming the shell or the uid; `CLAUDESWAP_ALLOW_SYSTEM_USER=1` installs for it anyway |
 | the home is missing, or not owned and writable by that user | refused, naming the path. Ownership is the test, not `test -w`: root bypasses the mode bits |
-| `--reconfigure` | stops the existing unit (system **or** user), rewrites it, keeps or migrates the state dir so the host stays enrolled |
+| `--reconfigure` | stops the existing unit (system **or** user), rewrites it, keeps the state dir or copies the **whole** directory — token and any unsettled swap journal — into the new one, so the host stays enrolled |
 | `--system` / `CLAUDESWAP_SYSTEM=1` without write access to `/etc/systemd/system` | refused, naming the path |
 | no `/run/user/<uid>` | warns that the account has no user manager, names `sudo loginctl enable-linger <user>`, falls back to `systemctl --user --machine=<user>@.host` |
 | `CLAUDESWAP_DRY_RUN=1` | prints mode, user, uid, home, state dir and unit path; writes, downloads and runs nothing |
@@ -124,6 +124,16 @@ sudo -E bash scripts/install-agent.sh
 
 `sudo -E` is what carries the enrolment code (and the rest) through; without it `sudo` resets the environment and the install fails on a missing `CLAUDESWAP_SERVER`. The code still never appears on a command line, under `sudo` or across the switch to the run-as user: it travels only in the environment, because `/proc/<pid>/cmdline` is world-readable.
 
+A sudoers policy with `env_reset` and no `SETENV` refuses `-E` outright — `sorry, you are not allowed to preserve the environment`. Start a root shell and set the variables inside it instead, which keeps the code off every command line just the same:
+
+```bash
+sudo -i
+export CLAUDESWAP_SERVER=https://swap.example:8443 CLAUDESWAP_PIN=<64-hex> \
+       CLAUDESWAP_AGENT_BIN=/path/to/agent-linux CLAUDESWAP_RUN_AS=dadeush
+read -rs CLAUDESWAP_ENROL_CODE && export CLAUDESWAP_ENROL_CODE
+bash /path/to/install-agent.sh
+```
+
 Flags, and only these two: `--system` forces a system unit when you are not root but can write `/etc/systemd/system`, and `--reconfigure` stops the existing unit before rewriting it. Everything else arrives in the environment, and an unknown argument is refused rather than ignored.
 
 To fetch the binary rather than copy it, replace `CLAUDESWAP_AGENT_BIN` with both of:
@@ -169,7 +179,7 @@ Note the home: it came from `getent passwd`, not from `/home/dadeush`. Read thos
 
 `CLAUDESWAP_STATE_DIR` is resolved once and exported, so enrolment and the unit's `Environment=` line always name the same directory. If a unit already exists, the script reads the directory **out of that unit** and keeps it — that is where the enrolment token lives, and a one-time code is spent. Override it only if you must, and never change it afterwards.
 
-The binary and state dir are chowned to the run-as user whenever root installs for somebody else. Without that, `User=<name>` cannot exec the binary or read `agent.json`, and systemd fails with a bare `status=203/EXEC` that names nothing.
+The binary and state dir are chowned to the run-as user whenever root installs for somebody else — **and so is every directory between the home and them.** `mkdir -p` under the installer's `umask 077` creates a missing `~/.local` or `~/.config` as `root:root 0700`, which that user cannot even traverse: the binary is then unexecutable and `agent.json` unreadable, and systemd reports both as a bare `status=203/EXEC` that names nothing. A fresh service account hits this every time, since nothing has created those directories yet. The walk up stops at the home and never uses `-R` on an ancestor, so the user's own `~/.local/share` is left alone.
 
 **Re-running is safe.** The binary is replaced atomically (so a re-run works while the old one is executing), enrolment is skipped once `agent.json` exists — a one-time code is spent, and a second `enrol` with it would be denied — and the unit is rewritten in place.
 
@@ -494,7 +504,14 @@ sudo -E CLAUDESWAP_RUN_AS=<user> bash scripts/install-agent.sh --system --reconf
 systemctl restart claude-swap-agent
 ```
 
-**`status=203/EXEC` right after a system install.** `User=<name>` cannot execute the binary. Check the owner: `ls -l <home>/.local/bin/claude-swap-agent` must be that user, mode `0700`. Re-running the installer as root fixes the ownership.
+**`status=203/EXEC` right after a system install.** `User=<name>` cannot reach the binary. The file itself is the obvious suspect, but check the whole path — a `root:root 0700` directory anywhere along it stops that user just as dead:
+
+```bash
+h="$(getent passwd <user> | cut -d: -f6)"
+namei -l "$h/.local/bin/claude-swap-agent"   # every component, with owner and mode
+```
+
+Every directory from the home down must be owned by that user (or at least traversable by them). Re-running the installer as root fixes the ownership; `namei` is how you confirm it did.
 
 **The host shows the wrong user on its card.** `agent runs as <user>` comes from the agent's hello and refreshes on every reconnect, so restart the service after a `--reconfigure`. A blank value means the agent has not dialled in since the server started, or it predates the `runAs` field.
 
@@ -504,7 +521,7 @@ systemctl restart claude-swap-agent
 
 ## Tests
 
-`_verify/cases/install-agent-sh.sh` runs the installer in a throwaway `HOME` against stub `agent`, `systemctl`, `curl`, `id`, `getent`, `chown` and `runuser` binaries, over a fixture passwd file rather than the real `/etc/passwd`. 103 checks: first run, idempotent re-run, dry run, rejected inputs, the sha256 mismatch, the `systemctl --user` exports and the `--machine` fallback, a missing `/run/user/<uid>`, root writing a system unit, root installing for an unprivileged user, a missing user, a nologin account and its override, an ordinary user refused another user, `--reconfigure` keeping the enrolment, and an assertion that the enrolment code reaches no log, unit, command line or output. It also runs `shellcheck -S style` over both files when shellcheck is installed.
+`_verify/cases/install-agent-sh.sh` runs the installer in a throwaway `HOME` against stub `agent`, `systemctl`, `curl`, `id`, `getent`, `chown` and `runuser` binaries, over a fixture passwd file rather than the real `/etc/passwd`. It covers first run, idempotent re-run, dry run, rejected inputs, the sha256 mismatch, the `systemctl --user` exports and the `--machine` fallback, a missing `/run/user/<uid>`, root writing a system unit, root installing for an unprivileged user, a missing user, a nologin account and its override, an ordinary user refused another user, `--reconfigure` keeping the enrolment, and an assertion that the enrolment code reaches no log, unit, command line or output. It also checks that the directories *between* the home and the binary are handed over (the 203/EXEC trap), that the walk up stops at the home, and that a reconfigure which moves the state dir carries the swap journal with the token. 113 checks in all, plus `shellcheck -S style` over both files when shellcheck is installed.
 
 It needs an unprivileged uid to own its temp homes and exits 77 when run as root. It is part of `bash _verify/run-all.sh`, and `CLAUDESWAP_SYSTEM_UNIT_DIR` and `CLAUDESWAP_RUNTIME_BASE` exist only so it can exercise the system-unit and missing-runtime-dir branches — never set them on a real host.
 

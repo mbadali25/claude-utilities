@@ -222,6 +222,7 @@ invoke() {
     CLAUDESWAP_AGENT_BIN="$STUB/fake-agent" \
     ${CLAUDESWAP_RUN_AS:+CLAUDESWAP_RUN_AS="$CLAUDESWAP_RUN_AS"} \
     ${CLAUDESWAP_ALLOW_SYSTEM_USER:+CLAUDESWAP_ALLOW_SYSTEM_USER="$CLAUDESWAP_ALLOW_SYSTEM_USER"} \
+    ${CLAUDESWAP_STATE_DIR:+CLAUDESWAP_STATE_DIR="$CLAUDESWAP_STATE_DIR"} \
     ${CLAUDESWAP_DRY_RUN:+CLAUDESWAP_DRY_RUN="$CLAUDESWAP_DRY_RUN"} \
     bash "$SCRIPT" "$@"
 }
@@ -446,6 +447,18 @@ check "the binary was handed to that user" \
   grep -q "^chown -R $UID_DEF:$UID_DEF $H8/.local/bin\$" "$STUB_LOG"
 check "the state dir was handed to that user" \
   grep -q "^chown -R $UID_DEF:$UID_DEF $H8/.config/claude-swap-agent\$" "$STUB_LOG"
+
+# The ancestors matter too. umask 077 makes a missing ~/.local or ~/.config
+# root:root 0700, which the run-as user cannot traverse: the binary is then
+# unexecutable and agent.json unreadable, and systemd says only
+# status=203/EXEC. $H8 starts with neither directory, so this is the real path.
+check "the home's .local was handed over too (traversal)" \
+  grep -q "^chown $UID_DEF:$UID_DEF $H8/.local\$" "$STUB_LOG"
+check "the home's .config was handed over too (traversal)" \
+  grep -q "^chown $UID_DEF:$UID_DEF $H8/.config\$" "$STUB_LOG"
+# Walking up must stop at the home: chowning it, or anything above it, would
+# rewrite ownership the installer has no business touching.
+refute "the walk up stopped at the home" grep -qE "^chown $UID_DEF:$UID_DEF ($H8|$TMP|/)\$" "$STUB_LOG"
 check "enrol used the state dir under that home" \
   grep -q "^state-dir enrol $H8/.config/claude-swap-agent\$" "$STUB_LOG"
 check "report names the chosen user" grep -q "^==> run as tester (uid $UID_DEF)" "$TMP/out8"
@@ -507,6 +520,10 @@ rm -f "$sysunit"
 invoke "$H11" >/dev/null 2>&1 || fail "user-mode seed run failed"
 check "seed run enrolled" test -f "$H11/.config/claude-swap-agent/agent.json"
 seedtoken="$(cat "$H11/.config/claude-swap-agent/agent.json")"
+# An unsettled swap journal must survive a reconfigure as well: the agent
+# settles a leftover one on start, and losing it leaves credentials half-written
+# on a host that looks clean.
+printf '{"stage":"written"}\n' >"$H11/.config/claude-swap-agent/swap-journal.json"
 
 : >"$STUB_LOG"
 STUB_SELF=0
@@ -524,6 +541,24 @@ check "the enrolment token is the same file" \
   test "$seedtoken" = "$(cat "$H11/.config/claude-swap-agent/agent.json")"
 refute "--reconfigure did not re-enrol" grep -q '^enrol ' "$STUB_LOG"
 check "--reconfigure says why enrol was skipped" grep -q 'already enrolled' "$TMP/out11"
+check "--reconfigure kept the swap journal" \
+  test -f "$H11/.config/claude-swap-agent/swap-journal.json"
+
+# A reconfigure that moves the state dir has to carry the whole directory over,
+# journal included, not just the token.
+: >"$STUB_LOG"
+CLAUDESWAP_STATE_DIR="$H11/.claude-swap-state"
+if out11b="$(invoke "$H11" --reconfigure 2>&1)"; then ok "state-dir move exits 0"; else
+  fail "state-dir move exited non-zero"; printf '%s\n' "$out11b" | sed 's/^/     | /'
+fi
+unset CLAUDESWAP_STATE_DIR
+printf '%s\n' "$out11b" >"$TMP/out11b"
+check "the move said it was migrating" grep -q 'migrating the existing enrolment' "$TMP/out11b"
+check "the token arrived at the new state dir" test -f "$H11/.claude-swap-state/agent.json"
+check "the journal arrived with it" test -f "$H11/.claude-swap-state/swap-journal.json"
+refute "the move did not re-enrol" grep -q '^enrol ' "$STUB_LOG"
+check "the new state dir is baked into the unit" \
+  grep -q "^Environment=\"CLAUDESWAP_STATE_DIR=$H11/.claude-swap-state\"\$" "$sysunit"
 unset CLAUDESWAP_RUN_AS
 unset STUB_SELF
 EXTRA_PASSWD=()
