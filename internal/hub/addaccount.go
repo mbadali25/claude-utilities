@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -54,18 +55,22 @@ type AddView struct {
 	URL     string
 	Account *vault.Account
 	Error   string
+	// Replace is true for a "sign in again" job. Warning is set on a finished replace when an online
+	// host is still signed in with the previous login: that login is separate and was not touched.
+	Replace bool
+	Warning string
 }
 
-// addJob is guarded by Hub.mu.
+// addJob is guarded by Hub.mu. target is the account a replace job overwrites ("" for an add).
 type addJob struct {
-	id, hostID, label string
-	c                 *conn
-	state             AddState
-	url               string
-	account           *vault.Account
-	err               string
-	storing           bool
-	started, ended    time.Time
+	id, hostID, label, target string
+	c                         *conn
+	state                     AddState
+	url                       string
+	account                   *vault.Account
+	err, warning              string
+	storing                   bool
+	started, ended            time.Time
 }
 
 func (j *addJob) live() bool {
@@ -114,6 +119,27 @@ func (h *Hub) AddAccount(ctx context.Context, hostID, label string) (string, err
 			return "", vault.ErrLabelTaken
 		}
 	}
+	return h.startAdd(ctx, hostID, label, "")
+}
+
+// ReplaceLogin starts a sign-in on hostID that replaces the stored login of accountID ("Sign in
+// again"). It is the add-account flow with a target: the label is the account's own, and when the
+// sign-in ends the identity must be the account's (replaceLogin). An unknown account is
+// ErrUnknownAccount and nothing is sent to the agent. At most one job, of either kind, is live.
+func (h *Hub) ReplaceLogin(ctx context.Context, hostID, accountID string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	acct, ok := h.vault.Get(accountID)
+	if !ok {
+		return "", ErrUnknownAccount
+	}
+	return h.startAdd(ctx, hostID, acct.Label, accountID)
+}
+
+// startAdd registers a job and tells the agent to begin. target is the account a replace job will
+// overwrite, or "" for a new account.
+func (h *Hub) startAdd(ctx context.Context, hostID, label, target string) (string, error) {
 	id, err := randHex(8)
 	if err != nil {
 		return "", err
@@ -148,7 +174,7 @@ func (h *Hub) AddAccount(ctx context.Context, hostID, label string) (string, err
 		delete(h.adds, oldID)
 	}
 	c := ho.c
-	h.adds[id] = &addJob{id: id, hostID: hostID, label: label, c: c, state: AddStarting, started: now}
+	h.adds[id] = &addJob{id: id, hostID: hostID, label: label, target: target, c: c, state: AddStarting, started: now}
 	h.mu.Unlock()
 
 	if err := c.send(proto.TypeLoginStart, id, proto.LoginStart{}); err != nil {
@@ -157,7 +183,11 @@ func (h *Hub) AddAccount(ctx context.Context, hostID, label string) (string, err
 		h.mu.Unlock()
 		return "", ErrAgentOffline
 	}
-	h.log.Info("add account started", "action", "login_start", "host_id", hostID, "result", "ok")
+	if target != "" {
+		h.log.Info("login replace started", "action", "login_replace", "host_id", hostID, "account", target, "result", "started")
+	} else {
+		h.log.Info("add account started", "action", "login_start", "host_id", hostID, "result", "ok")
+	}
 	return id, nil
 }
 
@@ -170,7 +200,7 @@ func (h *Hub) AddStatus(id string) (AddView, error) {
 	if j == nil {
 		return AddView{}, ErrNoAdd
 	}
-	v := AddView{ID: j.id, State: j.state, Error: j.err}
+	v := AddView{ID: j.id, State: j.state, Error: j.err, Replace: j.target != "", Warning: j.warning}
 	if j.state == AddAwaitingCode {
 		v.URL = j.url
 	}
@@ -288,8 +318,12 @@ func (h *Hub) addFrame(c *conn, env proto.Envelope) {
 			return
 		}
 		j.storing = true
-		hostID, label := j.hostID, j.label
+		hostID, label, target := j.hostID, j.label, j.target
 		h.mu.Unlock()
+		if target != "" {
+			h.finishReplace(j, hostID, target, ld)
+			return
+		}
 		acct, err := h.storeLogin(label, ld.Identity, ld.Block)
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -302,6 +336,96 @@ func (h *Hub) addFrame(c *conn, env proto.Envelope) {
 		h.endAddLocked(j, AddDone, "", h.now())
 		h.log.Info("add account done", "action", "login_done", "host_id", hostID, "account", acct.ID, "result", "ok")
 	}
+}
+
+// finishReplace ends a replace job from the agent's login_done. j.storing is already set, and h.mu
+// is NOT held. A refusal stores nothing and says why without naming any identity.
+func (h *Hub) finishReplace(j *addJob, hostID, target string, ld proto.LoginDone) {
+	acct, err := h.replaceLogin(target, ld.Identity, ld.Block)
+	var warning string
+	if err == nil {
+		warning = h.replaceWarning(acct.Identity)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err != nil {
+		h.endAddLocked(j, AddFailed, replaceErrText(err), h.now())
+		h.log.Warn("login replace failed", "action", "login_replace", "host_id", hostID, "account", target,
+			"result", "failed", "reason", replaceReason(err))
+		return
+	}
+	j.account, j.warning = &acct, warning
+	h.endAddLocked(j, AddDone, "", h.now())
+	h.log.Info("login replaced", "action", "login_replace", "host_id", hostID, "account", target, "result", "ok")
+}
+
+var (
+	errReplaceMismatch = errors.New("hub: that sign-in is a different account; sign in as the account you are replacing")
+	errReplaceGone     = errors.New("hub: the account no longer exists")
+)
+
+// replaceLogin overwrites the stored login of target with a fresh one the agent produced, after
+// checking it belongs to that account. Nothing is created: label and identity stay, only the
+// claudeAiOauth block changes, through the vault's backed-up write. Ownership goes back to "the
+// vault copy is fresh" (no host holds the authoritative token any more, no write-back is owed), and
+// the poller is told. No host's own credentials are read or written.
+func (h *Hub) replaceLogin(target, identity string, raw json.RawMessage) (vault.Account, error) {
+	cur, ok := h.vault.Get(target)
+	if !ok {
+		return vault.Account{}, errReplaceGone
+	}
+	if identity == "" {
+		return vault.Account{}, errors.New("hub: the host reports no signed-in account")
+	}
+	if cur.Identity == "" || identity != cur.Identity {
+		return vault.Account{}, errReplaceMismatch
+	}
+	block, err := oauthBlock(raw)
+	if err != nil {
+		return vault.Account{}, err
+	}
+	if err := h.vault.ReplaceBlock(target, block, h.now()); err != nil {
+		if errors.Is(err, vault.ErrNotFound) {
+			return vault.Account{}, errReplaceGone
+		}
+		return vault.Account{}, fmt.Errorf("hub: store login: %w", err)
+	}
+	h.reg.Forget(target)
+	h.mu.Lock()
+	fn := h.onReplaced
+	h.mu.Unlock()
+	if fn != nil {
+		fn(target)
+	}
+	cur.Block = nil
+	return cur, nil
+}
+
+// replaceWarning is the note shown when an online host is still signed in as the account: its login
+// is its own copy, separate from the one just stored, and the replace did not touch it. The host's
+// name is agent-supplied, so it is not in the text.
+func (h *Hub) replaceWarning(identity string) string {
+	if h.heldLive(identity) == nil {
+		return ""
+	}
+	return "A host is still signed in with the previous login. It was not changed; swap it to this account to give it the new sign-in."
+}
+
+func replaceErrText(err error) string {
+	if strings.HasPrefix(err.Error(), "hub: ") {
+		return logx.Redact(strings.TrimPrefix(err.Error(), "hub: "))
+	}
+	return "could not store the login"
+}
+
+func replaceReason(err error) string {
+	switch {
+	case errors.Is(err, errReplaceMismatch):
+		return "identity_mismatch"
+	case errors.Is(err, errReplaceGone):
+		return "account_gone"
+	}
+	return "store_refused"
 }
 
 // addErrText is the owner-facing reason for a refused login. Hub-authored errors already carry no
