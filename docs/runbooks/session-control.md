@@ -237,6 +237,26 @@ says the ask reached the session and never that the remote name is fixed.
 > `TestInboxRenameVerifiesTheNameAndNeverWaitsForPeerNameSource` holds this. A collision takes a
 > uniquifying suffix, so a name that *starts with* the one asked for counts as taken.
 
+**The name must have *changed*, not merely match.** The prefix tolerance above is for a collision
+suffix taken *during* the send. A session already sitting at `alpha-2`, asked for `alpha`, would
+otherwise read as an instant success for a rename that never happened — a false `delivered`, which
+is the one failure this mechanism is not allowed to have. So the read-back compares against the
+name the session had *before* the frame went out, and the pre-send comparison is exact:
+`alphabet` is not `alpha`. `TestInboxRenameNeverReadsAPreExistingNameAsSuccess` and
+`TestTookTheNameRequiresAChange` hold it.
+
+#### A name the session already has is the one case the inbox cannot help with
+
+If the session's local name is already the name asked for, the inbox **declines to the relaunch**
+rather than reporting `delivered`. This is a deliberate decision, not a shortcut.
+
+Claude Code's rename handler is `if (!N || N === jle()) return;` — it returns on a name it already
+has **before** reaching `Jvn`, so **no bridge push happens at all**. And that is precisely the state
+in which a stale title on claude.ai can only be refreshed by a relaunch: the operator pressed "Fix
+name" *because* the remote title is wrong, and the local name already matching is exactly why the
+cheap fix cannot reach it. Reporting `delivered` there would show a success chip and send the
+operator away from the only mechanism that would work. The decline carries the relaunch command.
+
 If `name` did not change, the agent declines (`unsupported-inbox-no-change`) and the relaunch
 fallback answers. It does not retry, and it does not claim anything.
 

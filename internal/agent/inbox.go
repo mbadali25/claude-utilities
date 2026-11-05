@@ -260,17 +260,28 @@ func inboxFrames(token, sessionID, name string) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// nameMatches reports whether the session's own name is the one that was asked for.
+// sameName reports whether two names are the same name, after the normalisation Claude Code
+// applies. Exact, with no prefix tolerance: "alphabet" is not "alpha".
+func sameName(a, b string) bool {
+	a, b = proto.CleanRemoteName(a), proto.CleanRemoteName(b)
+	return a != "" && a == b
+}
+
+// tookTheName reports whether a rename landed: the session's own name CHANGED, and changed to the
+// name that was asked for.
 //
 // Check `name` and ONLY `name`. nameSource is not a discriminator: a rename arriving over the
 // inbox has source "peer", but Claude Code records it in the session file as "user" (or
 // "collision" when the name had to be uniquified) and never as "peer". Code that waited for
 // nameSource "peer" would read every success as a failure.
 //
-// A collision takes a uniquifying suffix, so a name that starts with the one asked for counts.
-func nameMatches(got, want string) bool {
-	got, want = proto.CleanRemoteName(got), proto.CleanRemoteName(want)
-	if want == "" {
+// `before` is load-bearing, not a convenience. A collision takes a uniquifying suffix, so a name
+// that STARTS with the one asked for counts as taken - but only if it was not already there. A
+// session sitting at "alpha-2" and asked for "alpha" would otherwise read as an instant success
+// for a rename that never happened, which is the one failure this mechanism must not have.
+func tookTheName(got, before, want string) bool {
+	got, before, want = proto.CleanRemoteName(got), proto.CleanRemoteName(before), proto.CleanRemoteName(want)
+	if want == "" || got == before {
 		return false
 	}
 	return got == want || (len(got) > len(want) && strings.HasPrefix(got, want))
@@ -351,11 +362,19 @@ func (m inboxMechanism) rename(task CommandTask) CommandResult {
 		return unsupported("inbox", proto.CodeNoBridge,
 			"no Remote Control bridge is bound to this session, so no remote title can be set on it")
 	}
-	if nameMatches(sf.Name, name) {
-		// Already carries it. Claude Code's own rename handler is a no-op for a name it already
-		// has, so connecting would achieve nothing; not connecting is the smaller act.
-		return CommandResult{Status: proto.StatusDelivered, Mechanism: "inbox",
-			Hint: "this session already carries that name; nothing was sent"}
+	if sameName(sf.Name, name) {
+		// The session already carries this name locally, and Claude Code's rename handler returns
+		// on a name it already has - BEFORE the bridge push. So nothing sent here could refresh
+		// the remote title, and this is exactly the state where a stale title on claude.ai can
+		// only be fixed by a relaunch: the operator pressed "Fix name" because the remote title is
+		// wrong, and the local name matching is why the cheap fix cannot reach it.
+		//
+		// Declining rather than reporting `delivered` is a deliberate choice. `delivered` would
+		// read as success in the UI and send the operator away from the one mechanism that works.
+		return unsupported("inbox", proto.CodeRequiresRestart,
+			"this session already carries that name locally, so sending it would change nothing: "+
+				"a session's remote title can only be refreshed by relaunching it. "+
+				RelaunchCommand(sf.SessionID, name))
 	}
 	frames, err := inboxFrames(key.PeerToken, sf.SessionID, name)
 	if err != nil {
@@ -369,7 +388,7 @@ func (m inboxMechanism) rename(task CommandTask) CommandResult {
 		return failed("inbox", proto.CodeInboxSendFailed,
 			"the session's inbox would not take the frame; nothing reached the session")
 	}
-	if !m.changed(dir, task.PID, name) {
+	if !m.changed(dir, task.PID, sf.Name, name) {
 		// The frame went out and the session's own name did not follow it, so nothing can be
 		// claimed. Declining hands the operator the relaunch, which is the thing that does work.
 		return unsupported("inbox", proto.CodeInboxNoChange,
@@ -416,10 +435,11 @@ func (m inboxMechanism) send(path string, frames []byte) error {
 	}
 }
 
-// changed polls the session's own file for the new name, briefly. It reads `name` and nothing else.
-func (m inboxMechanism) changed(dir string, pid int, name string) bool {
+// changed polls the session's own file for the new name, briefly. It reads `name` and nothing
+// else, and insists the name moved off `before`: a name that already matched proves nothing.
+func (m inboxMechanism) changed(dir string, pid int, before, name string) bool {
 	for waited := time.Duration(0); ; waited += inboxVerifyPoll {
-		if sf, err := readSessionFile(dir, pid); err == nil && nameMatches(sf.Name, name) {
+		if sf, err := readSessionFile(dir, pid); err == nil && tookTheName(sf.Name, before, name) {
 			return true
 		}
 		if waited >= inboxVerifyWindow {

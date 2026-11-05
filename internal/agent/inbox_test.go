@@ -313,13 +313,92 @@ func TestInboxRenameRefusesWhenTheSessionFileNamesAnotherSession(t *testing.T) {
 	}
 }
 
-// A name the session already carries is a no-op inside Claude Code, so the smaller act is not to
-// connect at all.
-func TestInboxRenameSendsNothingWhenTheNameAlreadyMatches(t *testing.T) {
+// A name the session already carries is the one case the inbox genuinely cannot help with, and it
+// must NOT read as success. Claude Code's rename handler returns on a name it already has, BEFORE
+// the bridge push, so nothing sent could refresh a stale title on claude.ai - which is exactly why
+// the operator pressed the button. The honest answer is the relaunch, not "delivered".
+func TestInboxRenameDeclinesToRelaunchWhenTheNameAlreadyMatches(t *testing.T) {
 	f := newInboxFixture(t, func(sf *sessionFile) { sf.Name = "already" })
 	res := f.m.Execute(f.task("already"))
-	if res.Status != proto.StatusDelivered || f.dialled != "" {
-		t.Fatalf("res = %+v dialled = %q", res, f.dialled)
+	if res.Status != proto.StatusUnsupported || res.Code != proto.CodeRequiresRestart {
+		t.Fatalf("res = %+v, want unsupported/%s and never delivered", res, proto.CodeRequiresRestart)
+	}
+	if f.dialled != "" {
+		t.Fatalf("dialled %q: sending a name the session already has would change nothing", f.dialled)
+	}
+	if !strings.Contains(res.Hint, "claude --resume "+testSession) {
+		t.Fatalf("hint = %q, want the relaunch command that can actually refresh the title", res.Hint)
+	}
+}
+
+// The read-back must prove the name MOVED, not merely that it matches. A session already sitting
+// at a name that starts with the one asked for would otherwise read as an instant success for a
+// rename that never happened - a false "delivered", which is the one failure mode this mechanism
+// is not allowed to have.
+func TestInboxRenameNeverReadsAPreExistingNameAsSuccess(t *testing.T) {
+	cases := []struct{ have, ask string }{
+		{"alpha-2", "alpha"},    // looks exactly like a collision suffix, but predates the ask
+		{"alphabet", "alpha"},   // a longer unrelated name that happens to share a prefix
+		{"alpha soup", "alpha"}, // same, with a space
+	}
+	for _, c := range cases {
+		t.Run(c.have+"/"+c.ask, func(t *testing.T) {
+			f := newInboxFixture(t, func(sf *sessionFile) { sf.Name = c.have })
+			// The send does nothing at all, as a session whose handler is not registered would.
+			res := f.m.Execute(f.task(c.ask))
+			if res.Status == proto.StatusDelivered {
+				t.Fatalf("res = %+v: %q was already there, so nothing was proved", res, c.have)
+			}
+			if res.Code != proto.CodeInboxNoChange {
+				t.Fatalf("res = %+v, want %s", res, proto.CodeInboxNoChange)
+			}
+			// It is a real attempt, so it must have been sent: this is not the already-matches case.
+			if f.dialled == "" {
+				t.Fatal("the rename was never sent")
+			}
+		})
+	}
+	// And a genuine collision - the name was taken DURING the send - still counts.
+	f := newInboxFixture(t, func(sf *sessionFile) { sf.Name = "work-39" })
+	f.renameOnSend = "alpha-2"
+	if res := f.m.Execute(f.task("alpha")); res.Status != proto.StatusDelivered {
+		t.Fatalf("res = %+v: a collision suffix taken during the send is a success", res)
+	}
+}
+
+func TestTookTheNameRequiresAChange(t *testing.T) {
+	cases := []struct {
+		got, before, want string
+		ok                bool
+	}{
+		{"alpha", "work-39", "alpha", true},      // exact, changed
+		{"alpha-2", "work-39", "alpha", true},    // collision, changed
+		{"alpha", "alpha", "alpha", false},       // matched before the send: proves nothing
+		{"alpha-2", "alpha-2", "alpha", false},   // the prefix hole
+		{"alphabet", "alphabet", "alpha", false}, // the prefix hole, unrelated name
+		{"work-39", "work-39", "alpha", false},   // nothing happened
+		{"alpha", "work-39", "", false},          // no name asked for
+		{"Alpha", "work-39", "alpha", false},     // case is not normalised away
+		{"  alpha  ", "work-39", "alpha", true},  // whitespace is
+		{"beta", "work-39", "alpha", false},      // changed to the wrong thing
+		{"alph", "work-39", "alpha", false},      // shorter than the ask
+	}
+	for _, c := range cases {
+		if got := tookTheName(c.got, c.before, c.want); got != c.ok {
+			t.Errorf("tookTheName(%q, %q, %q) = %v, want %v", c.got, c.before, c.want, got, c.ok)
+		}
+	}
+	// sameName is exact: the pre-send guard must not treat a prefix as the same name.
+	for _, c := range []struct {
+		a, b string
+		ok   bool
+	}{
+		{"alpha", "alpha", true}, {"alpha", "alphabet", false}, {"alpha-2", "alpha", false},
+		{"", "", false}, {"alpha", "", false}, {" alpha ", "alpha", true},
+	} {
+		if got := sameName(c.a, c.b); got != c.ok {
+			t.Errorf("sameName(%q, %q) = %v, want %v", c.a, c.b, got, c.ok)
+		}
 	}
 }
 
