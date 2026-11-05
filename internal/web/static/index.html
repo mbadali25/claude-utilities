@@ -191,15 +191,23 @@
   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, var(--col)), 1fr)); gap:var(--gap); align-items:stretch; }
   .card { background:var(--surface); border:var(--bw) solid var(--line); border-radius:var(--r); padding:var(--pad-card); display:flex; flex-direction:column; gap:var(--s5); min-width:0; }
   /* .wide is set on a host card while its session list is open; the account cards already carry
-     .open. At one column every card is the whole row anyway, so this costs nothing on a phone. */
-  .grid > .card.wide, .grid > .card.acct.open { grid-column:1 / -1; }
+     .open. At one column every card is the whole row anyway, so this costs nothing on a phone.
+     The whole grid goes to one column, not only the open card: spanning just the open one left
+     its shut neighbours as orphans, one card wide in a three-column row with two columns of
+     nothing beside them (pine, between two expanded hosts). So a grid holding anything open is a
+     list, and a grid holding nothing open is the three-up wall of cards it was. That is also the
+     pair of states the Expand all / Collapse all buttons already switch between. */
+  .grid:has(> .card.wide) > .card, .grid:has(> .card.acct.open) > .card { grid-column:1 / -1; }
   .card > .swap, .card > .tun-danger { margin-top:auto; }
-  /* A card that owns its row has the width of the whole column, so what is inside it stops
-     growing once it has the width it needs: the select keeps a control's measure instead of
-     stretching to 900px, and the session list runs in two columns, which is also what keeps an
-     open card from pushing the rows after it off the screen. */
-  .card.wide .swap select { flex:0 1 260px; }
-  @media (min-width:900px) { .card.wide details.sess ul { grid-template-columns:repeat(2, minmax(0,1fr)); } }
+  /* A card in a listed grid has the width of the whole column, so what is inside it stops growing
+     once it has the width it needs: the session list runs in two columns, which is also what
+     keeps an open card from pushing the rows after it off the screen. */
+  @media (min-width:900px) {
+    .card.wide details.sess ul { grid-template-columns:repeat(2, minmax(0,1fr)); }
+    /* An odd count would otherwise end the list with one row half empty, which is the same hole
+       the grid policy above exists to close. The last row takes the full width instead. */
+    .card.wide details.sess li:last-child:nth-child(odd) { grid-column:1 / -1; }
+  }
   .card:focus-visible { outline-offset:var(--fo-box); }
   .card.acct { border-top:var(--bw-edge) solid var(--line-strong); }
   .card.acct.s-ok { border-top-color:var(--ok); }
@@ -323,7 +331,10 @@
      command comes last. A grid, not a flex row, so a long name cannot push the chips off.
      Every row carries the same padding and the same minimum height, so a one-line row and a
      four-line row in the same list sit on one rhythm instead of two. */
-  details.sess li { padding:var(--s4); background:var(--sunk); border-radius:var(--r-ctl); display:grid; gap:var(--s2); min-width:0; min-height:var(--h-row); align-content:center; }
+  /* align-content:start, because in a two-column list a short row is stretched to its neighbour's
+     height and centred content then floats in the middle of its own box. Top-aligned, the names
+     of both sessions sit on one line. */
+  details.sess li { padding:var(--s4); background:var(--sunk); border-radius:var(--r-ctl); display:grid; gap:var(--s2); min-width:0; align-content:start; }
   details.sess li .srow { display:flex; gap:var(--s3); align-items:center; flex-wrap:wrap; min-width:0; }
   /* The name is the row's heading. It stays on one line and truncates; the full name is in
      its title attribute, so nothing is lost. min-width:0 is what lets it shrink to ellipsis. */
@@ -334,8 +345,10 @@
   .smeta .scwd { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .swap { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center; border-top:var(--bw) solid var(--line); padding-top:var(--s5);
           min-height:calc(var(--h-ctl) + var(--s7)); }
-  /* 120px basis: select, Swap and Revoke share one row in a 300px card instead of Revoke wrapping alone. */
-  .swap select { flex:1 1 120px; min-width:0; }
+  /* 120px basis: select, Swap and Revoke share one row in a 300px card instead of Revoke wrapping
+     alone. The cap is what stops the same select stretching to 900px once the card owns its row:
+     a control is as wide as the longest account label, never as wide as the card. */
+  .swap select { flex:1 1 120px; min-width:0; max-width:260px; }
   /* The Copy button keeps the row's padding rather than being pulled onto its edge. The pull it
      used to carry put its right edge 8px past the content box of every row it sat in, so a
      command row ended on a different line from the name and the chips above it; one right edge
