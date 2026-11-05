@@ -727,13 +727,13 @@
   // the set it knows), so this map is the whole vocabulary; an unrecognised code still gets the
   // general line rather than silence.
   var LOGIN_CMD = 'claude auth login';
-  var SIGN_IN_FIX = 'Run this as the user the agent runs as; the agent picks it up within a minute';
+  var SIGN_IN_FIX = 'Sign in as the user the agent runs as; the agent picks it up within a minute.';
   var IDENTITY_WHY = {
     no_claude_json: { why: 'No Claude Code account is signed in on this host.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
     no_oauth_account: { why: 'Claude Code has run on this host, but no account is signed in.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
     no_credentials: { why: 'This host holds no Claude Code login for the agent to read.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
-    parse_error: { why: "This host's Claude Code state file is not readable as JSON, so it names no account.", fix: 'Sign in again as the user the agent runs as to rewrite it', cmd: LOGIN_CMD },
-    home_mismatch: { why: 'The user the agent runs as has no account signed in; another user on this host does.', fix: 'Run the agent as that user, or sign in as the user the agent runs as', cmd: LOGIN_CMD },
+    parse_error: { why: "This host's Claude Code state file is not readable as JSON, so it names no account.", fix: 'Sign in again as the user the agent runs as to rewrite it.', cmd: LOGIN_CMD },
+    home_mismatch: { why: 'The user the agent runs as has no account signed in; another user on this host does.', fix: 'Run the agent as that user, or sign in as the user the agent runs as.', cmd: LOGIN_CMD },
     unreadable: { why: "The agent cannot read this host's Claude Code state file." , fix: 'Run the agent as the user who owns that file, or let that user read it. The agent retries every 30 seconds, so no restart is needed.' },
     config_dir_elsewhere: { why: 'CLAUDE_CONFIG_DIR points the agent at another config directory, and no account is signed in there.', fix: 'Either sign in inside that directory, or clear CLAUDE_CONFIG_DIR for the agent and restart it. Keep it identical at enrol and run.' }
   };
@@ -748,8 +748,10 @@
     var box = el('div', undefined, 'whyid');
     box.id = identityNoteID(h);
     box.appendChild(el('p', w.why));
-    if (w.cmd) box.appendChild(copyLine(w.fix, w.cmd, 'Copy the sign-in command for ' + h.name));
-    else box.appendChild(el('div', w.fix, 'fix'));
+    // The fix is a sentence of its own, and the command keeps the short lead copyLine is built
+    // for: a whole sentence as the lead leaves Copy floating beside three wrapped lines.
+    box.appendChild(el('div', w.fix, 'fix'));
+    if (w.cmd) box.appendChild(copyLine('Run', w.cmd, 'Copy the sign-in command for ' + h.name));
     return box;
   }
   function fmtDate(iso) {
