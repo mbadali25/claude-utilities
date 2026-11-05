@@ -68,16 +68,33 @@ func HookCommand(exe string) string {
 	return quoteExe(exe) + " hook --tag " + hookTag
 }
 
-// quoteExe quotes an executable path for the shell the hook runs in. A path with a double quote
-// in it cannot be quoted safely either way, so it is left bare and the install reports the risk.
+// isWindowsPath reports a drive-letter or UNC path.
+func isWindowsPath(p string) bool {
+	if strings.HasPrefix(p, `\\`) {
+		return true
+	}
+	return len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') &&
+		(p[0] >= 'a' && p[0] <= 'z' || p[0] >= 'A' && p[0] <= 'Z')
+}
+
+// quoteExe quotes an executable path for the shell the hook runs in. Claude Code runs hook
+// commands through bash, which eats backslashes, so a Windows path is written with forward slashes
+// (Git Bash and Windows both accept them) inside double quotes. A path with a double quote in it
+// cannot be quoted safely either way, so it is left bare.
 func quoteExe(exe string) string {
 	if exe == "" || strings.ContainsRune(exe, '"') {
 		return exe
 	}
-	if strings.ContainsAny(exe, " \t") {
-		return `"` + exe + `"`
+	win := isWindowsPath(exe)
+	if win {
+		exe = strings.ReplaceAll(exe, `\`, "/")
 	}
-	return exe
+	if !win && !strings.ContainsAny(exe, " \t$`\\") {
+		return exe
+	}
+	// Inside double quotes bash still expands $ and backtick and treats backslash as an escape.
+	r := strings.NewReplacer(`\`, `\\`, "$", `\$`, "`", "\\`")
+	return `"` + r.Replace(exe) + `"`
 }
 
 // readSettings decodes settings.json into a generic map so every key this program does not know
