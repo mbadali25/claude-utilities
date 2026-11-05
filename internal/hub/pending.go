@@ -118,7 +118,7 @@ func (h *Hub) admitPending(c *conn) error {
 		// Without a nonce the fingerprint is host|os only, which any LAN device can predict.
 		return ErrEmptyNonce
 	}
-	fp := proto.Fingerprint(c.hello)
+	fp := c.fp // computed from the raw hello in ServeWS, matching the agent's own
 	// Hold the write lock across registration so Pending is always the first frame the agent
 	// reads, even if the owner clicks Allow immediately.
 	c.wmu.Lock()
@@ -169,11 +169,17 @@ func (h *Hub) admitPending(c *conn) error {
 // dropPending closes a pending connection that sent something after its hello.
 func (h *Hub) dropPending(c *conn) {
 	h.mu.Lock()
+	wasPending := c.state == statePending
 	if e := h.pending[c.fp]; e != nil && e.c == c {
 		delete(h.pending, c.fp)
 	}
 	c.state = stateClosed
 	h.mu.Unlock()
+	if !wasPending {
+		// Already closed (replaced, denied, expired or superseded): nothing unexpected to report.
+		c.close(websocket.StatusPolicyViolation, "closed")
+		return
+	}
 	h.log.Warn("pending connection dropped", "action", "drop", "fingerprint", c.fp, "host_name", c.hello.HostName,
 		"os", c.hello.OS, "source_ip", c.ip, "result", "unexpected message")
 	c.close(websocket.StatusPolicyViolation, "unexpected message")

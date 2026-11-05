@@ -37,6 +37,10 @@ func EnsureCert(dir string) (certFile, keyFile, fingerprint string, err error) {
 	certFile = filepath.Join(dir, certName)
 	keyFile = filepath.Join(dir, keyName)
 	if fp, ok := loadFingerprint(certFile, keyFile); ok {
+		// A key left loose by an older version or a manual copy is tightened (no-op semantics on Windows).
+		if cerr := os.Chmod(keyFile, 0o600); cerr != nil {
+			return "", "", "", fmt.Errorf("hub: restrict key file: %w", cerr)
+		}
 		return certFile, keyFile, fp, nil
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

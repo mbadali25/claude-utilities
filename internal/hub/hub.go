@@ -40,6 +40,8 @@ const (
 	writeTimeout  = 10 * time.Second
 	requestTimout = 30 * time.Second
 	maxFieldLen   = 64
+	// helloMaxSize bounds the first frame of an unauthenticated connection.
+	helloMaxSize = 16 << 10
 )
 
 var (
@@ -258,7 +260,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	ws.SetReadLimit(proto.MaxMessageSize)
+	ws.SetReadLimit(helloMaxSize) // raised after the hello is admitted
 	c := newConn(ws, h.ipOf(r))
 	defer close(c.done)
 	defer h.dropConn(c)
@@ -281,6 +283,8 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		_ = ws.Close(websocket.StatusPolicyViolation, "bad hello")
 		return
 	}
+	// The agent fingerprints its own raw hello, so compute ours before sanitising for display.
+	c.fp = proto.Fingerprint(hello)
 	hello = sanitizeHello(hello)
 	c.hello = hello
 
@@ -296,6 +300,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		h.reject(c, err)
 		return
 	}
+	ws.SetReadLimit(proto.MaxMessageSize)
 	h.readLoop(ctx, c)
 }
 
@@ -653,7 +658,9 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 		h.log.Warn("swap failed", "action", "swap", "host_id", hostID, "account", accountID, "result", "agent refused", "reason", res.Reason)
 		return fmt.Errorf("hub: agent refused swap: %s", logx.Redact(res.Reason))
 	}
-	h.reg.SwapAway(live.ID, hostID)
+	// No SwapAway on the old account: it would promote the previous holder to Active with a
+	// possibly rotated-out copy. The vault already holds this host's fresh block, so the host stays
+	// the recorded owner until another host swaps in or the host is lost.
 	h.reg.SwapIn(accountID, hostID)
 	h.mu.Lock()
 	ho.markReloadLocked()

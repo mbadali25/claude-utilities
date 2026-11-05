@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -62,6 +63,8 @@ func (h *Hub) load() error {
 	}
 	var f hostFile
 	if err := json.Unmarshal(data, &f); err != nil {
+		// Keep the unreadable file: the next mint rewrites tokensPath and would drop every enrolment.
+		_ = os.WriteFile(h.tokensPath+".corrupt", data, 0o600)
 		return fmt.Errorf("hub: parse hosts: %w", err)
 	}
 	for _, r := range f.Hosts {
@@ -80,6 +83,9 @@ func (h *Hub) saveLocked() error {
 	data, err := json.Marshal(f)
 	if err != nil {
 		return fmt.Errorf("hub: marshal hosts: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(h.tokensPath), 0o700); err != nil {
+		return fmt.Errorf("hub: hosts dir: %w", err)
 	}
 	return writePrivate(h.tokensPath, data)
 }

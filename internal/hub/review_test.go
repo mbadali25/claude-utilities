@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -183,7 +184,11 @@ func TestReconnectDuringSwapIsUnknownOutcome(t *testing.T) {
 func TestAllowPersistFailureKeepsEntryForRetry(t *testing.T) {
 	f := newFixture(t)
 	good := f.h.tokensPath
-	f.h.tokensPath = filepath.Join(filepath.Dir(good), "missing", "hosts.json")
+	blocker := filepath.Join(filepath.Dir(good), "blocker")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil { // a file where the directory must go
+		t.Fatal(err)
+	}
+	f.h.tokensPath = filepath.Join(blocker, "hosts.json")
 	_, fp := f.pend("", "box", "n1")
 	if _, err := f.h.Allow(fp); err == nil {
 		t.Fatal("Allow must fail when persistence fails")
@@ -191,7 +196,7 @@ func TestAllowPersistFailureKeepsEntryForRetry(t *testing.T) {
 	if n := len(f.h.Pending()); n != 1 {
 		t.Fatalf("entry lost: %d", n)
 	}
-	if err := os.MkdirAll(filepath.Dir(f.h.tokensPath), 0o700); err != nil {
+	if err := os.Remove(blocker); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.h.Allow(fp); err != nil {
@@ -328,5 +333,87 @@ func TestEnsureCertLeavesOnlyTheTwoFilesAndHostsFileLeavesNoTemp(t *testing.T) {
 	raw, _ := os.ReadFile(f.tokens)
 	if err := json.Unmarshal(raw, &hf); err != nil || len(hf.Hosts) != 1 {
 		t.Fatalf("hosts file: %v %s", err, raw)
+	}
+}
+
+func TestSwapAwayDoesNotPromotePreviousHolderOfOldAccount(t *testing.T) {
+	f := newFixture(t)
+	f.seedAccounts()
+	a, _, me := f.enrol("box")
+	_, _, other := f.enrol("box2")
+	f.reg.SwapIn("A", other)
+	f.reg.SwapIn("A", me) // me is Active, other holds a possibly stale copy
+	f.newScript("id-a", `{"tok":"A-live"}`).serve(a)
+	if err := f.h.Swap(context.Background(), me, "B"); err != nil {
+		t.Fatal(err)
+	}
+	if o := f.reg.OwnerOf("A"); o.HostID == other {
+		t.Fatalf("previous holder %s was promoted to owner of A", other)
+	}
+}
+
+func TestPendingFingerprintMatchesAgentForLongAndControlFields(t *testing.T) {
+	f := newFixture(t)
+	hello := proto.Hello{HostName: strings.Repeat("h", 100) + "\x07", OS: "linux", Nonce: "n1"}
+	a := f.dial("10.9.0.1", hello)
+	var p proto.Pending
+	if err := json.Unmarshal(a.recv(proto.TypePending).Body, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Fingerprint != proto.Fingerprint(hello) {
+		t.Fatalf("server fingerprint %q != agent %q", p.Fingerprint, proto.Fingerprint(hello))
+	}
+	if got := f.h.Pending(); len(got) != 1 || got[0].Fingerprint != p.Fingerprint || len([]rune(got[0].HostName)) > maxFieldLen {
+		t.Fatalf("pending view: %+v", got)
+	}
+}
+
+func TestOversizedUnauthenticatedHelloIsClosed(t *testing.T) {
+	f := newFixture(t)
+	a := f.dial("10.9.0.2", proto.Hello{HostName: strings.Repeat("h", helloMaxSize*2), OS: "linux", Nonce: "n"})
+	a.expectClosed("")
+	if len(f.h.Pending()) != 0 {
+		t.Fatal("oversized hello was queued")
+	}
+}
+
+func TestCorruptHostsFileIsKept(t *testing.T) {
+	f := newFixture(t)
+	if err := os.WriteFile(f.tokens, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.h = New(f.v, f.reg, f.tokens, f.h.log)
+	got, err := os.ReadFile(f.tokens + ".corrupt")
+	if err != nil || string(got) != "{not json" {
+		t.Fatalf("corrupt copy: %q %v", got, err)
+	}
+}
+
+func TestHostsFileDirectoryIsCreated(t *testing.T) {
+	f := newFixture(t)
+	f.h.tokensPath = filepath.Join(filepath.Dir(f.tokens), "sub", "hosts.json")
+	f.enrol("box")
+	if _, err := os.Stat(f.h.tokensPath); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureCertTightensLooseKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits")
+	}
+	dir := t.TempDir()
+	_, key, _, err := EnsureCert(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(key, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := EnsureCert(dir); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(key); st.Mode().Perm() != 0o600 {
+		t.Fatalf("key mode %v", st.Mode().Perm())
 	}
 }
