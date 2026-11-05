@@ -87,6 +87,9 @@ type Report struct {
 	ActiveIdentity string    `json:"activeIdentity"`
 	Sessions       []Session `json:"sessions"`
 	CredsPresent   bool      `json:"credsPresent"`
+	// SwapBlocked is true while an unfinished earlier swap cannot be settled, so every swap on
+	// this host is refused until an operator intervenes.
+	SwapBlocked bool `json:"swapBlocked,omitempty"`
 }
 
 type ExportRes struct {

@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -58,7 +59,27 @@ var (
 	ErrPinMismatch = errors.New("agent: server certificate does not match the pin")
 	// ErrNotEnrolled means the config holds no token.
 	ErrNotEnrolled = errors.New("agent: not enrolled (no token); run enrol first")
+	// ErrBadURL means the server URL is unparseable or carries credentials (user:pass@).
+	ErrBadURL = errors.New("agent: bad server URL")
+	// ErrRejected means the server closed the connection because the token is bad or revoked.
+	// Redialling cannot help and counts against the server's per-IP rate limit.
+	ErrRejected = errors.New("agent: server rejected the token (bad or revoked); enrol again")
 )
+
+// fatal reports errors that no redial can fix: they end Run.
+func fatal(err error) bool {
+	return errors.Is(err, ErrBadURL) || errors.Is(err, ErrInsecureURL) || errors.Is(err, ErrBadPin) ||
+		errors.Is(err, ErrPinMismatch) || errors.Is(err, ErrRejected)
+}
+
+// rejection maps a server close for a bad or revoked token to ErrRejected.
+func rejection(err error) error {
+	var ce websocket.CloseError
+	if errors.As(err, &ce) && ce.Code == websocket.StatusPolicyViolation && (ce.Reason == "bad token" || ce.Reason == "revoked") {
+		return ErrRejected
+	}
+	return err
+}
 
 // Config is the agent's persisted settings. Token is a secret: the type never prints it.
 type Config struct {
@@ -135,8 +156,8 @@ func normPin(p string) (string, bool) {
 // certificate whose SHA-256 digest equals pin: no name or chain check, no fallback.
 func dialPinned(ctx context.Context, serverURL, pin string) (*websocket.Conn, error) {
 	u, err := url.Parse(serverURL)
-	if err != nil || u.Host == "" {
-		return nil, errors.New("agent: bad server URL")
+	if err != nil || u.Host == "" || u.User != nil {
+		return nil, ErrBadURL
 	}
 	if u.Scheme != "https" && u.Scheme != "wss" {
 		return nil, ErrInsecureURL
@@ -184,12 +205,15 @@ type agent struct {
 	log *slog.Logger
 	mu  sync.Mutex // serialises swaps against recovery
 
+	blocked atomic.Bool // an unfinished swap could not be settled; reported to the server
+
 	hostName  string
 	heartbeat time.Duration
 	delay     func(attempt int) time.Duration
 	identity  func() string
 	scan      func(context.Context) ([]proto.Session, error)
 	readBack  func(path string) (json.RawMessage, error)
+	replace   func(path string, block json.RawMessage) (string, error)
 }
 
 func newAgent(c Config, log *slog.Logger) *agent {
@@ -198,6 +222,7 @@ func newAgent(c Config, log *slog.Logger) *agent {
 		cfg: c, log: log.With("component", "agent"), hostName: name, heartbeat: HeartbeatInterval,
 		delay: NextDelay, identity: func() string { return readIdentity(claudeJSONPath()) },
 		scan: sessions.Scan, readBack: credfile.ReadBlock,
+		replace: credfile.Replace,
 	}
 }
 
@@ -224,6 +249,10 @@ func Run(ctx context.Context, c Config) error {
 	if err := os.MkdirAll(c.StateDir, 0o700); err != nil {
 		return fmt.Errorf("agent: state dir: %w", err)
 	}
+	// MkdirAll leaves an existing directory's mode alone, so tighten it explicitly.
+	if err := credfile.RestrictDir(c.StateDir); err != nil {
+		return fmt.Errorf("agent: restrict state dir: %w", err)
+	}
 	return newAgent(c, logx.New(os.Stderr)).run(ctx)
 }
 
@@ -237,6 +266,10 @@ func (a *agent) run(ctx context.Context) error {
 		err := a.session(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if err = rejection(err); fatal(err) {
+			a.log.Error("agent stopping", "action", "reconnect", "result", "fatal", logx.Err(err))
+			return err
 		}
 		if time.Since(start) >= stableAfter {
 			attempt = 0
@@ -283,9 +316,6 @@ func (a *agent) session(ctx context.Context) error {
 	if err := s.send(sctx, proto.TypeHello, "", proto.Hello{Token: a.cfg.Token, HostName: a.hostName, OS: runtime.GOOS}); err != nil {
 		return err
 	}
-	if err := s.send(sctx, proto.TypeReport, "", a.report(sctx)); err != nil {
-		return err
-	}
 	a.log.Info("connected", "action", "connect", "result", "ok")
 
 	var wg sync.WaitGroup
@@ -312,19 +342,20 @@ func (a *agent) session(ctx context.Context) error {
 	}
 }
 
-// beat sends a report every heartbeat; the server treats any frame as proof of life.
+// beat sends a report at once, then every heartbeat; the server treats any frame as proof of
+// life. The first report runs here so a slow process scan never delays the read loop.
 func (a *agent) beat(ctx context.Context, s *sess) {
 	t := time.NewTicker(a.heartbeat)
 	defer t.Stop()
 	for {
+		if err := s.send(ctx, proto.TypeReport, "", a.report(ctx)); err != nil {
+			_ = s.ws.Close(websocket.StatusInternalError, "write failed")
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := s.send(ctx, proto.TypeReport, "", a.report(ctx)); err != nil {
-				_ = s.ws.Close(websocket.StatusInternalError, "write failed")
-				return
-			}
 		}
 	}
 }
@@ -356,7 +387,7 @@ func (a *agent) report(ctx context.Context) proto.Report {
 	if err != nil || sessions == nil {
 		sessions = []proto.Session{}
 	}
-	rep := proto.Report{Sessions: sessions}
+	rep := proto.Report{Sessions: sessions, SwapBlocked: a.blocked.Load()}
 	if _, err := credfile.ReadBlock(a.cfg.CredsPath); err == nil {
 		rep.CredsPresent = true
 		rep.ActiveIdentity = a.identity()
@@ -407,12 +438,12 @@ func (a *agent) applySwap(req proto.SwapReq) proto.SwapRes {
 	default:
 		return fail("credentials unreadable", err)
 	}
-	j := journal{State: journalSwap, PrevHash: hashBlock(prev)}
+	j := journal{State: journalSwap, PrevHash: hashBlock(prev), NewHash: hashBlock(req.Block)}
 	if err := writeJournal(a.cfg.StateDir, j); err != nil {
 		return fail("cannot write journal", err)
 	}
 
-	backup, err := credfile.Replace(path, req.Block)
+	backup, err := a.replace(path, req.Block)
 	if err != nil {
 		// Replace may have failed after the backup (rename), so settle through the journal.
 		if rerr := a.recoverJournal(); rerr != nil {
@@ -453,11 +484,30 @@ func sameBlock(a, b json.RawMessage) bool {
 	return bytes.Equal(ca.Bytes(), cb.Bytes())
 }
 
-// recoverJournal settles an unfinished swap. If the live block still hashes to the pre-swap
-// block nothing landed and the journal is dropped; otherwise the backup of the pre-swap block
-// is restored. With no usable backup the journal is kept and an error returned.
+// recoverJournal settles an unfinished swap and records whether it is still blocked. It only
+// ever rolls back, and only when the live block is the swap's incoming block:
+//   - live == pre-swap block: nothing landed (or Replace aborted); drop the journal.
+//   - live == incoming block: the swap landed; restore the pre-swap backup. With no usable
+//     backup the journal is kept and an error returned.
+//   - anything else: another writer (Claude Code refreshing its tokens) changed the file since;
+//     leave it alone and drop the journal.
+//
+// A journal that cannot be parsed is quarantined so it cannot block swaps for ever.
 func (a *agent) recoverJournal() error {
+	err := a.settleJournal()
+	a.blocked.Store(err != nil)
+	return err
+}
+
+func (a *agent) settleJournal() error {
 	j, err := readJournal(a.cfg.StateDir)
+	if errors.Is(err, errJournalCorrupt) {
+		if qerr := quarantineJournal(a.cfg.StateDir); qerr != nil {
+			return qerr
+		}
+		a.log.Warn("corrupt swap journal quarantined", "action", "recover", "result", "quarantined")
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -465,7 +515,12 @@ func (a *agent) recoverJournal() error {
 		return nil
 	}
 	path := a.cfg.CredsPath
-	if currentHash(path) != j.PrevHash {
+	cur := currentHash(path)
+	switch {
+	case cur == "":
+		return errors.New("agent: credentials unreadable during recovery")
+	case cur == j.PrevHash:
+	case j.NewHash != "" && cur == j.NewHash:
 		backup, ok := findBackup(path, j.BackupPath, j.PrevHash)
 		if !ok {
 			return errors.New("agent: interrupted swap and no matching backup")
@@ -474,6 +529,8 @@ func (a *agent) recoverJournal() error {
 			return fmt.Errorf("agent: restore: %w", err)
 		}
 		a.log.Warn("interrupted swap rolled back", "action", "recover", "result", "restored")
+	default:
+		a.log.Warn("credentials changed since swap began; left as found", "action", "recover", "result", "left-alone")
 	}
 	return clearJournal(a.cfg.StateDir)
 }

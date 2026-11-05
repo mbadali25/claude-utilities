@@ -394,9 +394,10 @@ func TestSwapRefusesExpiredRefreshToken(t *testing.T) {
 	}
 }
 
-func TestJournalFinishesOrRollsBackAfterCrash(t *testing.T) {
+func TestJournalRollsBackAfterCrash(t *testing.T) {
 	r := newRig(t, "https://x", strings.Repeat("0", 64))
 	orig := testBlock(origSecret, future())
+	nextB := testBlock(newSecret, future())
 	writeCreds(t, r.creds, orig)
 
 	// Crash before the swap landed: the file is untouched, the journal is just cleared.
@@ -414,10 +415,10 @@ func TestJournalFinishesOrRollsBackAfterCrash(t *testing.T) {
 	}
 
 	// Crash after the rename, before the journal learned the backup path.
-	if err := writeJournal(r.dir, journal{State: journalSwap, PrevHash: hashBlock(orig)}); err != nil {
+	if err := writeJournal(r.dir, journal{State: journalSwap, PrevHash: hashBlock(orig), NewHash: hashBlock(nextB)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := credfile.Replace(r.creds, testBlock(newSecret, future())); err != nil {
+	if _, err := credfile.Replace(r.creds, nextB); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.a.recoverJournal(); err != nil {
@@ -432,11 +433,11 @@ func TestJournalFinishesOrRollsBackAfterCrash(t *testing.T) {
 	}
 
 	// Crash with the backup path recorded.
-	backup, err := credfile.Replace(r.creds, testBlock(newSecret, future()))
+	backup, err := credfile.Replace(r.creds, nextB)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeJournal(r.dir, journal{State: journalSwap, PrevHash: hashBlock(orig), BackupPath: backup}); err != nil {
+	if err := writeJournal(r.dir, journal{State: journalSwap, PrevHash: hashBlock(orig), NewHash: hashBlock(nextB), BackupPath: backup}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.a.recoverJournal(); err != nil {
@@ -451,10 +452,10 @@ func TestJournalFinishesOrRollsBackAfterCrash(t *testing.T) {
 	}
 
 	// run() recovers before it dials: swap, leave a journal, start the agent.
-	if _, err := credfile.Replace(r.creds, testBlock(newSecret, future())); err != nil {
+	if _, err := credfile.Replace(r.creds, nextB); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeJournal(r.dir, journal{State: journalSwap, PrevHash: hashBlock(orig)}); err != nil {
+	if err := writeJournal(r.dir, journal{State: journalSwap, PrevHash: hashBlock(orig), NewHash: hashBlock(nextB)}); err != nil {
 		t.Fatal(err)
 	}
 	fs := newFakeServer(t, func(ctx context.Context, ws *websocket.Conn, _ int, _ proto.Hello) {
@@ -476,7 +477,7 @@ func TestJournalFinishesOrRollsBackAfterCrash(t *testing.T) {
 func TestJournalWithNoMatchingBackupKeepsJournal(t *testing.T) {
 	r := newRig(t, "https://x", strings.Repeat("0", 64))
 	writeCreds(t, r.creds, testBlock(newSecret, future()))
-	if err := writeJournal(r.dir, journal{State: journalSwap, PrevHash: hashBlock(testBlock(origSecret, future()))}); err != nil {
+	if err := writeJournal(r.dir, journal{State: journalSwap, PrevHash: hashBlock(testBlock(origSecret, future())), NewHash: currentHash(r.creds)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.a.recoverJournal(); err == nil {

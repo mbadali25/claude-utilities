@@ -22,21 +22,32 @@ const (
 )
 
 // journal records an unfinished swap. It holds no secret: PrevHash is a digest of the block the
-// swap replaces, BackupPath names the credfile backup once Replace has written one.
+// swap replaces, NewHash a digest of the incoming block, BackupPath names the credfile backup
+// once Replace has written one. Recovery only ever rolls back (it never finishes a swap), and
+// only while the live block still equals NewHash: any other live block was written by someone
+// else (Claude Code rotates refresh tokens) and must not be overwritten with an older backup.
 type journal struct {
 	State      string `json:"state"`
 	BackupPath string `json:"backupPath,omitempty"`
 	PrevHash   string `json:"prevHash"`
+	NewHash    string `json:"newHash,omitempty"`
 }
+
+// errJournalCorrupt marks a journal file that cannot be parsed.
+var errJournalCorrupt = errors.New("agent: journal unreadable")
 
 func journalPath(stateDir string) string { return filepath.Join(stateDir, journalName) }
 
-// hashBlock digests a raw block; nil (no block) hashes as the JSON literal null, which is how
-// credfile stores an absent block in a backup.
+// hashBlock digests a raw block, ignoring whitespace; nil (no block) hashes as the JSON literal
+// null, which is how credfile stores an absent block in a backup.
 func hashBlock(b json.RawMessage) string {
 	t := bytes.TrimSpace(b)
 	if len(t) == 0 {
 		t = []byte(nullBlockHash)
+	}
+	var c bytes.Buffer
+	if json.Compact(&c, t) == nil {
+		t = c.Bytes()
 	}
 	sum := sha256.Sum256(t)
 	return hex.EncodeToString(sum[:])
@@ -65,9 +76,18 @@ func readJournal(stateDir string) (*journal, error) {
 	}
 	var j journal
 	if err := json.Unmarshal(data, &j); err != nil || j.State != journalSwap || j.PrevHash == "" {
-		return nil, errors.New("agent: journal unreadable")
+		return nil, errJournalCorrupt
 	}
 	return &j, nil
+}
+
+// quarantineJournal moves an unparseable journal aside so it cannot block swaps for ever.
+func quarantineJournal(stateDir string) error {
+	dst := journalPath(stateDir) + ".corrupt"
+	if err := os.Rename(journalPath(stateDir), dst); err != nil {
+		return fmt.Errorf("agent: quarantine journal: %w", err)
+	}
+	return nil
 }
 
 func writeJournal(stateDir string, j journal) error {

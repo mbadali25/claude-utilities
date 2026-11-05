@@ -14,12 +14,17 @@ import (
 
 	"claude-utilities/internal/agent"
 	"claude-utilities/internal/install"
+	"claude-utilities/internal/logx"
 )
 
 const usage = `usage: agent <command>
-  enrol   --server URL --pin SHA256HEX [--code CODE]   register this host
-  run                                                  connect and serve the server
-  install                                              start the agent at login`
+  enrol   --server URL --pin SHA256HEX   register this host
+          (pre-approved code: set CLAUDESWAP_ENROL_CODE, not a flag)
+  run                                    connect and serve the server
+  install                                start the agent at login`
+
+// codeEnv names the environment variable holding the pre-approved enrolment code.
+const codeEnv = "CLAUDESWAP_ENROL_CODE"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -51,7 +56,6 @@ func enrolCmd(ctx context.Context, args []string, out, errOut io.Writer) int {
 	fs.SetOutput(errOut)
 	server := fs.String("server", "", "server URL (https)")
 	pin := fs.String("pin", "", "server certificate SHA-256 fingerprint (hex)")
-	code := fs.String("code", "", "pre-approved enrolment code")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -59,8 +63,10 @@ func enrolCmd(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "enrol: --server and --pin are required")
 		return 1
 	}
-	if _, err := agent.Enrol(ctx, *server, *pin, "", *code, out); err != nil {
-		fmt.Fprintln(errOut, "enrol:", err)
+	// The pre-approved code is a bearer secret: read it from the environment, never argv.
+	code := os.Getenv(codeEnv)
+	if _, err := agent.Enrol(ctx, *server, *pin, "", code, out); err != nil {
+		fmt.Fprintln(errOut, "enrol:", logx.Redact(err.Error()))
 		if errors.Is(err, agent.ErrDenied) {
 			return 2
 		}
@@ -78,7 +84,7 @@ func runCmd(ctx context.Context, errOut io.Writer) int {
 		}
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintln(errOut, "run:", err)
+		fmt.Fprintln(errOut, "run:", logx.Redact(err.Error()))
 		return 1
 	}
 	return 0
@@ -93,7 +99,7 @@ func installCmd(errOut io.Writer) int {
 		}
 	}
 	if err != nil {
-		fmt.Fprintln(errOut, "install:", err)
+		fmt.Fprintln(errOut, "install:", logx.Redact(err.Error()))
 		return 1
 	}
 	return 0

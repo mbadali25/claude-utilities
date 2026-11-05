@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -84,12 +85,13 @@ type frame struct {
 
 func enrol(ctx context.Context, o enrolOpts, serverURL, pin, code string, out io.Writer) (Config, error) {
 	log := o.Log.With("component", "enrol")
-	if err := checkDenied(o); err != nil {
-		return Config{}, err
-	}
 	normPinned, ok := normPin(pin)
 	if !ok {
 		return Config{}, ErrBadPin
+	}
+	target := targetKey(serverURL, normPinned)
+	if err := checkDenied(o, target); err != nil {
+		return Config{}, err
 	}
 	nonce, err := randHex(16)
 	if err != nil {
@@ -179,7 +181,7 @@ func enrol(ctx context.Context, o enrolOpts, serverURL, pin, code string, out io
 				if err := json.Unmarshal(f.env.Body, &d); err != nil {
 					return Config{}, errors.New("agent: bad denial message")
 				}
-				return Config{}, denied(o, log, out, d)
+				return Config{}, denied(o, log, out, d, target)
 			default:
 				return Config{}, fmt.Errorf("agent: unexpected %q message during enrolment", logx.Redact(f.env.Type))
 			}
@@ -203,12 +205,21 @@ func printable(s string) string {
 
 type deniedFile struct {
 	Until time.Time `json:"until"`
+	// Target is a digest of the server URL and pin the denial came from, so a denial by one
+	// server never blocks enrolment with another.
+	Target string `json:"target"`
+}
+
+// targetKey digests server URL + pin; the URL itself is not stored.
+func targetKey(serverURL, pin string) string {
+	sum := sha256.Sum256([]byte(strings.TrimRight(serverURL, "/") + "\x00" + pin))
+	return hex.EncodeToString(sum[:])
 }
 
 func deniedPath(o enrolOpts) string { return filepath.Join(o.StateDir, deniedFileName) }
 
 // denied prints the reason, records when a retry is allowed and returns ErrDenied.
-func denied(o enrolOpts, log *slog.Logger, out io.Writer, d proto.Denied) error {
+func denied(o enrolOpts, log *slog.Logger, out io.Writer, d proto.Denied, target string) error {
 	reason := printable(d.Reason)
 	if reason == "" {
 		reason = "no reason given"
@@ -218,7 +229,8 @@ func denied(o enrolOpts, log *slog.Logger, out io.Writer, d proto.Denied) error 
 	if d.RetryAfter > 0 {
 		wait := min(d.RetryAfter, maxRetryAfter)
 		if err := os.MkdirAll(o.StateDir, 0o700); err == nil {
-			if data, merr := json.Marshal(deniedFile{Until: o.Now().Add(wait)}); merr == nil {
+			_ = credfile.RestrictDir(o.StateDir)
+			if data, merr := json.Marshal(deniedFile{Until: o.Now().Add(wait), Target: target}); merr == nil {
 				if werr := writePrivate(deniedPath(o), data); werr != nil {
 					log.Warn("could not record retry-after", "action", "enrol", "result", "failed", logx.Err(werr))
 				}
@@ -230,14 +242,14 @@ func denied(o enrolOpts, log *slog.Logger, out io.Writer, d proto.Denied) error 
 }
 
 // checkDenied refuses to dial while a recorded RetryAfter is still in the future.
-func checkDenied(o enrolOpts) error {
+func checkDenied(o enrolOpts, target string) error {
 	data, err := os.ReadFile(deniedPath(o))
 	if err != nil {
 		return nil
 	}
 	var df deniedFile
-	if json.Unmarshal(data, &df) != nil {
-		return nil
+	if json.Unmarshal(data, &df) != nil || df.Target != target {
+		return nil // unreadable, or another server's denial
 	}
 	if now := o.Now(); now.Before(df.Until) {
 		return fmt.Errorf("%w: retry in %s", ErrDenied, df.Until.Sub(now).Round(time.Second))
