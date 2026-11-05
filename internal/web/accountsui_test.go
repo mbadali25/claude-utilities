@@ -73,8 +73,131 @@ func TestClosedCardShowsTheSevenDayWindowAndTheFreshnessChip(t *testing.T) {
 		`top.appendChild(statusChip(a))`,
 		`ms.appendChild(meter('5-hour window', a.fiveHour))`,
 		`body.appendChild(nameRow(c, a))`,
-		`foot.appendChild(refreshBtn(a))`,
+		`acts.appendChild(refreshBtn(a))`,
 		`.card.acct:not(.open) .acct-brief .reset { display:none; }`,
+	} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("page is missing %q", want)
+		}
+	}
+}
+
+// Remove is a destructive control, so it lives in the card's body: an operator scans ten collapsed
+// faces and must not be able to hit it from one.
+func TestRemoveButtonIsBuiltIntoTheCardBodyNotItsCollapsedFace(t *testing.T) {
+	r := newRig(t)
+	r.seed("a1", "one")
+	p := page(r, r.login())
+	for _, want := range []string{
+		`acts.appendChild(removeBtn(a))`, `foot.appendChild(acts)`, `body.appendChild(foot)`,
+		`b.id = 'acct-rm-' + a.id;`,
+		`b.setAttribute('aria-label', 'Remove the account ' + a.label)`,
+		`.acct-acts { display:flex;`,
+	} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("page is missing %q", want)
+		}
+	}
+	// The button must not be appended to the card's header or its always-visible brief.
+	for _, bad := range []string{
+		`top.appendChild(removeBtn(a))`, `brief.appendChild(removeBtn(a))`, `c.appendChild(removeBtn(a))`,
+	} {
+		if strings.Contains(p, bad) {
+			t.Fatalf("Remove is on the collapsed face: %q", bad)
+		}
+	}
+}
+
+func TestRemoveUsesTheNativeDialogAndADeliberateConfirm(t *testing.T) {
+	r := newRig(t)
+	r.seed("a1", "one")
+	p := page(r, r.login())
+	for _, want := range []string{
+		// A native <dialog>, like every other modal on the page.
+		`<dialog class="modal" id="acct-rm-dialog" aria-labelledby="acct-rm-h" aria-describedby="acct-rm-body">`,
+		`id="acct-rm-body"`, `id="acct-rm-note"`, `id="acct-rm-msg" role="alert"`,
+		`id="acct-rm-go"`, `data-close="acct-rm-dialog"`,
+		// The dialog names the account rather than asking about "this item".
+		`'Remove the stored account "' + a.label + '" from claude-swap?'`,
+		// The confirm is its own click, and only it posts.
+		`$('#acct-rm-go').addEventListener('click', doRemove);`,
+		`call('POST', '/api/accounts/remove', { account: id, force: false })`,
+		// Opening and closing go through the shared modal helpers, so focus returns to the opener.
+		`openModal('#acct-rm-dialog');`,
+		`$('#acct-rm-dialog').addEventListener('close', function () { removing = null; });`,
+	} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("page is missing %q", want)
+		}
+	}
+	// No window.confirm anywhere, and no inline handler: the CSP allows only the nonced script.
+	if strings.Contains(p, "window.confirm") || strings.Contains(p, " confirm(") {
+		t.Fatal("the removal must not use window.confirm")
+	}
+	if strings.Contains(p, "onclick=") {
+		t.Fatal("no inline handlers: the CSP is script-src 'nonce-...' only")
+	}
+}
+
+// The 409 is the only refusal with a fact behind it. The UI says which host and what to do first,
+// and offers no way past it: a second "Remove anyway" button beside a destructive action is how an
+// operator deletes the only stored copy of a login a host is still running.
+func TestHeldLiveRefusalNamesTheHostAndOffersNoForce(t *testing.T) {
+	r := newRig(t)
+	r.seed("a1", "one")
+	p := page(r, r.login())
+	for _, want := range []string{
+		`if (e.status === 409 && e.data && e.data.heldBy) {`,
+		`'Held by ' + e.data.heldBy + ', swap that host to another account first.'`,
+		// The status and the body ride along on the error, or the host name never reaches here.
+		`err.status = r.status; err.data = j;`,
+		// A spent confirm must not keep the focus: a disabled button drops it to the body.
+		`$('#acct-rm-cancel').focus();`,
+	} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("page is missing %q", want)
+		}
+	}
+	if strings.Contains(p, "force: true") || strings.Contains(p, "Remove anyway") {
+		t.Fatal("the UI must not offer a force path")
+	}
+}
+
+// Feedback goes into the live region that was already in the page's shell. A region created in the
+// same pass as its text is not reliably announced, and the removed account's card is gone.
+func TestRemovalFeedbackUsesTheExistingLiveRegion(t *testing.T) {
+	r := newRig(t)
+	r.seed("a1", "one")
+	p := page(r, r.login())
+	if !strings.Contains(p, `sayAcc('Removed the account ' + label + '.')`) {
+		t.Fatal("a successful removal must say so in the panel's live region")
+	}
+	if !strings.Contains(p, `<span class="say" id="acc-refresh-status" role="status" aria-atomic="true">`) {
+		t.Fatal("the live region must be the one already in the shell")
+	}
+	// The error path writes into the dialog's own role="alert" line, not into the card subtree.
+	if !strings.Contains(p, `msg.textContent = e.message;`) {
+		t.Fatal("a failed removal must report into the dialog")
+	}
+	// A busy confirm says so in words, as every other busy control on the page does.
+	if !strings.Contains(p, `setBusy(go, true, 'Remove account', 'Removing...', null)`) {
+		t.Fatal("the confirm must show a busy state")
+	}
+	// The dialog hands focus back to the button that opened it, and that button was on the card
+	// that has just gone. Without this, focus lands on the body.
+	if !strings.Contains(p, `$('#acc-expand-all').focus();`) {
+		t.Fatal("focus must land on a surviving control after the card is removed")
+	}
+}
+
+// The poll must not rebuild the cards while the dialog is open: it would replace the button the
+// dialog returns focus to.
+func TestAutomaticPollDefersToAnOpenRemoveDialog(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+	for _, want := range []string{
+		`if (removing && $('#acct-rm-dialog').open) return;`,
+		`!confirming && !removing && !ctlWorking()`,
 	} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("page is missing %q", want)

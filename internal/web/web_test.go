@@ -49,6 +49,10 @@ type fakeHub struct {
 	revoked    []string
 	importFn   func(host, label string) (vault.Account, error)
 	relabelFn  func(id, label string) error
+	// removeCalls records every removal the handler asked for, forced flag included, so a test can
+	// prove a refused request never reached the hub at all.
+	removeCalls [][2]any
+	removeFn    func(id string, force bool) error
 
 	addFn    func(host, label string) (string, error)
 	statusFn func(id string) (hub.AddView, error)
@@ -122,6 +126,20 @@ func (f *fakeHub) Import(_ context.Context, host, label string) (vault.Account, 
 	return f.importFn(host, label)
 }
 func (f *fakeHub) Relabel(id, label string) error { return f.relabelFn(id, label) }
+
+func (f *fakeHub) RemoveAccount(id string, force bool) error {
+	f.mu.Lock()
+	f.removeCalls = append(f.removeCalls, [2]any{id, force})
+	fn := f.removeFn
+	f.mu.Unlock()
+	return fn(id, force)
+}
+
+func (f *fakeHub) removes() [][2]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][2]any(nil), f.removeCalls...)
+}
 func (f *fakeHub) Allow(fp string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -157,6 +175,10 @@ func (f *fakeHub) denyN() int  { f.mu.Lock(); defer f.mu.Unlock(); return len(f.
 type fakeUsage map[string]usage.Usage
 
 func (u fakeUsage) Last(id string) (usage.Usage, bool) { x, ok := u[id]; return x, ok }
+
+// Forget stands in for usage.Poller.Forget: it drops the account's entry, which is exactly what a
+// test can then assert on - the entry is gone after a successful removal and survives a refused one.
+func (u fakeUsage) Forget(id string) { delete(u, id) }
 
 // fakePW stands in for *adminpw.Store so the web tests do not pay for an argon2id derivation on
 // every login. adminpw's own tests cover hashing, persistence and the env bootstrap.
@@ -212,6 +234,15 @@ func newRig(t *testing.T) *rig {
 	r := &rig{t: t, fh: &fakeHub{}, v: v, usage: fakeUsage{}, pw: &fakePW{pw: adminPW}, now: fixedNow}
 	r.fh.relabelFn = func(id, label string) error { // mirrors hub.Relabel over the real vault
 		err := v.Relabel(id, label)
+		if errors.Is(err, vault.ErrNotFound) {
+			return hub.ErrUnknownAccount
+		}
+		return err
+	}
+	// Mirrors hub.RemoveAccount over the real vault, minus the held-live check, which needs hosts
+	// the fake hub does not model. Tests that want a refusal set removeFn themselves.
+	r.fh.removeFn = func(id string, _ bool) error {
+		err := v.Delete(id)
 		if errors.Is(err, vault.ErrNotFound) {
 			return hub.ErrUnknownAccount
 		}
@@ -1257,12 +1288,12 @@ func TestUIHasAccountMenuHoldingTheSettingsActions(t *testing.T) {
 			t.Errorf("index.html still carries the old bottom-of-page section %q", gone)
 		}
 	}
-	if n := strings.Count(p, "<dialog"); n != 5 {
-		t.Errorf("page has %d dialogs, want password, add-account, session-control confirm, restart and fix-name", n)
+	if n := strings.Count(p, "<dialog"); n != 6 {
+		t.Errorf("page has %d dialogs, want password, add-account, remove-account, session-control confirm, restart and fix-name", n)
 	}
 	// A <dialog> must never carry hidden: the page's [hidden]{display:none!important} would beat
 	// showModal() and the dialog could not open at all.
-	for _, id := range []string{"add-dialog", "pw-dialog", "ctl-confirm", "ctl-restart", "ctl-name"} {
+	for _, id := range []string{"add-dialog", "pw-dialog", "acct-rm-dialog", "ctl-confirm", "ctl-restart", "ctl-name"} {
 		if strings.Contains(element(t, p, `id="`+id+`"`, ">"), "hidden") {
 			t.Errorf("%s carries hidden, so showModal() cannot show it", id)
 		}

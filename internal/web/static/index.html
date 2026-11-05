@@ -103,6 +103,10 @@
   .btn.sm { min-height:var(--h-ctl-sm); padding:0 var(--s5); font-size:var(--fs2); }
   .btn.ghost { border-color:transparent; background:transparent; color:var(--mut); }
   .btn.ghost:hover:not(:disabled) { color:var(--fg); border-color:var(--line-strong); }
+  /* ghost comes after danger, so a borderless destructive button needs both named to keep its
+     colour; on hover the border appears in the same colour rather than going neutral. */
+  .btn.ghost.danger { color:var(--bad); }
+  .btn.ghost.danger:hover:not(:disabled) { color:var(--bad); border-color:var(--bad); }
 
   input, select { min-height:var(--h-ctl); padding:0 var(--s5); background:var(--surface); border:var(--bw) solid var(--line-strong); border-radius:var(--r-ctl); max-width:100%; }
   /* 16px is the one size that is not a token: below it iOS zooms the page on focus. */
@@ -252,6 +256,9 @@
   .holder strong { color:var(--fg); font-weight:650; }
   /* The foot of an open card: when it was last polled, and the button that polls it now. */
   .acct-foot { display:flex; align-items:center; justify-content:space-between; gap:var(--s4); flex-wrap:wrap; font-size:var(--fs2); color:var(--mut); border-top:var(--bw) solid var(--line); padding-top:var(--s5); }
+  /* The foot's two buttons sit in one group, so they share the card's right edge instead of
+     spreading to the two ends of the row - and they wrap together when the card is narrow. */
+  .acct-acts { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; }
 
   /* --- Accounts tab: collapsed cards and refresh ------------------------------------------
      A card is closed by default and opens on its own header. The header is a real button, so
@@ -809,6 +816,34 @@
   </div>
 </dialog>
 
+<!-- Removing a stored account. A native <dialog> like the others: Esc closes it, Tab stays inside
+     and focus returns to the Remove button that opened it. It names the account and says what the
+     removal does and does not do; nothing happens until Remove is clicked here.
+
+     There is deliberately no "Remove anyway". When an online host is signed in as the account the
+     server answers 409 and this dialog says which host and what to do first. Forcing past it would
+     delete the only stored copy of a login that host is still running, and this server cannot
+     reach into that host to put it back - so the UI has no way to show the operator what they
+     would be accepting. The wire keeps force for a recovery case where the hub's view of the host
+     is wrong; docs/runbooks/claude-swap-e2e.md says how to use it. -->
+<dialog class="modal" id="acct-rm-dialog" aria-labelledby="acct-rm-h" aria-describedby="acct-rm-body">
+  <div class="modal-head">
+    <h2 id="acct-rm-h">Remove account</h2>
+    <button type="button" class="btn sm ghost x" data-close="acct-rm-dialog" aria-label="Close without removing anything">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p id="acct-rm-body"></p>
+    <p class="mut" id="acct-rm-note"></p>
+    <p class="msg" id="acct-rm-msg" role="alert"></p>
+    <div class="modal-foot">
+      <button type="button" class="btn" id="acct-rm-cancel" data-close="acct-rm-dialog">Cancel</button>
+      <button type="button" class="btn danger" id="acct-rm-go"><span class="txt">Remove account</span><span class="spin" aria-hidden="true" hidden></span></button>
+    </div>
+  </div>
+</dialog>
+
 <!-- Session control's two dialogs. Both are native <dialog>, so Esc closes them, Tab stays inside
      and focus returns to the control that opened them. -->
 <dialog class="modal" id="ctl-confirm" aria-labelledby="ctl-confirm-h" aria-describedby="ctl-confirm-body">
@@ -993,7 +1028,13 @@
       return r.text().then(function (t) {
         var j = null; try { j = t ? JSON.parse(t) : null; } catch (e) {}
         if (r.status === 401) { location.reload(); }
-        if (!r.ok) { throw new Error((j && j.error) || ('request failed (' + r.status + ')')); }
+        if (!r.ok) {
+          // The status and the parsed body ride along: a refusal that carries a fact the caller
+          // has to show (which host holds an account) would otherwise be flattened to a sentence.
+          var err = new Error((j && j.error) || ('request failed (' + r.status + ')'));
+          err.status = r.status; err.data = j;
+          throw err;
+        }
         return j;
       });
     });
@@ -1180,6 +1221,8 @@
   function changed(key, data) { var s = JSON.stringify(data); if (sig[key] === s) return false; sig[key] = s; return true; }
 
   var accountsCache = [], hostsCache = [], pendingCount = 0, editing = null, confirming = null;
+  // The account whose Remove dialog is open, so the 30s poll does not rebuild the card under it.
+  var removing = null;
   // Which account cards are mid-refresh, and the one line each card has to say about the last one.
   var refreshing = {}, refreshAll = false, notes = {};
   var filter = { mode: pref('filter', 'all'), q: '' };
@@ -1293,6 +1336,73 @@
     return b;
   }
 
+  // One account's Remove. It lives in the card's BODY, so it is reachable only from an expanded
+  // card: the collapsed face is what an operator scans ten of, and a destructive control does not
+  // belong on a face you scan. A ghost button, not a filled one - the red fill belongs to the one
+  // confirm inside the dialog, and this card has no other action worth shouting over.
+  function removeBtn(a) {
+    var b = el('button', 'Remove', 'btn sm ghost danger acct-rm'); b.type = 'button';
+    b.id = 'acct-rm-' + a.id;
+    b.setAttribute('aria-label', 'Remove the account ' + a.label);
+    b.addEventListener('click', function () { askRemove(a); });
+    return b;
+  }
+
+  // The confirm. It names the account, says plainly that nothing is sent to any host, and removes
+  // nothing until the dialog's own button is clicked. No window.confirm: it cannot say this much,
+  // and it cannot be read by the page's own live region afterwards.
+  function askRemove(a) {
+    removing = a.id;
+    $('#acct-rm-body').textContent = 'Remove the stored account "' + a.label + '" from claude-swap?';
+    $('#acct-rm-note').textContent = 'Nothing is sent to any host. A host already signed in as this ' +
+      'account keeps running that login, with no stored copy left to swap it back. The vault file it ' +
+      'was in is kept beside the new one as vault.bin.bak.';
+    $('#acct-rm-msg').textContent = '';
+    openModal('#acct-rm-dialog');
+    var go = $('#acct-rm-go');
+    setBusy(go, false, 'Remove account', 'Removing...', null);
+    go.focus();
+  }
+
+  function doRemove() {
+    var id = removing, go = $('#acct-rm-go'), msg = $('#acct-rm-msg');
+    if (!id) return;
+    var a = accountsCache.filter(function (x) { return x.id === id; })[0];
+    var label = a ? a.label : id;
+    msg.textContent = '';
+    setBusy(go, true, 'Remove account', 'Removing...', null);
+    call('POST', '/api/accounts/remove', { account: id, force: false })
+      .then(function () {
+        removing = null;
+        delete notes[id];
+        $('#acct-rm-dialog').close();
+        // The panel's own live region, which was already in the page: a region created in the same
+        // pass as its text is not reliably announced, and this card is about to be removed anyway.
+        sayAcc('Removed the account ' + label + '.');
+        return loadAccounts().catch(function () {}).then(function () {
+          // The dialog returns focus to the button that opened it, and that button was on the card
+          // that has just gone - so focus would land on the body. Put it on the panel's first
+          // control instead, which is where the list the operator was working in starts.
+          $('#acc-expand-all').focus();
+        });
+      })
+      .catch(function (e) {
+        setBusy(go, false, 'Remove account', 'Removing...', null);
+        // 409 is the one refusal with a fact behind it: an online host is signed in as this
+        // account. Say which host and what to do first, and offer nothing else - see the dialog's
+        // comment on why there is no "Remove anyway" here.
+        if (e.status === 409 && e.data && e.data.heldBy) {
+          msg.textContent = 'Held by ' + e.data.heldBy + ', swap that host to another account first.';
+          // There is nothing left to do here, so the confirm is spent and the focus moves to the
+          // one control that still works: a disabled button holding the focus drops it to the body.
+          go.disabled = true;
+          $('#acct-rm-cancel').focus();
+          return;
+        }
+        msg.textContent = e.message;
+      });
+  }
+
   function accountCard(a) {
     var open = isOpen(a.id), bodyID = 'acct-body-' + a.id;
     var c = el('article', undefined, 'card acct s-' + level(a) + (open ? ' open' : ''));
@@ -1335,7 +1445,10 @@
     body.appendChild(held);
     var foot = el('div', undefined, 'acct-foot');
     foot.appendChild(el('span', a.ageSeconds == null ? 'Never polled' : 'Polled ' + ago(a.ageSeconds)));
-    foot.appendChild(refreshBtn(a));
+    var acts = el('div', undefined, 'acct-acts');
+    acts.appendChild(refreshBtn(a));
+    acts.appendChild(removeBtn(a));
+    foot.appendChild(acts);
     body.appendChild(foot);
     c.appendChild(body);
     return c;
@@ -1513,6 +1626,9 @@
     var narrowed = filter.mode !== 'all' || filter.q;
     $('#acc-count').textContent = list.length && narrowed ? 'Showing ' + list.filter(matches).length + ' of ' + list.length : '';
     if (editing && $('#accounts .rename')) return; // keep an open rename
+    // Keep an open Remove dialog too: rebuilding the cards would replace the button it has to
+    // return focus to, and the dialog names an account the operator is still deciding about.
+    if (removing && $('#acct-rm-dialog').open) return;
     if (!force && !changed('acc', [list, filter, notes]) && !$('#accounts .empty')) return;
     sig.acc = JSON.stringify([list, filter, notes]);
     var box = $('#accounts');
@@ -2328,6 +2444,10 @@
 
   $('#acc-expand-all').addEventListener('click', function () { setAllOpen(true); });
   $('#acc-collapse-all').addEventListener('click', function () { setAllOpen(false); });
+  // The Remove dialog's own button is the deliberate click; closing the dialog any other way
+  // (Cancel, the x, Esc, the backdrop) removes nothing and lets the poll resume.
+  $('#acct-rm-go').addEventListener('click', doRemove);
+  $('#acct-rm-dialog').addEventListener('close', function () { removing = null; });
   $('#acc-refresh-all').addEventListener('click', function () { refreshUsage(''); });
 
   $('#acc-q').addEventListener('input', function (ev) { filter.q = ev.target.value.trim(); renderAccounts(true); });
@@ -2803,7 +2923,7 @@
   // Never discard an open rename, an open swap confirm, an in-flight ask or an open ask dialog,
   // and never re-render the cards from under a refresh the operator is watching.
   setInterval(function () {
-    if (!editing && !confirming && !ctlWorking() && !ctlDialogOpen() && !refreshBusy()) refresh();
+    if (!editing && !confirming && !removing && !ctlWorking() && !ctlDialogOpen() && !refreshBusy()) refresh();
   }, 30000);
 })();
 </script>

@@ -65,6 +65,8 @@ type hubAPI interface {
 	Revoke(hostID string) error
 	Import(ctx context.Context, hostID, label string) (vault.Account, error)
 	Relabel(accountID, label string) error
+	// RemoveAccount deletes a stored account. It contacts no agent: see internal/hub.
+	RemoveAccount(accountID string, force bool) error
 	AddAccount(ctx context.Context, hostID, label string) (string, error)
 	AddStatus(id string) (hub.AddView, error)
 	AddCode(id, code string) error
@@ -74,11 +76,13 @@ type hubAPI interface {
 	Command(ctx context.Context, req hub.CommandRequest) (hub.CommandView, error)
 }
 
-// usageAPI is the part of *usage.Poller the web layer uses: the last answer for the page, and an
-// on-demand poll for the Refresh buttons (usagerefresh.go).
+// usageAPI is the part of *usage.Poller the web layer uses: the last answer for the page, an
+// on-demand poll for the Refresh buttons (usagerefresh.go), and dropping one account's state when
+// it is removed (usage.Forgetter, removeaccount.go).
 type usageAPI interface {
 	Last(accountID string) (usage.Usage, bool)
 	RefreshNow(ctx context.Context, ids []string) []usage.RefreshResult
+	usage.Forgetter
 }
 
 // PasswordAPI is the part of *adminpw.Store the web layer uses: authenticate a submitted
@@ -147,6 +151,8 @@ type server struct {
 	failures map[string][]time.Time // per source IP
 	// commandHits rate limits POST /api/sessions/command per source IP (control.go).
 	commandHits map[string][]time.Time
+	// removeHits rate limits POST /api/accounts/remove per source address (removeaccount.go).
+	removeHits map[string][]time.Time
 	// refreshHits rate limits POST /api/usage/refresh across every session (usagerefresh.go).
 	refreshHits []time.Time
 	// addTunnelHits rate limits POST /api/tunnels across every session (tunnels.go).
@@ -155,7 +161,8 @@ type server struct {
 
 func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, tn tunnelAPI, now func() time.Time) http.Handler {
 	s := &server{hub: h, vault: v, usage: u, pw: pw, tunnel: tn, now: now, sessions: map[string]sess{},
-		failures: map[string][]time.Time{}, commandHits: map[string][]time.Time{}}
+		failures: map[string][]time.Time{}, commandHits: map[string][]time.Time{},
+		removeHits: map[string][]time.Time{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
 	mux.HandleFunc("GET /favicon.svg", icon("image/svg+xml", faviconSVG))
@@ -173,6 +180,7 @@ func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, tn tunnelA
 	mux.HandleFunc("POST /api/hosts/{id}/revoke", s.authPost(s.revoke))
 	mux.HandleFunc("POST /api/import", s.authPost(s.importLogin))
 	mux.HandleFunc("POST /api/accounts/{id}/label", s.authPost(s.relabel))
+	mux.HandleFunc("POST /api/accounts/remove", s.authPost(s.removeAccount))
 	mux.HandleFunc("POST /api/accounts/add", s.authPost(s.addAccount))
 	mux.HandleFunc("GET /api/accounts/add/{id}", s.auth(s.addStatus))
 	mux.HandleFunc("POST /api/accounts/add/{id}/code", s.authPost(s.addCode))
