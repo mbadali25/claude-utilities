@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"claude-utilities/internal/hub"
 	"claude-utilities/internal/proto"
 	"claude-utilities/internal/tunnel"
+	"claude-utilities/internal/usage"
 	"claude-utilities/internal/vault"
 )
 
@@ -71,6 +73,53 @@ func e2eSessions(n int, stale bool) []hub.SessionView {
 	return out
 }
 
+// e2eAccounts seeds the ten accounts the browser run photographs. They are deliberately awkward:
+// two carry a label and an identity far longer than any card is wide, so the run proves a long
+// name truncates with its full text in the title attribute instead of widening its card or
+// wrapping it to three lines; one has no usage at all (the "Not polled" card); one carries a poll
+// error over its last known numbers; and the rest spread across the full, low and out states so
+// every top-edge colour and every meter variant is on screen at once.
+func e2eAccounts(t *testing.T, r *rig) {
+	t.Helper()
+	long := "deployment-automation-and-release-engineering-shared-account"
+	type spec struct {
+		id, label, identity string
+		five, seven         float64 // percent used; -1 means the window is missing
+		age                 time.Duration
+		err                 string
+	}
+	specs := []spec{
+		{"acct-x", "work", "work@example.test", 21, 48, 2 * time.Minute, ""},
+		{"acct-y", "personal", "personal@example.test", 64, 72, 6 * time.Minute, ""},
+		{"acct-long", long, long + "+claude-code@very-long-subdomain.example.test", 12, 33, 4 * time.Minute, ""},
+		{"acct-long2", "Platform Engineering (EMEA) shared Claude account", "platform.engineering.emea.shared@example.test", 88, 91, 9 * time.Minute, ""},
+		{"acct-low", "staging", "staging@example.test", 93, 88, 3 * time.Minute, ""},
+		{"acct-out", "burned", "burned@example.test", 100, 100, 5 * time.Minute, ""},
+		{"acct-err", "billing", "billing@example.test", 35, 61, 20 * time.Minute, "rate limited"},
+		{"acct-stale", "archive", "archive@example.test", 44, 52, 40 * time.Minute, ""},
+		{"acct-nodata", "spare", "spare@example.test", -1, -1, 0, ""},
+		{"acct-half", "research", "research@example.test", 70, -1, 7 * time.Minute, ""},
+	}
+	for _, s := range specs {
+		err := r.v.Put(vault.Account{ID: s.id, Label: s.label, Identity: s.identity, Updated: fixedNow,
+			Block: json.RawMessage(`{"accessToken":"` + blockSecret + `"}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.five < 0 && s.seven < 0 && s.err == "" {
+			continue // never polled: the card shows no numbers and says so
+		}
+		u := usage.Usage{FetchedAt: fixedNow.Add(-s.age), Err: s.err}
+		if s.five >= 0 {
+			u.FiveHour = usage.Window{UsedPct: s.five, ResetsAt: fixedNow.Add(3 * time.Hour)}
+		}
+		if s.seven >= 0 {
+			u.SevenDay = usage.Window{UsedPct: s.seven, ResetsAt: fixedNow.Add(72 * time.Hour)}
+		}
+		r.usage[s.id] = u
+	}
+}
+
 // TestE2EServer is not a test: it is the way the Playwright run gets the real handler, the real
 // index.html and fake agents in one process. It is skipped unless CLAUDESWAP_E2E_ADDR is set, so
 // `go test ./...` never blocks on it. Nothing here touches a real credential file or a real host.
@@ -80,18 +129,21 @@ func TestE2EServer(t *testing.T) {
 		t.Skip("set CLAUDESWAP_E2E_ADDR to serve the UI for a browser run")
 	}
 	r := newRig(t)
-	r.seed("acct-x", "work@example.test")
-	r.seed("acct-y", "personal@example.test")
+	e2eAccounts(t, r)
 
+	// Every host carries sessions, because the layout fault this fixture exists to photograph -
+	// one open session list sizing a whole grid row - only shows when several cards can be open
+	// at once. The session counts differ on purpose: a row of cards must line up even when the
+	// cards hold one session, four and seven.
 	r.fh.hosts = []hub.HostView{
-		{HostID: e2eNoop, Name: "ivy (linux)", OS: "linux", Online: true, ActiveAccount: "acct-x", Sessions: []hub.SessionView{}},
-		{HostID: e2eNoIdent, Name: "birch (linux)", OS: "linux", Online: true, ActiveAccount: "", Sessions: []hub.SessionView{}},
+		{HostID: e2eNoop, Name: "ivy (linux)", OS: "linux", Online: true, ActiveAccount: "acct-x", Sessions: e2eSessions(2, false)},
+		{HostID: e2eNoIdent, Name: "birch (linux)", OS: "linux", Online: true, ActiveAccount: "", Sessions: e2eSessions(1, false)},
 		{HostID: e2eOK, Name: "oak (windows)", OS: "windows", Online: true, ActiveAccount: "acct-x", Sessions: e2eSessions(6, true)},
-		{HostID: e2eRefused, Name: "elm (linux)", OS: "linux", Online: true, ActiveAccount: "acct-x", Sessions: []hub.SessionView{}},
-		{HostID: e2eExpired, Name: "fir (linux)", OS: "linux", Online: true, ActiveAccount: "acct-x", Sessions: []hub.SessionView{}},
+		{HostID: e2eRefused, Name: "elm (linux)", OS: "linux", Online: true, ActiveAccount: "acct-x", Sessions: e2eSessions(4, true)},
+		{HostID: e2eExpired, Name: "fir (linux)", OS: "linux", Online: true, ActiveAccount: "acct-x", Sessions: e2eSessions(3, false)},
 		{HostID: e2eOffline, Name: "pine (linux)", OS: "linux", Online: false, ActiveAccount: "acct-x", Sessions: []hub.SessionView{}},
-		{HostID: e2eBlocked, Name: "yew (windows)", OS: "windows", Online: true, ActiveAccount: "acct-x", SwapBlocked: true, Sessions: []hub.SessionView{}},
-		{HostID: e2eSlow, Name: "ash (linux)", OS: "linux", Online: true, ActiveAccount: "acct-x", Sessions: []hub.SessionView{}},
+		{HostID: e2eBlocked, Name: "yew (windows)", OS: "windows", Online: true, ActiveAccount: "acct-x", SwapBlocked: true, Sessions: e2eSessions(7, true)},
+		{HostID: e2eSlow, Name: "ash (linux)", OS: "linux", Online: true, ActiveAccount: "acct-x", Sessions: e2eSessions(2, false)},
 	}
 
 	// One host per ending. The two refusals carry a token-shaped string so the run also proves the
