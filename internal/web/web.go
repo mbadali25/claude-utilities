@@ -560,15 +560,19 @@ func restartCommand(v hub.SessionView) string {
 }
 
 type hostJSON struct {
-	HostID        string        `json:"hostId"`
-	Name          string        `json:"name"`
-	OS            string        `json:"os"`
-	RunAs         string        `json:"runAs,omitempty"`
-	Online        bool          `json:"online"`
-	ActiveAccount string        `json:"activeAccount"`
-	NeedsReload   bool          `json:"needsReload"`
-	SwapBlocked   bool          `json:"swapBlocked"`
-	Sessions      []sessionJSON `json:"sessions"`
+	HostID        string `json:"hostId"`
+	Name          string `json:"name"`
+	OS            string `json:"os"`
+	RunAs         string `json:"runAs,omitempty"`
+	Online        bool   `json:"online"`
+	ActiveAccount string `json:"activeAccount"`
+	// IdentityReason is why the host names no signed-in account: one of the fixed codes the hub
+	// knows (proto.Reason*), never a path, a user name or an address. The UI turns it into a
+	// sentence and a one-line fix; omitted when the host names an account.
+	IdentityReason string        `json:"identityReason,omitempty"`
+	NeedsReload    bool          `json:"needsReload"`
+	SwapBlocked    bool          `json:"swapBlocked"`
+	Sessions       []sessionJSON `json:"sessions"`
 }
 
 func (s *server) hosts(w http.ResponseWriter, _ *http.Request) {
@@ -576,7 +580,8 @@ func (s *server) hosts(w http.ResponseWriter, _ *http.Request) {
 	out := make([]hostJSON, 0, len(hs))
 	for _, h := range hs {
 		j := hostJSON{HostID: h.HostID, Name: h.Name, OS: h.OS, RunAs: h.RunAs, Online: h.Online, ActiveAccount: h.ActiveAccount,
-			SwapBlocked: h.SwapBlocked, Sessions: make([]sessionJSON, 0, len(h.Sessions))}
+			IdentityReason: h.IdentityReason, SwapBlocked: h.SwapBlocked,
+			Sessions: make([]sessionJSON, 0, len(h.Sessions))}
 		for _, x := range h.Sessions {
 			j.Sessions = append(j.Sessions, sessionJSON{PID: x.PID, ID: x.ID, Name: x.Name,
 				RemoteName: x.RemoteName, Status: x.Status, RemoteControl: x.RemoteControl,

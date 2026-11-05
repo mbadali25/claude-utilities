@@ -109,6 +109,10 @@ type Report struct {
 	ActiveIdentity string    `json:"activeIdentity"`
 	Sessions       []Session `json:"sessions"`
 	CredsPresent   bool      `json:"credsPresent"`
+	// IdentityReason says why ActiveIdentity is empty: one of the fixed identity reason codes
+	// (see identity.go), never a path, a user name, an email or a token. It is additive and
+	// omitted when the identity is known, so an older hub sees the report shape it expects.
+	IdentityReason string `json:"identityReason,omitempty"`
 	// SwapBlocked is true while an unfinished earlier swap cannot be settled, so every swap on
 	// this host is refused until an operator intervenes.
 	SwapBlocked bool `json:"swapBlocked,omitempty"`

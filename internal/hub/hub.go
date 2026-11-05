@@ -155,6 +155,9 @@ type host struct {
 	// every hello, so a reconfigured host shows its new user without re-enrolling. In memory
 	// only: after a server restart it is empty until the agent dials in again.
 	runAs string
+	// identReason is why the host names no identity: one of the known proto.Reason* codes, or ""
+	// when the identity is known or the agent sent a code this hub does not know. In memory only.
+	identReason string
 	// A swap rewrites the login but never ~/.claude.json, so the agent keeps reporting the identity
 	// it had before the swap. swapFrom is that stale identity, swapTarget the account swapped in and
 	// swapIdent its identity; while reports still say swapFrom, the login is swapTarget's. In memory only.
@@ -484,6 +487,22 @@ func (h *Hub) touch(c *conn, rep *proto.Report) {
 			ho.forgetSwapLocked() // the identity changed since (a manual login): trust it again
 		}
 	}
+	// Why the host names no account. The code is agent-supplied, so only a code this hub knows is
+	// kept: that is what stops a host putting text of its own in front of an operator. A reason
+	// beside a known identity is noise, so it is dropped (a swap synthesises one above).
+	reason := ""
+	if ho.identity == "" && proto.KnownIdentityReason(rep.IdentityReason) {
+		reason = rep.IdentityReason
+	}
+	if reason != ho.identReason { // reports arrive every heartbeat: log the change, not the state
+		ho.identReason = reason
+		if reason != "" {
+			h.log.Warn("host has no signed-in account", "host_id", ho.ID, "action", "report",
+				"result", "no_identity", "reason", reason)
+		} else {
+			h.log.Info("host names a signed-in account again", "host_id", ho.ID, "action", "report", "result", "identity")
+		}
+	}
 	// Reports arrive on every heartbeat, so the census is logged only when it changes.
 	if t := tallySessions(rep.Sessions); t != ho.tally {
 		ho.tally = t
@@ -609,6 +628,9 @@ type HostView struct {
 	RunAs         string
 	Online        bool
 	ActiveAccount string
+	// IdentityReason is why the host names no signed-in account: one of the known proto.Reason*
+	// codes, or "" when it does name one. The UI turns the code into a sentence and a fix.
+	IdentityReason string
 	// SwapBlocked mirrors the agent's report: an unfinished earlier swap blocks every new one.
 	SwapBlocked bool
 	Sessions    []SessionView
@@ -627,7 +649,7 @@ func (h *Hub) Hosts() []HostView {
 			continue
 		}
 		v := HostView{HostID: ho.ID, Name: ho.Name, OS: ho.OS, RunAs: ho.runAs, Online: ho.c != nil,
-			SwapBlocked: ho.report.SwapBlocked, Sessions: []SessionView{}}
+			IdentityReason: ho.identReason, SwapBlocked: ho.report.SwapBlocked, Sessions: []SessionView{}}
 		for _, a := range accts {
 			if ho.identity != "" && a.Identity == ho.identity {
 				v.ActiveAccount = a.ID
