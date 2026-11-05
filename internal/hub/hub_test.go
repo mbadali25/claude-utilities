@@ -397,11 +397,11 @@ func TestSwapRefusesOfflineHost(t *testing.T) {
 	f.seedAccounts()
 	a, _, id := f.enrol("box")
 	f.clk.Advance(OfflineAfter + time.Second)
-	if err := f.h.Swap(context.Background(), id, "B"); !errors.Is(err, ErrAgentOffline) {
+	if _, err := f.h.Swap(context.Background(), id, "B"); !errors.Is(err, ErrAgentOffline) {
 		t.Fatalf("got %v", err)
 	}
 	a.expectClosed("")
-	if err := f.h.Swap(context.Background(), "ghost", "B"); !errors.Is(err, ErrUnknownHost) {
+	if _, err := f.h.Swap(context.Background(), "ghost", "B"); !errors.Is(err, ErrUnknownHost) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -519,7 +519,7 @@ func TestSwapWritesBackLiveBlockBeforeSending(t *testing.T) {
 	f.reg.SwapIn("A", id)
 	s := f.newScript("id-a", `{"tok":"A-refreshed"}`)
 	s.serve(a)
-	if err := f.h.Swap(context.Background(), id, "B"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "B"); err != nil {
 		t.Fatal(err)
 	}
 	s.mu.Lock()
@@ -543,7 +543,7 @@ func TestSwapUnknownLiveAccountReturnsErrUnknownLiveAccountAndSendsNothing(t *te
 	a, _, id := f.enrol("box")
 	s := f.newScript("id-stranger", `{"tok":"hand-login"}`)
 	s.serve(a)
-	err := f.h.Swap(context.Background(), id, "B")
+	_, err := f.h.Swap(context.Background(), id, "B")
 	if !errors.Is(err, ErrUnknownLiveAccount) {
 		t.Fatalf("got %v", err)
 	}
@@ -568,7 +568,7 @@ func TestSwapFailureLeavesOwnershipUnchanged(t *testing.T) {
 	s := f.newScript("id-a", `{"tok":"A-live"}`)
 	s.swapOK = false
 	s.serve(a)
-	err := f.h.Swap(context.Background(), id, "B")
+	_, err := f.h.Swap(context.Background(), id, "B")
 	if err == nil || !strings.Contains(err.Error(), "refused by test") {
 		t.Fatalf("got %v", err)
 	}
@@ -590,7 +590,7 @@ func TestSwapSuccessMarksSessionsNeedsReload(t *testing.T) {
 	if v := f.h.Hosts()[0]; v.ActiveAccount != "A" || v.Sessions[0].NeedsReload {
 		t.Fatalf("before swap: %+v", v)
 	}
-	if err := f.h.Swap(context.Background(), id, "B"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "B"); err != nil {
 		t.Fatal(err)
 	}
 	v := f.h.Hosts()[0]
@@ -612,7 +612,7 @@ func TestConcurrentSwapsSameHostSerialised(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = f.h.Swap(context.Background(), id, target)
+			_, errs[i] = f.h.Swap(context.Background(), id, target)
 		}()
 	}
 	wg.Wait()

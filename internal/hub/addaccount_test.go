@@ -428,7 +428,7 @@ func TestAddDoesNotHoldSwapMuWhileWaiting(t *testing.T) {
 	id, _ := f.h.AddAccount(context.Background(), host, "x")
 	f.waitState(id, AddAwaitingCode)
 	errc := make(chan error, 1)
-	go func() { errc <- f.h.Swap(context.Background(), host, "B") }()
+	go func() { _, swerr := f.h.Swap(context.Background(), host, "B"); errc <- swerr }()
 	select {
 	case err := <-errc:
 		if err != nil {
