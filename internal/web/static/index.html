@@ -343,6 +343,9 @@
                      display:flex; align-items:center; gap:4px; list-style:none; }
   .tun-opt summary::-webkit-details-marker { display:none; }
   .tun-opt summary:hover { color:var(--fg); }
+  /* On a phone this is the only control on the card that is not a button, and it is the way to
+     every command the card is not already showing: it gets a thumb-sized target like the rest. */
+  @media (pointer:coarse) { .tun-opt summary { min-height:40px; } }
   .tun-opt summary .chev { transform:rotate(45deg); margin-top:-2px; }
   .tun-opt[open] summary .chev { transform:rotate(-135deg); margin-top:2px; }
   .tun-opt .body { display:grid; gap:10px; margin-top:8px; }
