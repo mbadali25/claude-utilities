@@ -233,6 +233,7 @@ func (h *Hub) Allow(fingerprint string) (hostID string, err error) {
 	}
 	delete(h.pending, fingerprint)
 	h.mu.Unlock()
+	e.c.ws.SetReadLimit(proto.MaxMessageSize)
 	if err := e.c.send(proto.TypeApproved, "", proto.Approved{Token: token}); err != nil {
 		h.mu.Lock()
 		h.forgetLocked(id)

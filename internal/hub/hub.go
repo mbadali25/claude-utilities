@@ -300,7 +300,12 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		h.reject(c, err)
 		return
 	}
-	ws.SetReadLimit(proto.MaxMessageSize)
+	h.mu.Lock()
+	pending := c.state == statePending
+	h.mu.Unlock()
+	if !pending { // a pending socket keeps the hello limit until Allow promotes it
+		ws.SetReadLimit(proto.MaxMessageSize)
+	}
 	h.readLoop(ctx, c)
 }
 
@@ -538,12 +543,12 @@ func (h *Hub) request(ctx context.Context, c *conn, typ, want string, body any) 
 // refused so MCP credentials never reach the vault or another host.
 func oauthBlock(raw json.RawMessage) (json.RawMessage, error) {
 	var top map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &top); err != nil || top == nil {
+	if err := json.Unmarshal(raw, &top); err != nil || len(top) == 0 {
 		return nil, errors.New("hub: exported login block is not a JSON object")
 	}
 	if inner, ok := top["claudeAiOauth"]; ok {
 		var probe map[string]json.RawMessage
-		if err := json.Unmarshal(inner, &probe); err != nil || probe == nil {
+		if err := json.Unmarshal(inner, &probe); err != nil || len(probe) == 0 {
 			return nil, errors.New("hub: exported claudeAiOauth is not a JSON object")
 		}
 		return inner, nil
@@ -612,13 +617,12 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 	if err != nil {
 		return err
 	}
-	// Write back only what this host may speak for: the Active holder, or any host when the server
-	// owns the account. A Shared or Stale holder has a possibly rotated-out copy, and a host that
-	// merely claims an account another host owns must not overwrite it. The block carries no
-	// identity of its own, so ownership is the only cross-check available.
+	// Write back only what this host may speak for: the Active holder. A Shared or Stale holder
+	// has a possibly rotated-out copy, and a host that merely claims an account (identity is
+	// agent-supplied, the block carries none) must not overwrite it, even when the server owns it.
 	owner := h.reg.OwnerOf(live.ID)
 	state, holds := h.reg.HostsUsing(live.ID)[hostID]
-	if (holds && state == ownership.Active) || (!holds && owner.Server) {
+	if holds && state == ownership.Active {
 		live.Block = block
 		live.Updated = h.now()
 		if err := h.vault.Put(*live); err != nil {

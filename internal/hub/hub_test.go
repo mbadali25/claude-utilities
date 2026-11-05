@@ -459,6 +459,7 @@ func TestSwapWritesBackLiveBlockBeforeSending(t *testing.T) {
 	f := newFixture(t)
 	f.seedAccounts()
 	a, _, id := f.enrol("box")
+	f.reg.SwapIn("A", id)
 	s := f.newScript("id-a", `{"tok":"A-refreshed"}`)
 	s.serve(a)
 	if err := f.h.Swap(context.Background(), id, "B"); err != nil {

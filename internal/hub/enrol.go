@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"claude-utilities/internal/credfile"
 	"claude-utilities/internal/proto"
 )
 
@@ -64,7 +65,7 @@ func (h *Hub) load() error {
 	var f hostFile
 	if err := json.Unmarshal(data, &f); err != nil {
 		// Keep the unreadable file: the next mint rewrites tokensPath and would drop every enrolment.
-		_ = os.WriteFile(h.tokensPath+".corrupt", data, 0o600)
+		_ = writePrivate(h.tokensPath+".corrupt", data)
 		return fmt.Errorf("hub: parse hosts: %w", err)
 	}
 	for _, r := range f.Hosts {
@@ -86,6 +87,9 @@ func (h *Hub) saveLocked() error {
 	}
 	if err := os.MkdirAll(filepath.Dir(h.tokensPath), 0o700); err != nil {
 		return fmt.Errorf("hub: hosts dir: %w", err)
+	}
+	if err := credfile.RestrictDir(filepath.Dir(h.tokensPath)); err != nil {
+		return fmt.Errorf("hub: restrict hosts dir: %w", err)
 	}
 	return writePrivate(h.tokensPath, data)
 }

@@ -38,7 +38,11 @@ func EnsureCert(dir string) (certFile, keyFile, fingerprint string, err error) {
 	keyFile = filepath.Join(dir, keyName)
 	if fp, ok := loadFingerprint(certFile, keyFile); ok {
 		// A key left loose by an older version or a manual copy is tightened (no-op semantics on Windows).
-		if cerr := os.Chmod(keyFile, 0o600); cerr != nil {
+		cerr := os.Chmod(keyFile, 0o600)
+		if cerr == nil {
+			cerr = credfile.RestrictFile(keyFile) // ACL on Windows, where Chmod does nothing
+		}
+		if cerr != nil {
 			return "", "", "", fmt.Errorf("hub: restrict key file: %w", cerr)
 		}
 		return certFile, keyFile, fp, nil

@@ -31,7 +31,7 @@ func TestSwapWritebackOnlyFromHostsThatMaySpeakForTheAccount(t *testing.T) {
 		wantBlock string
 	}{
 		{"active owner writes back", func(f *fixture, me, other string) { f.reg.SwapIn("A", me) }, `{"tok":"A-live"}`},
-		{"server owned writes back", func(f *fixture, me, other string) {}, `{"tok":"A-live"}`},
+		{"server owned, non-holder claim is skipped", func(f *fixture, me, other string) {}, `{"tok":"A-stored"}`},
 		{"shared host is skipped", func(f *fixture, me, other string) {
 			f.reg.SwapIn("A", me)
 			f.reg.SwapIn("A", other)
@@ -67,6 +67,7 @@ func TestSwapStoresOnlyTheClaudeAiOauthBlock(t *testing.T) {
 	f := newFixture(t)
 	f.seedAccounts()
 	a, _, id := f.enrol("box")
+	f.reg.SwapIn("A", id)
 	f.newScript("id-a", `{"claudeAiOauth":{"tok":"A-live"},"mcpOAuth":{"srv":"mcp-secret"}}`).serve(a)
 	if err := f.h.Swap(context.Background(), id, "B"); err != nil {
 		t.Fatal(err)
@@ -78,11 +79,13 @@ func TestSwapStoresOnlyTheClaudeAiOauthBlock(t *testing.T) {
 
 func TestSwapRejectsBadBlocks(t *testing.T) {
 	for name, block := range map[string]string{
-		"mcp only":   `{"mcpOAuth":{"srv":"x"}}`,
-		"array":      `[1]`,
-		"null":       `null`,
-		"inner null": `{"claudeAiOauth":null}`,
-		"inner str":  `{"claudeAiOauth":"x"}`,
+		"mcp only":    `{"mcpOAuth":{"srv":"x"}}`,
+		"array":       `[1]`,
+		"null":        `null`,
+		"inner null":  `{"claudeAiOauth":null}`,
+		"inner str":   `{"claudeAiOauth":"x"}`,
+		"empty obj":   `{}`,
+		"empty oauth": `{"claudeAiOauth":{}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
