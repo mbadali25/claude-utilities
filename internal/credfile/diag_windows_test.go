@@ -24,4 +24,5 @@ func TestDiagACL(t *testing.T) {
 	show("whoami", "whoami", "/all")
 	t.Logf("DIAG restrict=%v", restrictACL(p, false))
 	show("after2", "icacls", p)
+	t.Fatal("diag")
 }
