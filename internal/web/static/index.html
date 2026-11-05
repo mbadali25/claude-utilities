@@ -161,8 +161,42 @@
 
   .holder { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:.88rem; color:var(--mut); }
   .holder strong { color:var(--fg); font-weight:650; overflow-wrap:anywhere; }
-  /* The foot holds a status chip and no control, so it needs no 44px touch height. */
+  /* The foot of an open card: when it was last polled, and the button that polls it now. */
   .acct-foot { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; font-size:.85rem; color:var(--mut); border-top:1px solid var(--line); padding-top:9px; }
+
+  /* --- Accounts tab: collapsed cards and refresh ------------------------------------------
+     A card is closed by default and opens on its own header. The header is a real button, so
+     Enter and Space come from the browser, and it carries the label and the caret; the freshness
+     or error chip sits beside it, outside the button, so it is read as state and not as part of
+     the button's name. Closed, the card shows the name, the 7-day meter and that chip - what an
+     operator scans a wall of cards for. The rest is one hidden block. */
+  .acct-top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .acct-h { flex:1 1 0; min-width:0; font:inherit; }
+  .acct-dis { width:100%; min-height:30px; display:flex; align-items:center; gap:6px; padding:0;
+              background:none; border:0; color:inherit; font:inherit; text-align:left; cursor:pointer; }
+  .acct-dis:hover .title { color:var(--acc); }
+  .acct-dis .chev { margin-left:2px; color:var(--mut); }
+  .acct-dis[aria-expanded="true"] .chev { transform:rotate(-135deg); margin-top:4px; }
+  @media (pointer:coarse) { .acct-dis { min-height:40px; } }
+  /* Closed, the 7-day meter keeps its bar and its percentage and drops its reset time: the reset
+     time is detail, and it belongs with the other detail. */
+  .card.acct:not(.open) .acct-brief .reset { display:none; }
+  .acct-body { display:flex; flex-direction:column; gap:12px; }
+  /* What one refresh said about this card. It stays visible closed, because a refused refresh is
+     the one answer the card's own data cannot show. */
+  .acct-note { font-size:.82rem; color:var(--mut); }
+  .acct-note.bad { color:var(--bad); }
+  .acct-note:empty { display:none; }
+  /* The Accounts toolbar: open/close every card, and ask for a poll. */
+  .acc-tools { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 10px; }
+  .acc-tools .count, .acc-tools .say { font-size:.85rem; color:var(--mut); }
+  .acc-tools .gap { flex:1 1 0; min-width:0; }
+  .btn[aria-busy="true"] { opacity:1; }
+  /* The busy mark is the word on the button; this ring is decoration. Under reduced motion the
+     sheet's last rule stops every animation, so the ring is hidden there rather than left frozen. */
+  .spin { width:12px; height:12px; flex:none; margin-left:7px; display:inline-block; vertical-align:-1px;
+          border:2px solid var(--line-strong); border-top-color:var(--fg); border-radius:50%; }
+  @media (prefers-reduced-motion: reduce) { .spin { display:none !important; } }
 
   /* Rename */
   .rename { display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex:1; min-width:0; }
@@ -306,6 +340,8 @@
     .modal-foot .btn { flex:1 1 auto; }
   }
   @media (prefers-reduced-motion: no-preference) {
+    .spin { animation:spin .7s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
     .bar > i { transition:width .3s ease; }
     .btn, .seg button, .mi, .tabs [role="tab"] { transition:border-color .15s, color .15s, background-color .15s; }
     .chev { transition:transform .15s ease; }
@@ -396,6 +432,15 @@
 </div>
 
 <section id="panel-accounts" role="tabpanel" aria-labelledby="tab-accounts" tabindex="0">
+  <!-- Cards start closed, so this row carries the two ways to see more: open them, or ask the
+       usage endpoint for fresher numbers. The poll is rate limited on the server; a refused
+       account says so on its own card. -->
+  <div class="acc-tools">
+    <button type="button" class="btn sm" id="acc-expand-all">Expand all</button>
+    <button type="button" class="btn sm" id="acc-collapse-all">Collapse all</button>
+    <button type="button" class="btn sm" id="acc-refresh-all"><span class="txt">Refresh all</span><span class="spin" aria-hidden="true" hidden></span></button>
+    <span class="say" id="acc-refresh-status" role="status" aria-atomic="true"></span>
+  </div>
   <p class="panel-meta count" id="acc-count"></p>
   <div id="accounts" class="grid"><p class="empty">Loading accounts...</p></div>
 </section>
@@ -723,6 +768,8 @@
   function changed(key, data) { var s = JSON.stringify(data); if (sig[key] === s) return false; sig[key] = s; return true; }
 
   var accountsCache = [], hostsCache = [], pendingCount = 0, editing = null, confirming = null;
+  // Which account cards are mid-refresh, and the one line each card has to say about the last one.
+  var refreshing = {}, refreshAll = false, notes = {};
   var filter = { mode: pref('filter', 'all'), q: '' };
   var hostFilter = { mode: pref('hostFilter', 'all'), q: '' };
 
@@ -753,12 +800,13 @@
     return m;
   }
 
+  // The identity and the rename control. Both sit in the card's detail, not in its header: the
+  // header is one disclosure button, and nothing interactive may live inside a button.
   function nameRow(card, a) {
     var row = el('div', undefined, 'row between');
     function show() {
       editing = null; row.textContent = '';
       var t = el('div'); t.style.setProperty('min-width', '0');
-      t.appendChild(el('div', a.label, 'title'));
       t.appendChild(el('div', a.identity, 'sub'));
       row.appendChild(t);
       var r = row.appendChild(el('button', 'Rename', 'btn sm ghost')); r.type = 'button';
@@ -789,28 +837,160 @@
     return row;
   }
 
+  // The card's state, in one chip: the error when there is one, otherwise how old the numbers are.
+  // It sits in the header, so it is read whether the card is open or closed.
+  function statusChip(a) {
+    if (a.error) return chip(a.error, 'bad', 'bad');
+    if (a.ageSeconds == null) return chip('Not polled', '', 'info');
+    if (a.ageSeconds > 900) return chip('Stale, ' + ago(a.ageSeconds), 'warn', 'warn');
+    return chip('Updated ' + ago(a.ageSeconds), 'ok', 'ok');
+  }
+
+  // Which cards are open is a layout preference, like the selected tab. Only the open ones are
+  // stored, so a new account, a cleared browser and a first visit all start closed.
+  function openKey(id) { return 'acc.' + id; }
+  function isOpen(id) { return editing === id || pref(openKey(id), false) === true; }
+  function setOpen(card, open) {
+    var dis = card.querySelector('.acct-dis'), body = card.querySelector('.acct-body');
+    if (!dis || !body) return;
+    dis.setAttribute('aria-expanded', open ? 'true' : 'false');
+    body.hidden = !open;
+    card.classList.toggle('open', open);
+    var k = openKey(card.dataset.id);
+    if (open) prefs[k] = true; else delete prefs[k];
+    savePrefs();
+  }
+  function setAllOpen(open) {
+    var cards = document.querySelectorAll('#accounts .card.acct');
+    Array.prototype.forEach.call(cards, function (c) { setOpen(c, open); });
+    sayAcc(cards.length ? (open ? 'All accounts expanded.' : 'All accounts collapsed.') : '');
+  }
+
+  function spinner() { var s = el('span', undefined, 'spin'); s.setAttribute('aria-hidden', 'true'); s.hidden = true; return s; }
+  // One account's Refresh. It carries the account on itself, so markBusy can flip every card's
+  // button without a re-render and the pressed button keeps its focus.
+  function refreshBtn(a) {
+    var b = el('button', undefined, 'btn sm acct-refresh'); b.type = 'button';
+    b.id = 'acct-refresh-' + a.id; b.dataset.id = a.id; b.dataset.label = a.label;
+    b.appendChild(el('span', 'Refresh', 'txt'));
+    b.appendChild(spinner());
+    b.addEventListener('click', function () { refreshUsage(a.id); });
+    return b;
+  }
+
   function accountCard(a) {
-    var c = el('article', undefined, 'card acct s-' + level(a));
+    var open = isOpen(a.id), bodyID = 'acct-body-' + a.id;
+    var c = el('article', undefined, 'card acct s-' + level(a) + (open ? ' open' : ''));
     c.dataset.id = a.id;
-    c.appendChild(nameRow(c, a));
+
+    var top = el('div', undefined, 'acct-top');
+    var h = el('h3', undefined, 'acct-h');
+    var dis = el('button', undefined, 'acct-dis'); dis.type = 'button';
+    dis.id = 'acct-dis-' + a.id;
+    dis.setAttribute('aria-expanded', open ? 'true' : 'false');
+    dis.setAttribute('aria-controls', bodyID);
+    dis.appendChild(el('span', a.label, 'title'));
+    var cv = el('span', undefined, 'chev dn'); cv.setAttribute('aria-hidden', 'true');
+    dis.appendChild(cv);
+    dis.addEventListener('click', function () { setOpen(c, dis.getAttribute('aria-expanded') !== 'true'); });
+    h.appendChild(dis); top.appendChild(h);
+    top.appendChild(statusChip(a));
+    c.appendChild(top);
+
+    // Closed, this is the whole card: the 7-day window is the one that decides whether an account
+    // can carry a host for the rest of the week.
+    var brief = el('div', undefined, 'acct-brief meters');
+    brief.appendChild(meter('7-day window', a.sevenDay));
+    c.appendChild(brief);
+
+    var n = notes[a.id];
+    if (n) {
+      var note = el('p', n.text, 'acct-note' + (n.bad ? ' bad' : ''));
+      note.setAttribute('role', n.bad ? 'alert' : 'status');
+      c.appendChild(note);
+    }
+
+    var body = el('div', undefined, 'acct-body'); body.id = bodyID; body.hidden = !open;
+    body.appendChild(nameRow(c, a));
     var ms = el('div', undefined, 'meters');
     ms.appendChild(meter('5-hour window', a.fiveHour));
-    ms.appendChild(meter('7-day window', a.sevenDay));
-    c.appendChild(ms);
+    body.appendChild(ms);
     var held = el('div', undefined, 'holder');
     held.appendChild(el('span', 'Held by'));
     if (a.owner) { held.appendChild(el('span', undefined, 'dot')); held.appendChild(el('strong', a.owner)); }
     else held.appendChild(chip('Free', '', 'info'));
-    c.appendChild(held);
+    body.appendChild(held);
     var foot = el('div', undefined, 'acct-foot');
-    var st;
-    if (a.error) st = chip(a.error, 'bad', 'bad');
-    else if (a.ageSeconds == null) st = chip('Not polled', '', 'info');
-    else if (a.ageSeconds > 900) st = chip('Stale, ' + ago(a.ageSeconds), 'warn', 'warn');
-    else st = chip('Updated ' + ago(a.ageSeconds), 'ok', 'ok');
-    foot.appendChild(st);
-    c.appendChild(foot);
+    foot.appendChild(el('span', a.ageSeconds == null ? 'Never polled' : 'Polled ' + ago(a.ageSeconds)));
+    foot.appendChild(refreshBtn(a));
+    body.appendChild(foot);
+    c.appendChild(body);
     return c;
+  }
+
+  // --- Usage refresh -------------------------------------------------------------------
+  // POST /api/usage/refresh asks the server to poll the usage endpoint now. The server refuses
+  // asks that come too fast, per account and in total, so nothing here retries by itself: it
+  // reports what came back and leaves the next move to the operator.
+  function refreshBusy() { return refreshAll || Object.keys(refreshing).length > 0; }
+  function sayAcc(text) { $('#acc-refresh-status').textContent = text || ''; }
+  // Flip one control between its idle and its busy face in place, so focus is never lost.
+  function setBusy(b, busy, idle, busyWord, aria) {
+    if (!b) return;
+    b.disabled = busy;
+    var t = b.querySelector('.txt'); if (t) t.textContent = busy ? busyWord : idle;
+    var sp = b.querySelector('.spin'); if (sp) sp.hidden = !busy;
+    if (busy) b.setAttribute('aria-busy', 'true'); else b.removeAttribute('aria-busy');
+    if (aria) b.setAttribute('aria-label', aria);
+  }
+  function markBusy() {
+    setBusy($('#acc-refresh-all'), refreshAll, 'Refresh all', 'Refreshing all...', null);
+    Array.prototype.forEach.call(document.querySelectorAll('#accounts .acct-refresh'), function (b) {
+      var busy = refreshAll || !!refreshing[b.dataset.id];
+      setBusy(b, busy, 'Refresh', 'Refreshing...',
+        (busy ? 'Refreshing usage for ' : 'Refresh usage for ') + b.dataset.label);
+    });
+  }
+  // One sentence for the live region, and one line on the cards that have something to say. A
+  // refused poll is the only outcome a card's own data cannot show, so it says so on the card.
+  function report(rows) {
+    var n = {};
+    rows.forEach(function (r) {
+      n[r.status] = (n[r.status] || 0) + 1;
+      if (r.status === 'rate_limited') notes[r.id] = { text: 'Polled too recently; try again in ' + (r.retryAfterSec || 1) + 's.' };
+      else if (r.status === 'error') notes[r.id] = { text: 'The poll failed: ' + (r.error || 'unavailable') + '.', bad: true };
+      else if (r.status === 'unknown_id') notes[r.id] = { text: 'This account is no longer stored.', bad: true };
+      else delete notes[r.id];
+    });
+    var parts = [];
+    [['refreshed', 'refreshed'], ['rate_limited', 'polled too recently'], ['error', 'failed'],
+      ['unknown_id', 'no longer stored']].forEach(function (k) {
+      if (n[k[0]]) parts.push(n[k[0]] + ' ' + k[1]);
+    });
+    sayAcc(parts.length ? 'Usage: ' + parts.join(', ') + '.' : 'No accounts to refresh.');
+  }
+  function refreshUsage(id) {
+    if (id) {
+      if (refreshAll || refreshing[id]) return;
+      refreshing[id] = true; delete notes[id];
+    } else {
+      if (refreshBusy()) return;
+      refreshAll = true; notes = {};
+    }
+    markBusy(); say('');
+    sayAcc(id ? 'Asking for a fresh poll...' : 'Asking for a fresh poll of every account...');
+    return call('POST', '/api/usage/refresh', { account: id || '' })
+      .then(function (r) { report((r && r.results) || []); })
+      .catch(function (e) {
+        if (id) notes[id] = { text: e.message, bad: true };
+        sayAcc(e.message);
+      })
+      .then(function () {
+        if (id) delete refreshing[id]; else refreshAll = false;
+        // The numbers, the chip and the 'Polled' line all come from /api/accounts, so one reload
+        // updates every one of them. markBusy runs after the render, from renderAccounts.
+        return loadAccounts().catch(function () { markBusy(); });
+      });
   }
 
   var MODES = [['all', 'All'], ['used', 'In use'], ['free', 'Free'], ['low', 'Low or out'], ['err', 'Problems']];
@@ -909,18 +1089,29 @@
     var narrowed = filter.mode !== 'all' || filter.q;
     $('#acc-count').textContent = list.length && narrowed ? 'Showing ' + list.filter(matches).length + ' of ' + list.length : '';
     if (editing && $('#accounts .rename')) return; // keep an open rename
-    if (!force && !changed('acc', [list, filter]) && !$('#accounts .empty')) return;
-    sig.acc = JSON.stringify([list, filter]);
-    var box = $('#accounts'); box.textContent = '';
+    if (!force && !changed('acc', [list, filter, notes]) && !$('#accounts .empty')) return;
+    sig.acc = JSON.stringify([list, filter, notes]);
+    var box = $('#accounts');
+    // The cards are rebuilt from scratch, so remember which control held the focus (a disclosure
+    // button, a Refresh) and give it back: every one of them keeps its id across a render.
+    var had = document.activeElement && box.contains(document.activeElement) ? document.activeElement.id : null;
+    box.textContent = '';
     if (!list.length) { box.appendChild(el('p', 'No accounts yet. Open the Account menu and choose Add Claude account.', 'empty')); return; }
     var shown = list.filter(matches);
     if (!shown.length) box.appendChild(el('p', 'No accounts match this filter.', 'empty'));
     shown.forEach(function (a) { box.appendChild(accountCard(a)); });
+    if (had) { var again = document.getElementById(had); if (again) again.focus(); }
+    markBusy();
   }
 
   function loadAccounts() {
     return call('GET', '/api/accounts').then(function (list) {
       accountsCache = list;
+      // Forget the open state of accounts that are gone, so the stored key cannot grow for ever.
+      var live = {};
+      list.forEach(function (a) { live[openKey(a.id)] = true; });
+      var stale = Object.keys(prefs).filter(function (k) { return k.indexOf('acc.') === 0 && !live[k]; });
+      if (stale.length) { stale.forEach(function (k) { delete prefs[k]; }); savePrefs(); }
       renderFilters(); renderAccounts(false); renderStats();
       return list;
     });
@@ -1419,6 +1610,10 @@
     return loadAccounts().then(loadHosts).then(loadPending).catch(function (e) { say(e.message); });
   }
 
+  $('#acc-expand-all').addEventListener('click', function () { setAllOpen(true); });
+  $('#acc-collapse-all').addEventListener('click', function () { setAllOpen(false); });
+  $('#acc-refresh-all').addEventListener('click', function () { refreshUsage(''); });
+
   $('#acc-q').addEventListener('input', function (ev) { filter.q = ev.target.value.trim(); renderAccounts(true); });
   $('#host-q').addEventListener('input', function (ev) { hostFilter.q = ev.target.value.trim(); renderHosts(true); });
 
@@ -1545,8 +1740,11 @@
 
   refresh();
   setInterval(loadPending, 5000);
-  // Never discard an open rename, an open swap confirm, an in-flight ask or an open ask dialog.
-  setInterval(function () { if (!editing && !confirming && !ctlWorking() && !ctlDialogOpen()) refresh(); }, 30000);
+  // Never discard an open rename, an open swap confirm, an in-flight ask or an open ask dialog,
+  // and never re-render the cards from under a refresh the operator is watching.
+  setInterval(function () {
+    if (!editing && !confirming && !ctlWorking() && !ctlDialogOpen() && !refreshBusy()) refresh();
+  }, 30000);
 })();
 </script>
 {{end}}
