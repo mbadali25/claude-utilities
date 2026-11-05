@@ -5,30 +5,22 @@
 package vault
 
 import (
-	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/crypto/argon2"
-
-	"claude-utilities/internal/credfile"
 )
 
 const (
-	magic     = "CSV1"
-	saltLen   = 16
-	nonceLen  = 12
-	keyLen    = 32
+	magic    = "CSV1"
+	saltLen  = 16
+	nonceLen = 12
+	keyLen   = 32
+	// headerLen is the magic plus the salt: the prefix bound to the ciphertext as additional data.
 	headerLen = len(magic) + saltLen
 	argonTime = 3
 	argonMem  = 64 * 1024 // KiB
@@ -69,43 +61,25 @@ type Account struct {
 // Vault is an encrypted, file-backed account store safe for concurrent use.
 type Vault struct {
 	mu       sync.Mutex
-	path     string
-	salt     []byte
-	aead     cipher.AEAD
+	file     *sealed
 	accounts map[string]Account
 }
 
 // Open loads the vault at path, creating an empty in-memory one if the file
 // does not exist or is empty. The key is the value of env var keyEnv. Open
 // never writes to disk.
+//
+// The payload is a JSON array of accounts and stays that way: a server that is rolled back must
+// still be able to read a vault a newer one has written, so tunnel keys live in their own file
+// (keyring.go) rather than in a new envelope here.
 func Open(path, keyEnv string) (*Vault, error) {
-	pass := os.Getenv(keyEnv)
-	if pass == "" {
-		return nil, fmt.Errorf("%w: set environment variable %s", ErrNoKey, keyEnv)
-	}
-	data, err := os.ReadFile(filepath.Clean(path))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("vault: read: %w", err)
-	}
-	v := &Vault{path: path, accounts: map[string]Account{}}
-	if len(data) == 0 {
-		v.salt = make([]byte, saltLen)
-		if _, err := rand.Read(v.salt); err != nil {
-			return nil, fmt.Errorf("vault: salt: %w", err)
-		}
-		return v, v.setKey(pass)
-	}
-	if len(data) < headerLen+nonceLen || string(data[:len(magic)]) != magic {
-		return nil, errCorrupt
-	}
-	v.salt = append([]byte(nil), data[len(magic):headerLen]...)
-	if err := v.setKey(pass); err != nil {
+	f, plain, err := openSealed(path, magic, keyEnv)
+	if err != nil {
 		return nil, err
 	}
-	nonce := data[headerLen : headerLen+nonceLen]
-	plain, err := v.aead.Open(nil, nonce, data[headerLen+nonceLen:], data[:headerLen])
-	if err != nil {
-		return nil, ErrBadKey
+	v := &Vault{file: f, accounts: map[string]Account{}}
+	if plain == nil {
+		return v, nil
 	}
 	var list []Account
 	if err := json.Unmarshal(plain, &list); err != nil {
@@ -115,19 +89,6 @@ func Open(path, keyEnv string) (*Vault, error) {
 		v.accounts[a.ID] = a
 	}
 	return v, nil
-}
-
-func (v *Vault) setKey(pass string) error {
-	key := argon2.IDKey([]byte(pass), v.salt, argonTime, argonMem, argonPar, keyLen)
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return fmt.Errorf("vault: cipher: %w", err)
-	}
-	v.aead, err = cipher.NewGCM(block)
-	if err != nil {
-		return fmt.Errorf("vault: gcm: %w", err)
-	}
-	return nil
 }
 
 func clone(a Account) Account {
@@ -247,50 +208,7 @@ func (v *Vault) save() error {
 	if err != nil {
 		return fmt.Errorf("vault: encode: %w", err)
 	}
-	nonce := make([]byte, nonceLen)
-	if _, err := rand.Read(nonce); err != nil {
-		return fmt.Errorf("vault: nonce: %w", err)
-	}
-	header := append([]byte(magic), v.salt...)
-	var buf bytes.Buffer
-	buf.Write(header)
-	buf.Write(nonce)
-	buf.Write(v.aead.Seal(nil, nonce, plain, header))
-
-	dir := filepath.Dir(v.path)
-	tmp, err := os.CreateTemp(dir, ".vault-*.tmp")
-	if err != nil {
-		return fmt.Errorf("vault: temp: %w", err)
-	}
-	name := tmp.Name()
-	fail := func(err error) error {
-		_ = tmp.Close()
-		removeQuiet(name)
-		return fmt.Errorf("vault: write: %w", err)
-	}
-	if err := tmp.Chmod(0o600); err != nil && !isWindowsChmodQuirk(err) {
-		return fail(err)
-	}
-	// Windows: Chmod only toggles read-only, so set an owner-only ACL (no-op elsewhere).
-	if err := credfile.RestrictFile(name); err != nil {
-		return fail(err)
-	}
-	if _, err := tmp.Write(buf.Bytes()); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Close(); err != nil {
-		removeQuiet(name)
-		return fmt.Errorf("vault: close: %w", err)
-	}
-	if err := renameFn(name, v.path); err != nil {
-		removeQuiet(name)
-		return fmt.Errorf("vault: rename: %w", err)
-	}
-	credfile.SyncDir(dir)
-	return nil
+	return v.file.write(magic, plain)
 }
 
 // removeQuiet deletes a temp file on a failure path that already returns its own
