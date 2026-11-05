@@ -50,6 +50,10 @@ var (
 	ErrBadToken           = errors.New("hub: unknown agent token")
 	ErrUnknownHost        = errors.New("hub: unknown host")
 	ErrUnknownAccount     = errors.New("hub: unknown account")
+	// ErrSwapOutcomeUnknown means the swap request went out but no verdict came back, so the host
+	// may or may not have applied it. Ownership is left unchanged and the host's identity is
+	// cleared until its next report.
+	ErrSwapOutcomeUnknown = errors.New("hub: swap outcome unknown")
 )
 
 type connState int
@@ -133,12 +137,26 @@ func (c *conn) deliver(env proto.Envelope) {
 // host is a persisted enrolment plus its live connection state.
 type host struct {
 	hostRec
-	swapMu    sync.Mutex
-	c         *conn
-	lastSeen  time.Time
-	report    proto.Report
-	swappedAt time.Time
+	swapMu   sync.Mutex
+	c        *conn
+	lastSeen time.Time
+	report   proto.Report
+	// reloadIDs holds the sessions that were running when a swap happened; they still hold the old
+	// login. Keyed by session, not by time, so cross-host clock skew cannot matter. In memory only.
+	reloadIDs map[string]struct{}
 	identity  string // last known live identity (from a report or a successful swap)
+}
+
+func sessionKey(s proto.Session) string { return fmt.Sprintf("%d:%s", s.PID, s.ID) }
+
+// markReloadLocked flags every currently reported session as needing a reload. Callers hold h.mu.
+func (ho *host) markReloadLocked() {
+	if ho.reloadIDs == nil {
+		ho.reloadIDs = map[string]struct{}{}
+	}
+	for _, s := range ho.report.Sessions {
+		ho.reloadIDs[sessionKey(s)] = struct{}{}
+	}
 }
 
 // Hub tracks agents. The zero value is not usable; call New.
@@ -148,8 +166,9 @@ type Hub struct {
 	tokensPath string
 	log        *slog.Logger
 
-	now  func() time.Time
-	ipOf func(*http.Request) string
+	now        func() time.Time
+	reqTimeout time.Duration
+	ipOf       func(*http.Request) string
 	// onReject is a test hook that observes why a hello was refused.
 	onReject func(error)
 
@@ -161,13 +180,14 @@ type Hub struct {
 	suppressed map[string]time.Time
 	expired    map[string]time.Time
 	ipHits     map[string][]time.Time
+	badHits    map[string][]time.Time // failed token or code hellos per source IP
 }
 
 // New returns a Hub that keeps enrolled hosts (token hashes only) in tokensPath.
 func New(v *vault.Vault, r *ownership.Registry, tokensPath string, log *slog.Logger) *Hub {
 	h := &Hub{
 		vault: v, reg: r, tokensPath: tokensPath, log: log.With("component", "hub"),
-		now: time.Now,
+		now: time.Now, reqTimeout: requestTimout,
 		ipOf: func(r *http.Request) string {
 			host, _, err := net.SplitHostPort(r.RemoteAddr)
 			if err != nil {
@@ -178,6 +198,7 @@ func New(v *vault.Vault, r *ownership.Registry, tokensPath string, log *slog.Log
 		hosts: map[string]*host{}, byHash: map[string]string{}, codes: map[string]time.Time{},
 		pending: map[string]*pendEntry{}, suppressed: map[string]time.Time{},
 		expired: map[string]time.Time{}, ipHits: map[string][]time.Time{},
+		badHits: map[string][]time.Time{},
 	}
 	if err := h.load(); err != nil {
 		h.log.Error("load enrolled hosts failed", logx.Err(err))
@@ -185,7 +206,13 @@ func New(v *vault.Vault, r *ownership.Registry, tokensPath string, log *slog.Log
 	return h
 }
 
-// Run sweeps expired state until ctx ends.
+// Run sweeps expired state until ctx ends. The server MUST start it (go hub.Run(ctx)): heartbeat
+// timeouts, pending and code expiry otherwise happen only when something polls Hosts or Pending.
+//
+// Authorisation: the exported control methods (Allow, Deny, Revoke, NewEnrolCode, Swap, Pending,
+// Hosts) perform no caller authentication. Every HTTP route that reaches them must authenticate the
+// owner first. ServeWS is unauthenticated by design; the hello gate is its only control. The UI must
+// HTML-escape HostName, OS and SourceIP, which are agent-controlled.
 func (h *Hub) Run(ctx context.Context) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
@@ -284,6 +311,10 @@ func closeReason(err error) string {
 		return "rate limited"
 	case errors.Is(err, ErrPendingFull):
 		return "queue full"
+	case errors.Is(err, ErrEmptyNonce):
+		return "nonce required"
+	case errors.Is(err, ErrFingerprintInUse):
+		return "fingerprint in use"
 	case errors.Is(err, ErrSuppressed):
 		return "suppressed"
 	}
@@ -295,8 +326,18 @@ func (h *Hub) reject(c *conn, err error) {
 		h.onReject(err)
 	}
 	reason := closeReason(err)
-	h.log.Warn("hello rejected", "action", "reject", "result", reason,
-		"host_name", c.hello.HostName, "os", c.hello.OS, "source_ip", c.ip)
+	if errors.Is(err, ErrBadToken) || errors.Is(err, ErrBadCode) {
+		h.mu.Lock()
+		h.badHits[c.ip] = append(h.badHits[c.ip], h.now())
+		h.mu.Unlock()
+	}
+	if errors.Is(err, ErrRateLimited) {
+		// A flooding address must not also flood the log.
+		h.log.Debug("hello rejected", "action", "reject", "result", reason, "source_ip", c.ip)
+	} else {
+		h.log.Warn("hello rejected", "action", "reject", "result", reason,
+			"host_name", c.hello.HostName, "os", c.hello.OS, "source_ip", c.ip)
+	}
 	_ = c.ws.Close(websocket.StatusPolicyViolation, reason)
 }
 
@@ -358,9 +399,39 @@ func (h *Hub) touch(c *conn, rep *proto.Report) {
 		return
 	}
 	ho.lastSeen = h.now()
-	if rep != nil {
-		ho.report = *rep
-		ho.identity = rep.ActiveIdentity
+	if rep == nil {
+		return
+	}
+	ho.report = *rep
+	ho.identity = rep.ActiveIdentity
+	live := map[string]struct{}{}
+	for _, s := range rep.Sessions {
+		live[sessionKey(s)] = struct{}{}
+	}
+	for k := range ho.reloadIDs { // forget sessions that ended
+		if _, ok := live[k]; !ok {
+			delete(ho.reloadIDs, k)
+		}
+	}
+	h.restoreHolderLocked(ho)
+}
+
+// restoreHolderLocked re-registers a host that (re)connected and reports using a stored account
+// the registry has no holder record for, e.g. after HostLost or a server restart. It never takes an
+// account another host owns. Callers hold h.mu.
+func (h *Hub) restoreHolderLocked(ho *host) {
+	if ho.identity == "" {
+		return
+	}
+	for _, a := range h.vault.List() {
+		if a.Identity != ho.identity {
+			continue
+		}
+		if _, holds := h.reg.HostsUsing(a.ID)[ho.ID]; !holds && h.reg.OwnerOf(a.ID).Server {
+			h.reg.SwapIn(a.ID, ho.ID)
+			h.log.Info("holder restored", "action", "restore", "host_id", ho.ID, "account", a.ID, "result", "ok")
+		}
+		return
 	}
 }
 
@@ -417,7 +488,8 @@ func (h *Hub) Hosts() []HostView {
 			}
 		}
 		for _, s := range ho.report.Sessions {
-			v.Sessions = append(v.Sessions, SessionView{Session: s, NeedsReload: !ho.swappedAt.IsZero() && s.StartedAt.Before(ho.swappedAt)})
+			_, stale := ho.reloadIDs[sessionKey(s)]
+			v.Sessions = append(v.Sessions, SessionView{Session: s, NeedsReload: stale})
 		}
 		out = append(out, v)
 	}
@@ -438,7 +510,7 @@ func (h *Hub) request(ctx context.Context, c *conn, typ, want string, body any) 
 	ch := make(chan proto.Envelope, 1)
 	c.addWaiter(id, ch)
 	defer c.delWaiter(id)
-	tctx, cancel := context.WithTimeout(ctx, requestTimout)
+	tctx, cancel := context.WithTimeout(ctx, h.reqTimeout)
 	defer cancel()
 	if err := c.send(typ, id, body); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrAgentOffline, logx.Redact(err.Error()))
@@ -454,6 +526,27 @@ func (h *Hub) request(ctx context.Context, c *conn, typ, want string, body any) 
 	case <-tctx.Done():
 		return nil, fmt.Errorf("hub: %s timed out: %w", typ, tctx.Err())
 	}
+}
+
+// oauthBlock validates an agent-supplied login block and returns only the claudeAiOauth object.
+// A whole credentials file is narrowed to that block; anything carrying mcpOAuth without it is
+// refused so MCP credentials never reach the vault or another host.
+func oauthBlock(raw json.RawMessage) (json.RawMessage, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil || top == nil {
+		return nil, errors.New("hub: exported login block is not a JSON object")
+	}
+	if inner, ok := top["claudeAiOauth"]; ok {
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(inner, &probe); err != nil || probe == nil {
+			return nil, errors.New("hub: exported claudeAiOauth is not a JSON object")
+		}
+		return inner, nil
+	}
+	if _, ok := top["mcpOAuth"]; ok {
+		return nil, errors.New("hub: exported login block carries mcpOAuth and no claudeAiOauth")
+	}
+	return raw, nil
 }
 
 // Swap makes hostID use accountID. Order: offline check, export the live block, match it to a
@@ -510,22 +603,47 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 		h.log.Warn("swap refused", "action", "swap", "host_id", hostID, "result", "unknown live account")
 		return ErrUnknownLiveAccount
 	}
-	if !json.Valid(exp.Block) || len(exp.Block) == 0 || exp.Block[0] != '{' {
-		return errors.New("hub: exported login block is not a JSON object")
+	block, err := oauthBlock(exp.Block)
+	if err != nil {
+		return err
 	}
-	live.Block = exp.Block
-	live.Updated = h.now()
-	if err := h.vault.Put(*live); err != nil {
-		return fmt.Errorf("hub: write back live login: %w", err)
+	// Write back only what this host may speak for: the Active holder, or any host when the server
+	// owns the account. A Shared or Stale holder has a possibly rotated-out copy, and a host that
+	// merely claims an account another host owns must not overwrite it. The block carries no
+	// identity of its own, so ownership is the only cross-check available.
+	owner := h.reg.OwnerOf(live.ID)
+	state, holds := h.reg.HostsUsing(live.ID)[hostID]
+	if (holds && state == ownership.Active) || (!holds && owner.Server) {
+		live.Block = block
+		live.Updated = h.now()
+		if err := h.vault.Put(*live); err != nil {
+			return fmt.Errorf("hub: write back live login: %w", err)
+		}
+	} else {
+		h.log.Warn("writeback skipped", "action", "swap", "host_id", hostID, "account", live.ID,
+			"result", "host does not own the live login")
 	}
 	if live.ID == target.ID {
+		if !holds && owner.Server {
+			h.reg.SwapIn(live.ID, hostID) // record a holder the registry lost, e.g. after a restart
+		}
+		h.mu.Lock()
+		ho.identity = target.Identity
+		h.mu.Unlock()
 		h.log.Info("swap no-op", "action", "swap", "host_id", hostID, "account", accountID, "result", "already active")
 		return nil
 	}
 
 	raw, err = h.request(ctx, c, proto.TypeSwapReq, proto.TypeSwapRes, proto.SwapReq{Block: target.Block, Account: accountID})
 	if err != nil {
-		return err
+		// The request may have been applied: say so, flag the sessions and forget the identity.
+		h.mu.Lock()
+		ho.markReloadLocked()
+		ho.identity = ""
+		h.mu.Unlock()
+		h.log.Warn("swap outcome unknown", "action", "swap", "host_id", hostID, "account", accountID,
+			"result", "unknown", logx.Err(err))
+		return fmt.Errorf("%w: %w", ErrSwapOutcomeUnknown, err)
 	}
 	var res proto.SwapRes
 	if err := json.Unmarshal(raw, &res); err != nil {
@@ -538,7 +656,7 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 	h.reg.SwapAway(live.ID, hostID)
 	h.reg.SwapIn(accountID, hostID)
 	h.mu.Lock()
-	ho.swappedAt = h.now()
+	ho.markReloadLocked()
 	ho.identity = target.Identity
 	h.mu.Unlock()
 	h.log.Info("swap done", "action", "swap", "host_id", hostID, "account", accountID, "result", "ok")

@@ -10,13 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/coder/websocket"
 
-	"claude-utilities/internal/credfile"
 	"claude-utilities/internal/proto"
 )
 
@@ -83,16 +81,7 @@ func (h *Hub) saveLocked() error {
 	if err != nil {
 		return fmt.Errorf("hub: marshal hosts: %w", err)
 	}
-	tmp := h.tokensPath + ".tmp"
-	if err := writePrivate(tmp, data); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, h.tokensPath); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("hub: replace hosts file: %w", err)
-	}
-	credfile.SyncDir(filepath.Dir(h.tokensPath))
-	return nil
+	return writePrivate(h.tokensPath, data)
 }
 
 // mintLocked registers a new host for hello and returns its id and token. Callers hold h.mu.
@@ -163,6 +152,9 @@ func (h *Hub) admitToken(c *conn) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.sweepLocked(h.now())
+	if len(h.badHits[c.ip]) >= BadHelloPerIP {
+		return ErrRateLimited
+	}
 	ho := h.hosts[h.byHash[hashToken(c.hello.Token)]]
 	if ho == nil {
 		return ErrBadToken
@@ -185,6 +177,10 @@ func (h *Hub) admitToken(c *conn) error {
 func (h *Hub) admitCode(c *conn) error {
 	h.mu.Lock()
 	h.sweepLocked(h.now())
+	if len(h.badHits[c.ip]) >= BadHelloPerIP {
+		h.mu.Unlock()
+		return ErrRateLimited
+	}
 	exp, ok := h.codes[c.hello.Code]
 	delete(h.codes, c.hello.Code) // single use, valid or not
 	if !ok || !h.now().Before(exp) {

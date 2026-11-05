@@ -7,6 +7,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"claude-utilities/internal/logx"
 	"claude-utilities/internal/proto"
 )
 
@@ -20,6 +21,8 @@ const (
 	// PendingPerIP is the most pending hellos one source IP may add per PendingPerIPWindow.
 	PendingPerIP       = 3
 	PendingPerIPWindow = 10 * time.Minute
+	// BadHelloPerIP is the most failed token or code hellos one source IP may make per PendingPerIPWindow.
+	BadHelloPerIP = 20
 )
 
 var (
@@ -28,6 +31,9 @@ var (
 	ErrPendingFull    = errors.New("hub: pending queue full")
 	ErrSuppressed     = errors.New("hub: fingerprint recently denied")
 	ErrRateLimited    = errors.New("hub: too many pending hellos from this address")
+	ErrEmptyNonce     = errors.New("hub: pending hello without a nonce")
+	// ErrFingerprintInUse means another address already queued this fingerprint.
+	ErrFingerprintInUse = errors.New("hub: fingerprint already pending from another address")
 )
 
 // PendingView is one unapproved connection as the owner sees it.
@@ -76,6 +82,13 @@ func (h *Hub) sweepLocked(now time.Time) {
 			h.ipHits[ip] = kept
 		}
 	}
+	for ip, hits := range h.badHits {
+		if kept := pruneHits(hits, now); len(kept) == 0 {
+			delete(h.badHits, ip)
+		} else {
+			h.badHits[ip] = kept
+		}
+	}
 	for _, ho := range h.hosts {
 		if ho.c != nil && now.Sub(ho.lastSeen) > OfflineAfter {
 			c := ho.c
@@ -101,6 +114,10 @@ func pruneHits(hits []time.Time, now time.Time) []time.Time {
 
 // admitPending queues a tokenless, codeless hello and tells the agent it is pending.
 func (h *Hub) admitPending(c *conn) error {
+	if c.hello.Nonce == "" {
+		// Without a nonce the fingerprint is host|os only, which any LAN device can predict.
+		return ErrEmptyNonce
+	}
 	fp := proto.Fingerprint(c.hello)
 	// Hold the write lock across registration so Pending is always the first frame the agent
 	// reads, even if the owner clicks Allow immediately.
@@ -119,14 +136,22 @@ func (h *Hub) admitPending(c *conn) error {
 		h.mu.Unlock()
 		return ErrRateLimited
 	}
-	h.ipHits[c.ip] = append(h.ipHits[c.ip], now)
-	if old := h.pending[fp]; old != nil { // same attempt redialled: the new connection replaces it
+	old := h.pending[fp]
+	switch {
+	case old != nil && old.c.ip != c.ip:
+		// Only the address that queued an attempt may replace it; a 40-bit fingerprint is grindable.
+		h.mu.Unlock()
+		return ErrFingerprintInUse
+	case old == nil && len(h.pending) >= PendingCap:
+		// A refused hello does not consume the address's quota.
+		h.mu.Unlock()
+		return ErrPendingFull
+	}
+	h.ipHits[c.ip] = append(h.ipHits[c.ip], now) // a same-address replace still counts
+	if old != nil {                              // same attempt redialled: the new connection replaces it
 		delete(h.pending, fp)
 		old.c.state = stateClosed
 		old.c.close(websocket.StatusPolicyViolation, "replaced")
-	} else if len(h.pending) >= PendingCap {
-		h.mu.Unlock()
-		return ErrPendingFull
 	}
 	e := &pendEntry{c: c, hello: c.hello, since: now, expires: now.Add(PendingTTL)}
 	h.pending[fp] = e
@@ -193,12 +218,15 @@ func (h *Hub) Allow(fingerprint string) (hostID string, err error) {
 		h.mu.Unlock()
 		return "", err
 	}
-	delete(h.pending, fingerprint)
+	// Mint first: if persistence fails the entry stays listed so the owner can retry.
 	id, token, err := h.mintLocked(e.hello, e.c)
-	h.mu.Unlock()
 	if err != nil {
+		h.mu.Unlock()
+		h.log.Error("allow failed", "action", "allow", "fingerprint", fingerprint, "result", "persist failed", logx.Err(err))
 		return "", err
 	}
+	delete(h.pending, fingerprint)
+	h.mu.Unlock()
 	if err := e.c.send(proto.TypeApproved, "", proto.Approved{Token: token}); err != nil {
 		h.mu.Lock()
 		h.forgetLocked(id)

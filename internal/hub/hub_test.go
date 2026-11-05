@@ -416,8 +416,11 @@ func (s *script) serve(a *agent) {
 				if acct, ok := s.f.v.Get(s.identityFor()); ok {
 					s.liveAtSwap = acct.Block
 				}
-				ok, delay := s.swapOK, s.swapDelay
+				ok, delay, mute := s.swapOK, s.swapDelay, s.stopSwapRes
 				s.mu.Unlock()
+				if mute {
+					continue // never answer: the hub must time out
+				}
 				time.Sleep(delay)
 				s.mu.Lock()
 				if ok {

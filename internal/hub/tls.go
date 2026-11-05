@@ -31,6 +31,9 @@ func EnsureCert(dir string) (certFile, keyFile, fingerprint string, err error) {
 	if err = os.MkdirAll(dir, 0o700); err != nil {
 		return "", "", "", fmt.Errorf("hub: cert dir: %w", err)
 	}
+	if err = credfile.RestrictDir(dir); err != nil {
+		return "", "", "", fmt.Errorf("hub: restrict cert dir: %w", err)
+	}
 	certFile = filepath.Join(dir, certName)
 	keyFile = filepath.Join(dir, keyName)
 	if fp, ok := loadFingerprint(certFile, keyFile); ok {
@@ -76,21 +79,53 @@ func EnsureCert(dir string) (certFile, keyFile, fingerprint string, err error) {
 	if err = writePrivate(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
 		return "", "", "", err
 	}
-	if err = os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
-		return "", "", "", fmt.Errorf("hub: write cert: %w", err)
+	// A crash between the two writes leaves a mismatched pair; loadFingerprint rejects it and
+	// the next start regenerates both.
+	if err = writePrivate(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})); err != nil {
+		return "", "", "", err
 	}
 	sum := sha256.Sum256(der)
 	return certFile, keyFile, hex.EncodeToString(sum[:]), nil
 }
 
-// writePrivate writes b to path with owner-only permissions.
-func writePrivate(path string, b []byte) error {
-	if err := os.WriteFile(path, b, 0o600); err != nil {
-		return fmt.Errorf("hub: write %s: %w", filepath.Base(path), err)
+// writePrivate atomically replaces path with b. The data goes into a fresh, uniquely named temp
+// file that is owner-only before any byte is written, is fsynced, then renamed over path, so
+// the content is never readable under an inherited ACL and a crash leaves old or new, not a mix.
+func writePrivate(path string, b []byte) (err error) {
+	dir, base := filepath.Dir(path), filepath.Base(path)
+	f, err := os.CreateTemp(dir, "."+base+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("hub: write %s: %w", base, err)
 	}
-	if err := credfile.RestrictFile(path); err != nil {
-		return fmt.Errorf("hub: restrict %s: %w", filepath.Base(path), err)
+	tmp := f.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err = f.Close(); err != nil {
+		return fmt.Errorf("hub: write %s: %w", base, err)
 	}
+	if err = credfile.RestrictFile(tmp); err != nil {
+		return fmt.Errorf("hub: restrict %s: %w", base, err)
+	}
+	f, err = os.OpenFile(tmp, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("hub: write %s: %w", base, err)
+	}
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fmt.Errorf("hub: write %s: %w", base, err)
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("hub: replace %s: %w", base, err)
+	}
+	credfile.SyncDir(dir)
 	return nil
 }
 
