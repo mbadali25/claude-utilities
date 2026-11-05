@@ -81,7 +81,7 @@ func newInboxFixture(t *testing.T, mutate func(sf *sessionFile)) *inboxFixture {
 			if f.renameOnSend != "" {
 				cur := f.readSession(t)
 				cur.Name = f.renameOnSend
-				cur.NameSource = "user" // never "peer": that is the whole point of name-only checks
+				cur.NameSource = "peer" // what a live 2.1.318 session records; the pass condition is name only
 				f.writeSession(t, cur)
 			}
 			return f.sock, nil
@@ -199,10 +199,11 @@ func TestInboxRenameNeverClaimsDone(t *testing.T) {
 	}
 }
 
-// Verification reads `name` and only `name`. A peer rename is recorded as nameSource "user" or
-// "collision" and NEVER "peer", so code that waited for "peer" would read success as failure.
+// Verification reads `name` and only `name`. A live session records nameSource "peer" after an
+// inbox rename, but "collision" (or anything else) can rewrite it, so no nameSource value is
+// required: success must not depend on it.
 func TestInboxRenameVerifiesTheNameAndNeverWaitsForPeerNameSource(t *testing.T) {
-	for _, src := range []string{"user", "collision"} {
+	for _, src := range []string{"peer", "user", "collision", ""} {
 		f := newInboxFixture(t, nil)
 		f.renameOnSend = "beta"
 		f.m.dial = func(path string) (io.WriteCloser, error) {
