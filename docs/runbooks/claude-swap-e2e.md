@@ -201,7 +201,6 @@ Also: remove a bad host in the UI with **Revoke**; stop the agent with Ctrl+C or
 ## Unverified at time of writing
 - `agent install` (schtasks, icacls, systemd unit) has never run against a real host; tests use a fake runner. Not part of this run.
 - The README still says `cmd/agent` does not exist and that there is no `install` subcommand; that is out of date (the subcommand exists in `cmd/agent/main.go`).
-- `scripts/e2e.ps1` (named in plan Task 11) does not exist; this runbook is the manual substitute.
 - Whether WSL can reach the Windows server by `<LAN_IP>` depends on the WSL network mode; test with `curl -k`.
 - Exact session discovery and "needs reload" behaviour on a live Claude Code process is untested on real hosts.
 - Token refresh is not implemented on the server (`usage` shows "unauthorized" for expired tokens); an account idle for long may need a re-import.
