@@ -227,7 +227,8 @@ func (a *agent) loginFlow(jctx, ctx context.Context, s *sess, job *loginJob, dir
 		_ = stdin.Close()
 		if !exited {
 			select {
-			case <-waitCh:
+			case werr := <-waitCh:
+				_ = werr // the kill is deliberate: its exit status says nothing
 			case <-time.After(killGrace):
 			}
 		}
@@ -284,7 +285,6 @@ func (a *agent) loginFlow(jctx, ctx context.Context, s *sess, job *loginJob, dir
 			return stopped()
 		}
 	}
-	out = nil
 	drain()
 	if err := s.send(ctx, proto.TypeLoginURL, job.id, proto.LoginURL{URL: url}); err != nil {
 		return proto.LoginDone{}, "send_failed", false
@@ -294,7 +294,8 @@ func (a *agent) loginFlow(jctx, ctx context.Context, s *sess, job *loginJob, dir
 	var code []byte
 	select {
 	case code = <-job.codeCh:
-	case <-waitCh:
+	case werr := <-waitCh:
+		_ = werr
 		exited = true
 		return fail("sign-in ended before a code was entered", "child_exit")
 	case <-jctx.Done():
