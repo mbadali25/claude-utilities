@@ -4,7 +4,7 @@
   "anchor": "claude-utilities@0cef554",
   "rules": [
     { "id": "go-code",
-      "paths": ["**/*.go", "go.mod", "go.sum", ".golangci.yml", "internal/*/testdata/**"],
+      "paths": ["**/*.go", "go.mod", "go.sum", ".golangci.yml", "internal/*/testdata/**", "internal/*/static/**"],
       "run": ["bash _verify/cases/go-checks.sh"],
       "seconds": 5,
       "reach": "local",
