@@ -190,6 +190,8 @@
   /* The Accounts toolbar: open/close every card, and ask for a poll. */
   .acc-tools { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 10px; }
   .acc-tools .count, .acc-tools .say { font-size:.85rem; color:var(--mut); }
+  /* A refused round is a result; a request that did not land is a failure, and reads as one. */
+  .acc-tools .say.bad { color:var(--bad); }
   .acc-tools .gap { flex:1 1 0; min-width:0; }
   .btn[aria-busy="true"] { opacity:1; }
   /* The busy mark is the word on the button; this ring is decoration. Under reduced motion the
@@ -903,12 +905,10 @@
     brief.appendChild(meter('7-day window', a.sevenDay));
     c.appendChild(brief);
 
+    // The note is read, not announced: ten refused cards would otherwise insert ten live regions
+    // at once, against the one in the panel that already says what the round did.
     var n = notes[a.id];
-    if (n) {
-      var note = el('p', n.text, 'acct-note' + (n.bad ? ' bad' : ''));
-      note.setAttribute('role', n.bad ? 'alert' : 'status');
-      c.appendChild(note);
-    }
+    if (n) c.appendChild(el('p', n.text, 'acct-note' + (n.bad ? ' bad' : '')));
 
     var body = el('div', undefined, 'acct-body'); body.id = bodyID; body.hidden = !open;
     body.appendChild(nameRow(c, a));
@@ -933,7 +933,11 @@
   // asks that come too fast, per account and in total, so nothing here retries by itself: it
   // reports what came back and leaves the next move to the operator.
   function refreshBusy() { return refreshAll || Object.keys(refreshing).length > 0; }
-  function sayAcc(text) { $('#acc-refresh-status').textContent = text || ''; }
+  function sayAcc(text, bad) {
+    var s = $('#acc-refresh-status');
+    s.textContent = text || '';
+    s.className = 'say' + (bad ? ' bad' : '');
+  }
   // Flip one control between its idle and its busy face in place, so focus is never lost.
   function setBusy(b, busy, idle, busyWord, aria) {
     if (!b) return;
@@ -982,14 +986,19 @@
     return call('POST', '/api/usage/refresh', { account: id || '' })
       .then(function (r) { report((r && r.results) || []); })
       .catch(function (e) {
+        // The request itself failed - a 429 from the route's own limit, or no answer at all - so
+        // no account has a result to report. One sentence, and nothing is retried from here.
         if (id) notes[id] = { text: e.message, bad: true };
-        sayAcc(e.message);
+        sayAcc(e.message, true);
       })
       .then(function () {
         if (id) delete refreshing[id]; else refreshAll = false;
-        // The numbers, the chip and the 'Polled' line all come from /api/accounts, so one reload
-        // updates every one of them. markBusy runs after the render, from renderAccounts.
-        return loadAccounts().catch(function () { markBusy(); });
+        // Clear the busy face here, not in the render: renderAccounts returns early when nothing
+        // changed, and after a refused round nothing has, which would leave the button disabled
+        // and saying "Refreshing..." until the next poll. The numbers, the chip and the 'Polled'
+        // line all come from /api/accounts, so the reload after it updates every one of them.
+        markBusy();
+        return loadAccounts().catch(function () {});
       });
   }
 
