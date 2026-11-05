@@ -19,6 +19,22 @@ const (
 	StateDirEnv = "CLAUDESWAP_STATE_DIR"
 )
 
+// DefaultStateDirName is the directory under the user config dir that holds the agent's state.
+const DefaultStateDirName = "claude-swap-agent"
+
+// TaskStateDir is the state dir an agent resolves when StateDirEnv is unset, which is what the
+// Windows logon task gets (schtasks passes no environment). It is the single source of the default.
+func TaskStateDir() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("install: user config dir: %w", err)
+	}
+	return filepath.Join(base, DefaultStateDirName), nil
+}
+
+// taskStateDir is a seam for tests.
+var taskStateDir = TaskStateDir
+
 // oneLine drops line breaks so a path cannot inject extra unit directives.
 func oneLine(s string) string {
 	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
@@ -171,6 +187,16 @@ func installTask(exe, stateDir string, run runner, out io.Writer) error {
 	user, err := windowsUser()
 	if err != nil {
 		return err
+	}
+	// schtasks passes no environment, so the logon-run agent always uses the default state dir;
+	// an install against any other dir would leave it unable to find its config.
+	def, err := taskStateDir()
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(filepath.Clean(def), filepath.Clean(stateDir)) {
+		return fmt.Errorf("install: state dir %q differs from %q, which the logon task will use (schtasks cannot pass %s); unset %s and enrol again",
+			stateDir, def, StateDirEnv, StateDirEnv)
 	}
 	fresh := true
 	if ents, err := os.ReadDir(stateDir); err == nil {

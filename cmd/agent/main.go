@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"claude-utilities/internal/agent"
@@ -85,9 +86,32 @@ func runCmd(ctx context.Context, errOut io.Writer) int {
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		_, _ = fmt.Fprintln(errOut, "run:", logx.Redact(err.Error()))
+		if errors.Is(err, os.ErrNotExist) {
+			logMissingConfig(errOut, dir)
+		}
 		return 1
 	}
 	return 0
+}
+
+// runLogName is the file, under the default state dir, that records why `run` could not start.
+const runLogName = "agent-run.log"
+
+// logMissingConfig explains a missing agent.json on stderr and in a file under the default state
+// dir. The logon task passes no environment, so this is where an operator finds out that
+// CLAUDESWAP_STATE_DIR was set at enrol time but not for the task.
+func logMissingConfig(errOut io.Writer, tried string) {
+	w := errOut
+	if def, err := install.TaskStateDir(); err == nil && os.MkdirAll(def, 0o700) == nil {
+		// #nosec G304 -- def is the fixed per-user default state dir plus a constant name
+		if f, ferr := os.OpenFile(filepath.Join(def, runLogName), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); ferr == nil {
+			defer func() { _ = f.Close() }()
+			w = io.MultiWriter(errOut, f)
+		}
+	}
+	logx.New(w).Error("agent config missing: run `agent enrol` first, and make "+install.StateDirEnv+
+		" the same for enrol and the logon task (tried "+tried+")",
+		"component", "agent", "action", "run", "result", "no config")
 }
 
 func installCmd(errOut io.Writer) int {

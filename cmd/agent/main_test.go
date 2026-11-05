@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,6 +109,32 @@ func TestRunWithoutConfigExits1(t *testing.T) {
 	code, _, errOut := run(t, context.Background(), "run")
 	if code != 1 || !strings.HasPrefix(errOut, "run:") {
 		t.Fatalf("code %d %q", code, errOut)
+	}
+}
+
+// The logon task passes no environment, so a missing config must be explained where an operator
+// looks: stderr and a file under the default state dir.
+func TestRunWithoutConfigLogsAllowlistedErrorToStderrAndDefaultDir(t *testing.T) {
+	dir := isolate(t)
+	cfgHome := filepath.Join(dir, "cfg")
+	t.Setenv("AppData", cfgHome)
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	code, _, errOut := run(t, context.Background(), "run")
+	if code != 1 {
+		t.Fatalf("code %d", code)
+	}
+	logPath := filepath.Join(cfgHome, install.DefaultStateDirName, runLogName)
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("no run log: %v", err)
+	}
+	for _, s := range []string{errOut, string(data)} {
+		if !strings.Contains(s, "agent config missing") || !strings.Contains(s, install.StateDirEnv) {
+			t.Fatalf("unclear message: %q", s)
+		}
+		if strings.Contains(s, "[dropped]") {
+			t.Fatalf("non-allowlisted field: %q", s)
+		}
 	}
 }
 

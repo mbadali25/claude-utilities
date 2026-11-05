@@ -105,11 +105,11 @@ func DefaultStateDir() (string, error) {
 	if d := os.Getenv(install.StateDirEnv); d != "" {
 		return d, nil
 	}
-	base, err := os.UserConfigDir()
+	d, err := install.TaskStateDir()
 	if err != nil {
 		return "", fmt.Errorf("agent: state dir: %w", err)
 	}
-	return filepath.Join(base, "claude-swap-agent"), nil
+	return d, nil
 }
 
 // SaveConfig writes <StateDir>/agent.json owner-only.

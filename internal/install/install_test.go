@@ -181,6 +181,40 @@ func TestInstallLinuxPrintsNextSteps(t *testing.T) {
 	}
 }
 
+// useTaskDefault makes dir the state dir the logon task will resolve at run time.
+func useTaskDefault(t *testing.T, dir string) {
+	t.Helper()
+	old := taskStateDir
+	taskStateDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { taskStateDir = old })
+}
+
+// schtasks cannot pass CLAUDESWAP_STATE_DIR, so a different state dir would be invisible to the
+// logon-run agent: install must refuse before touching the system.
+func TestInstallWindowsRefusesStateDirThatDiffersFromTaskDefault(t *testing.T) {
+	t.Setenv("USERNAME", "bob")
+	useTaskDefault(t, filepath.Join(t.TempDir(), "default"))
+	other := filepath.Join(t.TempDir(), "elsewhere")
+	run := func(string, ...string) ([]byte, error) { t.Error("must not run"); return nil, nil }
+	err := installFor("windows", fakeExe(t), other, run, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), StateDirEnv) {
+		t.Fatalf("want refusal naming %s, got %v", StateDirEnv, err)
+	}
+	if _, serr := os.Stat(other); serr == nil {
+		t.Error("state dir created despite refusal")
+	}
+}
+
+func TestTaskStateDirIsUnderUserConfigDir(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("AppData", cfg)
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	got, err := TaskStateDir()
+	if err != nil || got != filepath.Join(cfg, DefaultStateDirName) {
+		t.Fatalf("%q %v", got, err)
+	}
+}
+
 func TestInstallRejectsMissingOrRelativeExe(t *testing.T) {
 	run := func(string, ...string) ([]byte, error) { t.Error("must not run"); return nil, nil }
 	for _, exe := range []string{"agent.exe", filepath.Join(t.TempDir(), "missing")} {
@@ -194,6 +228,7 @@ func TestInstallWindowsRunsIcaclsThenSchtasks(t *testing.T) {
 	t.Setenv("USERNAME", "bob")
 	t.Setenv("USERDOMAIN", "CORP")
 	state := filepath.Join(t.TempDir(), "st")
+	useTaskDefault(t, state)
 	exe := fakeExe(t)
 	var calls []string
 	run := func(name string, args ...string) ([]byte, error) {
@@ -215,6 +250,7 @@ func TestInstallWindowsRunsIcaclsThenSchtasks(t *testing.T) {
 func TestInstallWindowsSkipsIcaclsOnNonEmptyDir(t *testing.T) {
 	t.Setenv("USERNAME", "bob")
 	state := t.TempDir()
+	useTaskDefault(t, state)
 	if err := os.WriteFile(filepath.Join(state, "keep"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +267,9 @@ func TestInstallWindowsSkipsIcaclsOnNonEmptyDir(t *testing.T) {
 func TestInstallWindowsReportsFailure(t *testing.T) {
 	t.Setenv("USERNAME", "bob")
 	fail := func(string, ...string) ([]byte, error) { return []byte("denied"), errors.New("exit 1") }
-	err := installFor("windows", fakeExe(t), filepath.Join(t.TempDir(), "st"), fail, &bytes.Buffer{})
+	state := filepath.Join(t.TempDir(), "st")
+	useTaskDefault(t, state)
+	err := installFor("windows", fakeExe(t), state, fail, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Errorf("want icacls error with output, got %v", err)
 	}
