@@ -35,6 +35,9 @@ const (
 	// staleLockAge is how old a .swaplock must be before it is treated as left
 	// behind by a crashed process and reclaimed. A swap takes milliseconds.
 	staleLockAge = 2 * time.Minute
+	// maxExpiryMs bounds refreshTokenExpiresAt before the float64 to int64 conversion.
+	maxExpiryMs = 1e15
+	tempPattern = ".credentials-*.tmp"
 )
 
 var (
@@ -217,6 +220,11 @@ func ValidateBlock(b json.RawMessage) error {
 	if err := json.Unmarshal(m["refreshTokenExpiresAt"], &ms); err != nil {
 		return errors.New("credfile: refreshTokenExpiresAt is not a number")
 	}
+	// Converting a float64 outside the int64 range is implementation-defined, so
+	// reject anything beyond a sane millisecond timestamp (about year 33658).
+	if ms != ms || ms > maxExpiryMs || ms < -maxExpiryMs {
+		return errors.New("credfile: refreshTokenExpiresAt out of range")
+	}
 	if !time.UnixMilli(int64(ms)).After(nowFn()) {
 		return ErrRefreshExpired
 	}
@@ -327,11 +335,13 @@ func resolvePath(path string) (string, error) {
 }
 
 // Replace swaps only the claudeAiOauth block, after backing up the previous
-// block. It returns the backup path. The block must be a JSON object; callers
+// block. It returns the backup path. On a rename failure the backup is kept and
+// returned with the error; on every other failure the path is "". Callers should
+// treat the path as meaningful only when it names an existing file. The block must be a JSON object; callers
 // should also run ValidateBlock. Backups hold old refresh tokens at 0600 in a
 // 0700 directory, are capped at backupKeep, and are retained after success by
-// design so a bad swap can be undone. On Windows mode bits are not enforced;
-// files inherit the parent directory's ACL.
+// design so a bad swap can be undone. On Windows owner-only ACLs (icacls) replace
+// the mode bits for the temp file, backup directory and backups.
 //
 // Residual race: Claude Code can write the file between the final hash check
 // and the rename. ErrChangedDuringSwap narrows that window but cannot close it
@@ -354,6 +364,9 @@ func Restore(path, backup string) error {
 	ba, err2 := filepath.Abs(backup)
 	if err1 != nil || err2 != nil {
 		return errors.New("credfile: backup path not resolvable")
+	}
+	if err := requireRealDir(bd); err != nil {
+		return err
 	}
 	rel, err := filepath.Rel(bd, ba)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -379,8 +392,34 @@ func Restore(path, backup string) error {
 		}
 		block = data
 	}
-	_, err = swap(path, block, false)
+	// The current block is backed up first, so a restore can itself be undone.
+	_, err = swap(path, block, true)
 	return err
+}
+
+// requireRealDir fails unless dir is a real directory, not a symlink: a
+// symlinked backup dir would send token backups (and chmod) elsewhere.
+func requireRealDir(dir string) error {
+	st, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("credfile: backup dir: %w", err)
+	}
+	if !st.IsDir() {
+		return errors.New("credfile: backup dir is not a real directory")
+	}
+	return nil
+}
+
+// removeStaleTemps deletes leftover temp files (they may hold live tokens) from
+// a crash between writeTemp and rename. Called under the swap lock; only temps
+// older than staleLockAge go, so a concurrent writer is never affected.
+func removeStaleTemps(dir string) {
+	matches, _ := filepath.Glob(filepath.Join(dir, tempPattern))
+	for _, m := range matches {
+		if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() && time.Since(st.ModTime()) >= staleLockAge {
+			os.Remove(m)
+		}
+	}
 }
 
 func swap(path string, block json.RawMessage, withBackup bool) (backup string, err error) {
@@ -393,6 +432,7 @@ func swap(path string, block json.RawMessage, withBackup bool) (backup string, e
 		return "", err
 	}
 	defer release()
+	removeStaleTemps(filepath.Dir(path))
 
 	original, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -448,11 +488,17 @@ func swap(path string, block json.RawMessage, withBackup bool) (backup string, e
 }
 
 func writeTemp(dir string, data []byte, mode os.FileMode) (string, error) {
-	f, err := os.CreateTemp(dir, ".credentials-*.tmp")
+	f, err := os.CreateTemp(dir, tempPattern)
 	if err != nil {
 		return "", fmt.Errorf("credfile: temp: %w", err)
 	}
 	name := f.Name()
+	// Lock the ACL down before any token bytes are written (Windows).
+	if err := restrictACL(name, false); err != nil {
+		f.Close()
+		os.Remove(name)
+		return "", err
+	}
 	fail := func(e error) (string, error) {
 		f.Close()
 		os.Remove(name)
@@ -479,6 +525,12 @@ func writeBackup(dir string, prev json.RawMessage) (string, error) {
 	bdir := filepath.Join(dir, backupDir)
 	if err := os.MkdirAll(bdir, 0o700); err != nil {
 		return "", fmt.Errorf("credfile: backup dir: %w", err)
+	}
+	if err := requireRealDir(bdir); err != nil {
+		return "", err
+	}
+	if err := restrictACL(bdir, true); err != nil {
+		return "", err
 	}
 	// MkdirAll does not tighten a pre-existing directory; backups hold old refresh tokens.
 	if !isWindows {

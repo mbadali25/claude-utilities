@@ -652,3 +652,85 @@ func TestReclaimGuardHeldReturnsBusy(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestValidateBlockHugeExpiryFailsClosed(t *testing.T) {
+	for _, v := range []string{"1e30", "-1e30", "9.3e18"} {
+		b := strings.Replace(oauth("x", 1), `"refreshTokenExpiresAt":1`, `"refreshTokenExpiresAt":`+v, 1)
+		if err := ValidateBlock(json.RawMessage(b)); err == nil {
+			t.Fatalf("%s accepted", v)
+		}
+	}
+}
+
+func TestRestoreBacksUpCurrentBlock(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, fileWith(oauth("old", 1)))
+	backup, err := Replace(p, json.RawMessage(oauth("mid", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadDir(filepath.Join(dir, backupDir))
+	if err := Restore(p, backup); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadDir(filepath.Join(dir, backupDir))
+	if len(after) != len(before)+1 {
+		t.Fatalf("restore did not back up current block: %d -> %d", len(before), len(after))
+	}
+}
+
+func TestWriteBackupRejectsSymlinkedBackupDir(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, fileWith(oauth("old", 1)))
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(dir, backupDir)); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := Replace(p, json.RawMessage(oauth("n", 1))); err == nil {
+		t.Fatal("want error for symlinked backup dir")
+	}
+	if ents, _ := os.ReadDir(target); len(ents) != 0 {
+		t.Fatalf("backup written through symlink: %d files", len(ents))
+	}
+}
+
+func TestRestoreRejectsSymlinkedBackupDir(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, fileWith(oauth("old", 1)))
+	target := t.TempDir()
+	f := filepath.Join(target, "20260101T000000.000000000Z.json")
+	if err := os.WriteFile(f, []byte(oauth("evil", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, backupDir)); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := Restore(p, filepath.Join(dir, backupDir, filepath.Base(f))); err == nil {
+		t.Fatal("want error for symlinked backup dir")
+	}
+}
+
+func TestSwapRemovesStaleTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, fileWith(oauth("old", 1)))
+	stale := filepath.Join(dir, ".credentials-123.tmp")
+	fresh := filepath.Join(dir, ".credentials-456.tmp")
+	for _, f := range []string{stale, fresh} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * staleLockAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Replace(p, json.RawMessage(oauth("n", 1))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); err == nil {
+		t.Fatal("stale temp not removed")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("fresh temp must be kept")
+	}
+}

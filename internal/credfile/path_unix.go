@@ -13,3 +13,6 @@ func syncDir(dir string) {
 		d.Close()
 	}
 }
+
+// restrictACL is a no-op: Unix modes (0600/0700) are set directly.
+func restrictACL(string, bool) error { return nil }
