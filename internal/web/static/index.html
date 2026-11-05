@@ -11,167 +11,247 @@
 <meta name="theme-color" content="#101114" media="(prefers-color-scheme: dark)">
 {{if .LoggedIn}}<meta name="csrf-token" content="{{.CSRF}}">{{end}}
 <style nonce="{{.Nonce}}">
-  /* Tokens. Colour sits on data (meters) and on status; chrome stays neutral. */
+  /* Tokens. Colour sits on data (meters) and on status; chrome stays neutral.
+     Every measurement in this sheet comes from one of the scales below. A literal px past this
+     block is a bug, with one documented exception: the geometry of a drawn glyph (an svg box, the
+     caret, the state dot, a meter's bar), which is a shape rather than a step on a scale. */
   :root {
     --bg:#f4f5f7; --surface:#fff; --sunk:#eceef2; --fg:#16181d; --mut:#586070; --line:#dde0e6; --line-strong:#b9bec8;
     --acc:#2447b8; --acc-ink:#fff; --bad:#a8231b; --bad-bg:#fdecea; --ok:#176b36; --ok-bg:#e6f4ea; --warn:#7a4f00; --warn-bg:#fdf1d6;
     --track:#e3e6ec; --focus:#2447b8;
-    --r:10px; --gap:16px; --tabh:46px;
+
+    /* Space, on a 4px base. s3 is the one half-step, for the inner gaps of a chip or a meta row. */
+    --s1:2px; --s2:4px; --s3:6px; --s4:8px; --s5:12px; --s6:16px; --s7:20px; --s8:24px; --s9:32px; --s10:48px;
+    /* Type: eight steps on a 16px root - 12 13 14 15 16 20 24 30. fs1 is the floor; nothing
+       smaller carries words. The body sits on fs4, which is the 15px this sheet already used. */
+    --fs1:.75rem; --fs2:.8125rem; --fs3:.875rem; --fs4:.9375rem; --fs5:1rem; --fs6:1.25rem; --fs7:1.5rem; --fs8:1.875rem;
+    --lh:1.5; --lh-tight:1.2;
+    /* Radii step down: the card, a control inside it, a pill, the small inner rectangle. */
+    --r:10px; --r-ctl:6px; --r-pill:999px; --r-sm:4px;
+    /* One row, one height. Every control height is here, so the coarse-pointer block below moves
+       them together instead of each component restating its own touch size. */
+    --h-ctl:36px; --h-ctl-sm:30px; --h-dis:30px; --h-chip:22px; --h-row:44px; --tabh:46px;
+    /* Borders: the hairline everything is separated by, and the 4px edge that states a worst case. */
+    --bw:1px; --bw-edge:4px;
+    /* One focus ring, two offsets: tight on a control, wider on a box whose own border would
+       otherwise sit under the ring. The ring itself never changes width or colour. */
+    --fo:2px; --fo-box:4px;
+    /* Widths that bound a container rather than space its contents. */
+    --w-canvas:1440px; --w-modal:580px; --w-login:380px; --w-menu:236px; --w-toast:22rem;
+    /* The basis a form field falls back to in a row that wraps: below it the field wraps to its
+       own line instead of shrinking into a box nothing can be typed into. */
+    --fb-field:160px;
+    /* Two shadows, both for things that float. Nothing at rest carries one. */
+    --sh-pop:0 10px 28px rgb(0 0 0 / .18); --sh-modal:0 20px 50px rgb(0 0 0 / .26);
+    /* Grid: one gap in both directions, and the column floor per card kind. */
+    --gap:var(--s6); --col:300px; --col-wide:430px; --side:300px;
+    --pad-card:var(--s6); --pad-box:var(--s6);
   }
   @media (prefers-color-scheme: dark) { :root {
     --bg:#101114; --surface:#181a1f; --sunk:#22252b; --fg:#ecedf0; --mut:#a2a8b4; --line:#2b2f37; --line-strong:#454a55;
     --acc:#8fabf6; --acc-ink:#0e1424; --bad:#f4958e; --bad-bg:#3a1f1d; --ok:#74d194; --ok-bg:#16301f; --warn:#e6bb62; --warn-bg:#352a10;
     --track:#2b2f37; --focus:#8fabf6;
   } }
+  /* A thumb needs 44px, and controls that share a row must still share one height. Raising the
+     three tokens in one place does both; a component that hard-codes its own touch height does not. */
+  @media (pointer:coarse) { :root { --h-ctl:44px; --h-ctl-sm:40px; --h-dis:40px; } }
   * { box-sizing:border-box; }
   /* scroll-padding clears the sticky tab bar, or an anchored card lands underneath it. */
-  html { -webkit-text-size-adjust:100%; scroll-padding-top:calc(var(--tabh) + 20px); }
-  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  .canvas { max-width:1440px; margin:0 auto; padding:20px 24px 56px; }
+  html { -webkit-text-size-adjust:100%; scroll-padding-top:calc(var(--tabh) + var(--s7)); }
+  body { margin:0; background:var(--bg); color:var(--fg); font:var(--fs4)/var(--lh) system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .canvas { max-width:var(--w-canvas); margin:0 auto; padding:var(--s7) var(--s8) var(--s10); }
   h1, h2, h3, p { margin:0; }
   button, input, select { font:inherit; color:inherit; }
-  :focus-visible { outline:2px solid var(--focus); outline-offset:2px; border-radius:4px; }
+  :focus-visible { outline:var(--fo) solid var(--focus); outline-offset:var(--fo); border-radius:var(--r-sm); }
   .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
-  .skip { position:absolute; left:12px; top:-60px; z-index:10; padding:8px 14px; background:var(--fg); color:var(--bg); border-radius:6px; text-decoration:none; font-weight:600; }
-  .skip:focus { top:12px; }
+  .skip { position:absolute; left:var(--s5); top:-60px; z-index:10; padding:var(--s4) var(--s6); background:var(--fg); color:var(--bg); border-radius:var(--r-ctl); text-decoration:none; font-weight:600; }
+  .skip:focus { top:var(--s5); }
   .mut { color:var(--mut); } .err { color:var(--bad); } .ok { color:var(--ok); }
   .num { font-variant-numeric:tabular-nums; }
+  /* The two shrink-to-fit helpers. A flex or grid child needs min-width:0 before it can ellipsis
+     at all, and .col/.trunc replace the inline style attributes the card builders used to set -
+     which a style-src nonce does not cover, so they were also the one CSP-shaped hole in here. */
+  /* minmax(0,1fr), not the implicit auto: an auto grid column is sized to its content, so a long
+     name would widen the column past the box and defeat the min-width:0 beside it. */
+  .col { display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s1); min-width:0; }
+  .trunc { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
   /* Header */
-  .top { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:4px 0 16px; }
-  .mark { display:flex; align-items:center; gap:10px; margin-right:auto; }
+  .top { display:flex; align-items:center; gap:var(--s5); flex-wrap:wrap; padding:var(--s2) 0 var(--s6); }
+  .mark { display:flex; align-items:center; gap:var(--s4); margin-right:auto; }
   /* The mark is the favicon, inline: the same tile and glyph, so the tab and the header match.
      Rules, not style attributes - a style-src nonce does not cover inline style attributes. */
   .mark svg { width:28px; height:28px; flex:none; }
   .mark .t { fill:var(--acc); }
   .mark .s { fill:none; stroke:var(--acc-ink); stroke-width:3; }
   .mark .h { fill:var(--acc-ink); }
-  h1 { font-size:1.25rem; font-weight:700; letter-spacing:-.01em; }
-  .scope { font-size:.85rem; color:var(--mut); }
-  .enrol { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-  #enrol-out { font-size:.9rem; min-height:1.5em; }
+  h1 { font-size:var(--fs6); font-weight:700; letter-spacing:-.01em; line-height:var(--lh-tight); }
+  .scope { font-size:var(--fs2); color:var(--mut); }
+  .enrol { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; }
+  #enrol-out { font-size:var(--fs3); min-height:1.5em; }
   /* #acct only: the account cards carry a .acct class too, and a flex-centre here shrank their meters. */
-  #acct { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-  #enrol-out .code { font:600 1.05rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:.06em; color:var(--fg); }
+  #acct { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; }
+  #enrol-out .code { font:600 var(--fs5)/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:.06em; color:var(--fg); }
 
-  /* Buttons: one primary per region, rest outlined. 36px+ hit height, 44px on touch. */
-  .btn { min-height:36px; padding:0 14px; border:1px solid var(--line-strong); background:var(--surface); border-radius:6px; cursor:pointer; font-weight:500; }
+  /* Buttons: one primary per region, rest outlined. The height comes from --h-ctl, so a button,
+     an input and a select that share a row are the same height at every pointer type. */
+  .btn { min-height:var(--h-ctl); padding:0 var(--s6); border:var(--bw) solid var(--line-strong); background:var(--surface); border-radius:var(--r-ctl); cursor:pointer; font-weight:500; }
   .btn:hover:not(:disabled) { border-color:var(--fg); }
   .btn:disabled { opacity:.5; cursor:not-allowed; }
   .btn.primary { background:var(--fg); color:var(--bg); border-color:var(--fg); }
   .btn.danger { color:var(--bad); border-color:var(--bad); }
-  .btn.sm { min-height:30px; padding:0 10px; font-size:.85rem; }
+  .btn.sm { min-height:var(--h-ctl-sm); padding:0 var(--s5); font-size:var(--fs2); }
   .btn.ghost { border-color:transparent; background:transparent; color:var(--mut); }
   .btn.ghost:hover:not(:disabled) { color:var(--fg); border-color:var(--line-strong); }
-  @media (pointer:coarse) { .btn { min-height:44px; } .btn.sm { min-height:40px; } }
 
-  input, select { min-height:36px; padding:0 10px; background:var(--surface); border:1px solid var(--line-strong); border-radius:6px; max-width:100%; }
-  @media (pointer:coarse) { input, select { min-height:44px; font-size:16px; } }
+  input, select { min-height:var(--h-ctl); padding:0 var(--s5); background:var(--surface); border:var(--bw) solid var(--line-strong); border-radius:var(--r-ctl); max-width:100%; }
+  /* 16px is the one size that is not a token: below it iOS zooms the page on focus. */
+  @media (pointer:coarse) { input, select { font-size:16px; } }
 
-  .notice { display:flex; gap:10px; align-items:flex-start; padding:10px 14px; margin-bottom:12px; background:var(--sunk); border-radius:var(--r); font-size:.9rem; color:var(--mut); }
+  .notice { display:flex; gap:var(--s5); align-items:flex-start; padding:var(--s5) var(--s6); margin-bottom:var(--s5); background:var(--sunk); border-radius:var(--r); font-size:var(--fs3); color:var(--mut); }
   .notice svg { width:18px; height:18px; flex:none; margin-top:2px; }
-  #status { min-height:1.5em; margin-bottom:8px; font-weight:500; }
+  #status { min-height:1.5em; margin-bottom:var(--s4); font-weight:500; }
 
   /* Shell: sidebar beside the main column on wide screens, a top section on narrow ones. */
-  .shell { display:grid; grid-template-columns:minmax(0,1fr); gap:20px; align-items:start; }
+  .shell { display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s7); align-items:start; }
   @media (min-width:1000px) {
-    .shell { grid-template-columns:300px minmax(0,1fr); gap:28px; }
+    .shell { grid-template-columns:var(--side) minmax(0,1fr); gap:var(--s8); }
     /* The markup is content-first; on a wide screen the sidebar goes back to the left column. */
-    .side { grid-area:1 / 1; position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+    .side { grid-area:1 / 1; position:sticky; top:var(--s6); max-height:calc(100vh - var(--s9)); overflow:auto; }
     .main { grid-area:1 / 2; }
   }
-  .side { display:grid; gap:14px; min-width:0; }
-  .panel { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:14px 16px; display:grid; gap:12px; min-width:0; }
-  .panel h2 { font-size:.95rem; }
+  .side { display:grid; gap:var(--gap); min-width:0; }
+  .panel { background:var(--surface); border:var(--bw) solid var(--line); border-radius:var(--r); padding:var(--pad-box); display:grid; gap:var(--s5); min-width:0; align-content:start; }
 
-  section { margin-top:0; }
-  .main { display:grid; gap:28px; min-width:0; }
-  .head { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
-  h2 { font-size:1rem; font-weight:700; }
-  .count { color:var(--mut); font-size:.9rem; }
+  .main { display:grid; gap:var(--s9); min-width:0; }
+  .head { display:flex; align-items:center; gap:var(--s5); margin-bottom:var(--s5); }
+  h2 { font-size:var(--fs5); font-weight:700; }
+  .count { color:var(--mut); font-size:var(--fs3); }
   .head .count { margin-right:auto; }
 
   /* The caret, shared by the account menu's disclosure button. */
   .chev { width:8px; height:8px; flex:none; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(-45deg); margin:0 2px 0 4px; }
 
-  /* Summary */
-  .stats { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:8px; margin:0; }
-  .stat { background:var(--sunk); border-radius:8px; padding:9px 11px; display:grid; gap:2px; align-content:start; min-width:0; }
-  .stat dt { font-size:.78rem; color:var(--mut); }
-  .stat dd { margin:0; font-size:1.45rem; line-height:1.15; font-weight:700; letter-spacing:-.02em; }
-  .stat dd small { font-size:.8rem; font-weight:500; color:var(--mut); letter-spacing:0; }
+  /* Summary. Four equal cells on one grid, so the labels share a baseline and the figures share
+     a left edge whatever the numbers are; the figure is a step on the type ladder, not a size of
+     its own. Each cell is align-content:start, so a two-line label never shifts its neighbour. */
+  .stats { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:var(--s4); margin:0; }
+  .stat { background:var(--sunk); border-radius:var(--r-ctl); padding:var(--s4) var(--s5); display:grid; gap:var(--s1); align-content:start; min-width:0; }
+  .stat dt { font-size:var(--fs1); color:var(--mut); }
+  .stat dd { margin:0; font-size:var(--fs7); line-height:var(--lh-tight); font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+  .stat dd small { font-size:var(--fs1); font-weight:500; color:var(--mut); letter-spacing:0; }
   .stat.alert { background:var(--warn-bg); } .stat.alert dd, .stat.alert dt { color:var(--warn); }
   .stat.hot { background:var(--bad-bg); } .stat.hot dd, .stat.hot dt { color:var(--bad); }
 
   /* Filters */
-  .filters { display:grid; gap:10px; }
+  .filters { display:grid; gap:var(--s5); }
   .filters input[type="search"] { width:100%; }
-  .seg { display:flex; flex-wrap:wrap; gap:6px; }
-  .seg button { min-height:32px; padding:0 10px; border:1px solid var(--line-strong); background:var(--surface); border-radius:16px; cursor:pointer; font-size:.85rem; font-weight:500; display:inline-flex; align-items:center; gap:6px; }
+  .seg { display:flex; flex-wrap:wrap; gap:var(--s3); }
+  .seg button { min-height:var(--h-ctl-sm); padding:0 var(--s5); border:var(--bw) solid var(--line-strong); background:var(--surface); border-radius:var(--r-pill); cursor:pointer; font-size:var(--fs2); font-weight:500; display:inline-flex; align-items:center; gap:var(--s3); }
   .seg button:hover { border-color:var(--fg); }
   .seg button[aria-pressed="true"] { background:var(--fg); color:var(--bg); border-color:var(--fg); }
   .seg button .n { font-variant-numeric:tabular-nums; opacity:.75; }
-  @media (pointer:coarse) { .seg button { min-height:40px; } }
 
   /* Tabs: the main column's two destinations. An underline on one full-width rule, so the bar reads
      as an edge rather than as a row of buttons, and sticky, so switching never needs a scroll back
      up. The count rides in the label; selection is the ink and the 2px underline, never colour. */
   .tabwrap { display:grid; min-width:0; }
-  .tabs { position:sticky; top:0; z-index:4; display:flex; flex-wrap:wrap; margin:0 0 16px; padding-top:8px;
-          background:var(--bg); box-shadow:inset 0 -1px 0 var(--line); }
-  .tabs [role="tab"] { position:relative; min-height:var(--tabh); margin-right:22px; padding:0 2px; background:none; border:0;
-          font:inherit; font-size:1rem; font-weight:600; color:var(--mut); cursor:pointer; display:inline-flex; align-items:center; gap:8px; }
+  .tabs { position:sticky; top:0; z-index:4; display:flex; flex-wrap:wrap; margin:0 0 var(--s6); padding-top:var(--s4);
+          background:var(--bg); box-shadow:inset 0 calc(var(--bw) * -1) 0 var(--line); }
+  .tabs [role="tab"] { position:relative; min-height:var(--tabh); margin-right:var(--s8); padding:0 var(--s1); background:none; border:0;
+          font:inherit; font-size:var(--fs5); font-weight:600; color:var(--mut); cursor:pointer; display:inline-flex; align-items:center; gap:var(--s4); }
   .tabs [role="tab"]:hover { color:var(--fg); }
   .tabs [role="tab"]::after { content:""; position:absolute; left:0; right:0; bottom:0; height:2px; background:transparent; }
   .tabs [role="tab"][aria-selected="true"] { color:var(--fg); }
   .tabs [role="tab"][aria-selected="true"]::after { background:var(--fg); }
-  .tabs [role="tab"]:focus-visible { outline-offset:-2px; }
-  .tabs .n { padding:1px 7px; border-radius:10px; background:var(--sunk); font-size:.8rem; font-weight:650; font-variant-numeric:tabular-nums; }
+  /* The tab bar is sticky, so its ring turns inward: at a positive offset the ring would be
+     clipped by the bar's own edge. */
+  .tabs [role="tab"]:focus-visible { outline-offset:calc(var(--fo) * -1); }
+  .tabs .n { padding:var(--s1) var(--s3); border-radius:var(--r-pill); background:var(--sunk); font-size:var(--fs1); font-weight:650; font-variant-numeric:tabular-nums; }
   .tabs [role="tab"][aria-selected="true"] .n { color:var(--fg); }
-  [role="tabpanel"]:focus-visible { outline-offset:5px; }
-  .panel-meta { margin:0 0 10px; }
+  [role="tabpanel"]:focus-visible { outline-offset:var(--fo-box); }
+  .panel-meta { margin:0 0 var(--s5); }
   .panel-meta:empty { display:none; }
 
-  /* Cards */
-  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap:var(--gap); align-items:start; }
-  .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:14px; display:flex; flex-direction:column; gap:12px; min-width:0; }
-  .card:focus-visible { outline-offset:3px; }
-  .card.acct { border-top:4px solid var(--line-strong); }
+  /* --- Cards and the row policy -------------------------------------------------------------
+     One policy for every card grid, and it is forced by what a CSS grid row does: a row is as
+     tall as its tallest item, whatever align-items says.
+
+       - Cards in a row STRETCH, so a row of collapsed cards shares a bottom edge. That is the
+         alignment an operator scans down, and it is what the measurement script checks.
+       - Any card whose disclosure is OPEN is lifted out of the shared row onto one of its own.
+         Without that second half, one open host card sized its whole row and left its two
+         collapsed neighbours stranded at the top of ~1200px of empty grid at 1440, with the
+         remaining rows pushed below the fold. align-items:start does not fix that - it only
+         moves the hole from inside the cards to beside them. Spanning does fix it: an open card
+         grows as much as its sessions need, stretches no sibling, and leaves no gap next to it.
+       - Because a stretched card can be taller than its own content, the card's footer row is
+         pinned to its bottom edge, so the slack lands behind the action rather than as a blank
+         band in the middle of a card. */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, var(--col)), 1fr)); gap:var(--gap); align-items:stretch; }
+  .card { background:var(--surface); border:var(--bw) solid var(--line); border-radius:var(--r); padding:var(--pad-card); display:flex; flex-direction:column; gap:var(--s5); min-width:0; }
+  /* .wide is set on a host card while its session list is open; the account cards already carry
+     .open. At one column every card is the whole row anyway, so this costs nothing on a phone.
+     The whole grid goes to one column, not only the open card: spanning just the open one left
+     its shut neighbours as orphans, one card wide in a three-column row with two columns of
+     nothing beside them (pine, between two expanded hosts). So a grid holding anything open is a
+     list, and a grid holding nothing open is the three-up wall of cards it was. That is also the
+     pair of states the Expand all / Collapse all buttons already switch between. */
+  .grid:has(> .card.wide) > .card, .grid:has(> .card.acct.open) > .card { grid-column:1 / -1; }
+  .card > .swap, .card > .tun-danger { margin-top:auto; }
+  /* A card in a listed grid has the width of the whole column, so what is inside it stops growing
+     once it has the width it needs: the session list runs in two columns, which is also what
+     keeps an open card from pushing the rows after it off the screen. */
+  @media (min-width:900px) {
+    .card.wide details.sess ul { grid-template-columns:repeat(2, minmax(0,1fr)); }
+    /* An odd count would otherwise end the list with one row half empty, which is the same hole
+       the grid policy above exists to close. The last row takes the full width instead. */
+    .card.wide details.sess li:last-child:nth-child(odd) { grid-column:1 / -1; }
+  }
+  .card:focus-visible { outline-offset:var(--fo-box); }
+  .card.acct { border-top:var(--bw-edge) solid var(--line-strong); }
   .card.acct.s-ok { border-top-color:var(--ok); }
   .card.acct.s-low { border-top-color:var(--warn); }
   .card.acct.s-out, .card.acct.s-err { border-top-color:var(--bad); }
-  .row { display:flex; align-items:center; gap:8px; min-width:0; }
+  .row { display:flex; align-items:center; gap:var(--s4); min-width:0; }
   .row.between { justify-content:space-between; }
   .row.wrap { flex-wrap:wrap; }
-  .row.between > :first-child { flex:1 1 0; min-width:0; } /* long names wrap instead of pushing the state out of the card */
-  .title { font-weight:650; font-size:1.05rem; overflow-wrap:anywhere; }
-  .sub { color:var(--mut); font-size:.88rem; overflow-wrap:anywhere; }
-  .empty { padding:16px; border:1px dashed var(--line-strong); border-radius:var(--r); color:var(--mut); grid-column:1 / -1; }
+  .row.between > :first-child { flex:1 1 0; min-width:0; } /* so a long name shrinks instead of pushing the state out of the card */
+  /* A name and an identity are one line each and truncate; the full string is in the title
+     attribute, which is also what a screen reader reads when the text is clipped. Only content
+     that must be compared character by character - a fingerprint, a key, a command - wraps. */
+  .title { font-weight:650; font-size:var(--fs5); }
+  .sub { color:var(--mut); font-size:var(--fs3); }
+  .empty { padding:var(--s6); border:var(--bw) dashed var(--line-strong); border-radius:var(--r); color:var(--mut); grid-column:1 / -1; }
 
-  /* Chips carry a glyph and a word, never colour alone. */
-  .chip { display:inline-flex; align-items:center; gap:5px; min-height:22px; padding:0 8px; border-radius:11px; font-size:.78rem; font-weight:600; white-space:nowrap; flex:none; background:var(--sunk); color:var(--mut); }
+  /* Chips carry a glyph and a word, never colour alone. A chip never shrinks and never wraps:
+     squeezed in a flex row it used to collapse to a box with its word spilling out. */
+  .chip { display:inline-flex; align-items:center; gap:var(--s3); min-height:var(--h-chip); padding:0 var(--s4); border-radius:var(--r-pill); font-size:var(--fs1); font-weight:600; white-space:nowrap; flex:none; background:var(--sunk); color:var(--mut); }
   .chip.ok { background:var(--ok-bg); color:var(--ok); }
   .chip.bad { background:var(--bad-bg); color:var(--bad); }
   .chip.warn { background:var(--warn-bg); color:var(--warn); }
   .chip svg { width:11px; height:11px; flex:none; }
 
-  /* Meters: the bar length, the % text and the Low/Out label each say the same thing. */
-  .meters { display:grid; gap:10px; }
-  .meter { display:grid; grid-template-columns:1fr auto; align-items:baseline; column-gap:10px; row-gap:5px; }
-  .meter .lbl { font-size:.82rem; color:var(--mut); font-weight:600; }
-  .meter .val { font-weight:700; text-align:right; }
+  /* Meters: the bar length, the % text and the Low/Out label each say the same thing. The label
+     and the value share one baseline; the bar and the reset time run the grid's full width, so
+     every meter in every card is the same three-row block of the same height. */
+  .meters { display:grid; gap:var(--s5); }
+  .meter { display:grid; grid-template-columns:1fr auto; align-items:baseline; column-gap:var(--s5); row-gap:var(--s3); }
+  .meter .lbl { font-size:var(--fs2); color:var(--mut); font-weight:600; }
+  .meter .val { font-weight:700; text-align:right; font-variant-numeric:tabular-nums; }
   .meter .bar { grid-column:1 / -1; }
+  /* The bar's own geometry: a 10px track with a fully round cap, not a step on the space scale. */
   .bar { height:10px; border-radius:5px; background:var(--track); overflow:hidden; }
   .bar > i { display:block; width:0; height:100%; background:var(--acc); border-radius:5px; }
-  .bar.low > i { background:repeating-linear-gradient(135deg, var(--warn) 0 4px, transparent 4px 7px); outline:1px solid var(--warn); outline-offset:-1px; }
+  .bar.low > i { background:repeating-linear-gradient(135deg, var(--warn) 0 4px, transparent 4px 7px); outline:var(--bw) solid var(--warn); outline-offset:calc(var(--bw) * -1); }
   .bar.out > i { background:var(--bad); }
-  .meter .reset { grid-column:1 / -1; font-size:.78rem; color:var(--mut); }
+  .meter .reset { grid-column:1 / -1; font-size:var(--fs1); color:var(--mut); }
   .meter.none .bar { background:repeating-linear-gradient(135deg, var(--track) 0 4px, transparent 4px 8px); }
 
-  .holder { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:.88rem; color:var(--mut); }
-  .holder strong { color:var(--fg); font-weight:650; overflow-wrap:anywhere; }
+  .holder { display:flex; align-items:center; gap:var(--s4); font-size:var(--fs3); color:var(--mut); min-width:0; }
+  .holder strong { color:var(--fg); font-weight:650; }
   /* The foot of an open card: when it was last polled, and the button that polls it now. */
-  .acct-foot { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; font-size:.85rem; color:var(--mut); border-top:1px solid var(--line); padding-top:9px; }
+  .acct-foot { display:flex; align-items:center; justify-content:space-between; gap:var(--s4); flex-wrap:wrap; font-size:var(--fs2); color:var(--mut); border-top:var(--bw) solid var(--line); padding-top:var(--s5); }
 
   /* --- Accounts tab: collapsed cards and refresh ------------------------------------------
      A card is closed by default and opens on its own header. The header is a real button, so
@@ -179,85 +259,108 @@
      or error chip sits beside it, outside the button, so it is read as state and not as part of
      the button's name. Closed, the card shows the name, the 7-day meter and that chip - what an
      operator scans a wall of cards for. The rest is one hidden block. */
-  .acct-top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .acct-top { display:flex; align-items:center; gap:var(--s4); }
   .acct-h { flex:1 1 0; min-width:0; font:inherit; }
-  .acct-dis { width:100%; min-height:30px; display:flex; align-items:center; gap:6px; padding:0;
+  /* The caret is a rotated square, so its drawn corners reach about 1.7px past its 8px layout
+     box. The trailing 2px keeps those corners inside the header instead of over the card's
+     content edge, which is where the caret used to sit by a hair. */
+  .acct-dis { width:100%; min-height:var(--h-dis); display:flex; align-items:center; gap:var(--s3); padding:0 var(--s1) 0 0;
               background:none; border:0; color:inherit; font:inherit; text-align:left; cursor:pointer; }
   .acct-dis:hover .title { color:var(--acc); }
-  .acct-dis .chev { margin-left:2px; color:var(--mut); }
+  /* No right margin: the button is width:100%, so the caret's own trailing margin pushed 2px of
+     the header past the card's content box. */
+  .acct-dis .chev { margin:0 0 0 var(--s1); color:var(--mut); }
   .acct-dis[aria-expanded="true"] .chev { transform:rotate(-135deg); margin-top:4px; }
-  @media (pointer:coarse) { .acct-dis { min-height:40px; } }
   /* Closed, the 7-day meter keeps its bar and its percentage and drops its reset time: the reset
-     time is detail, and it belongs with the other detail. */
+     time is detail, and it belongs with the other detail. Dropping it is also what makes every
+     collapsed card the same height - the one row that varies with the data is gone. */
   .card.acct:not(.open) .acct-brief .reset { display:none; }
-  .acct-body { display:flex; flex-direction:column; gap:12px; }
+  /* An open card owns its whole row, so at a width that can hold two columns its detail runs in
+     two rather than as one stack across a 1000px card with air down the right. */
+  .acct-body { display:grid; gap:var(--s5); align-content:start; }
+  /* The identity row and the foot take the full width; the 5-hour meter and the holder share the
+     middle row. Every cell is filled, so widening the card never leaves an empty half-row. */
+  @media (min-width:720px) {
+    .card.acct.open .acct-body { grid-template-columns:repeat(2, minmax(0,1fr)); column-gap:var(--s8); }
+    .card.acct.open .acct-body > :first-child, .card.acct.open .acct-foot { grid-column:1 / -1; }
+  }
   /* What one refresh said about this card. It stays visible closed, because a refused refresh is
      the one answer the card's own data cannot show. */
-  .acct-note { font-size:.82rem; color:var(--mut); }
+  .acct-note { font-size:var(--fs2); color:var(--mut); }
   .acct-note.bad { color:var(--bad); }
   .acct-note:empty { display:none; }
   /* The Accounts toolbar: open/close every card, and ask for a poll. */
-  .acc-tools { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 10px; }
-  .acc-tools .count, .acc-tools .say { font-size:.85rem; color:var(--mut); }
+  .acc-tools { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; margin:0 0 var(--s5); }
+  .acc-tools .count, .acc-tools .say { font-size:var(--fs2); color:var(--mut); }
   /* A refused round is a result; a request that did not land is a failure, and reads as one. */
   .acc-tools .say.bad { color:var(--bad); }
   .acc-tools .gap { flex:1 1 0; min-width:0; }
   .btn[aria-busy="true"] { opacity:1; }
   /* The busy mark is the word on the button; this ring is decoration. Under reduced motion the
      sheet's last rule stops every animation, so the ring is hidden there rather than left frozen. */
-  .spin { width:12px; height:12px; flex:none; margin-left:7px; display:inline-block; vertical-align:-1px;
+  .spin { width:12px; height:12px; flex:none; margin-left:var(--s3); display:inline-block; vertical-align:-1px;
           border:2px solid var(--line-strong); border-top-color:var(--fg); border-radius:50%; }
   @media (prefers-reduced-motion: reduce) { .spin { display:none !important; } }
 
   /* Rename */
-  .rename { display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex:1; min-width:0; }
-  .rename input { flex:1 1 140px; min-width:0; }
-  .rename .msg { flex-basis:100%; font-size:.85rem; color:var(--bad); min-height:0; }
+  .rename { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; flex:1; min-width:0; }
+  .rename input { flex:1 1 var(--fb-field); min-width:0; }
+  .rename .msg { flex-basis:100%; font-size:var(--fs2); color:var(--bad); min-height:0; }
   .rename .msg:empty { display:none; }
 
   /* Pending connections */
-  .pend { border:2px solid var(--acc); border-radius:var(--r); background:var(--surface); padding:14px 16px; margin-top:10px; display:grid; gap:6px; }
-  .fp { font:700 1.9rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:.1em; overflow-wrap:anywhere; }
-  .pend .actions { display:flex; gap:8px; margin-top:6px; flex-wrap:wrap; }
-  #pending-list > p { margin-top:2px; }
-  #pending-panel .none { color:var(--mut); padding:8px 12px; background:var(--sunk); border-radius:var(--r); font-size:.9rem; }
+  .pend { border:2px solid var(--acc); border-radius:var(--r); background:var(--surface); padding:var(--pad-box); margin-top:var(--s5); display:grid; gap:var(--s3); }
+  /* The fingerprint is compared character by character against what the agent printed, so it is
+     the one string on the page that wraps rather than truncates. */
+  .fp { font:700 var(--fs8)/var(--lh-tight) ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:.1em; overflow-wrap:anywhere; }
+  .pend .actions { display:flex; gap:var(--s4); margin-top:var(--s3); flex-wrap:wrap; }
+  #pending-list > p { margin-top:var(--s1); }
+  #pending-panel .none { color:var(--mut); padding:var(--s4) var(--s5); background:var(--sunk); border-radius:var(--r); font-size:var(--fs3); }
   /* With an empty queue the panel is one row, so it costs no scroll above the tabs. Browsers
      without :has() just keep the two-line stack. */
-  #pending-panel:has(.none) { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  #pending-panel:has(.none) { display:flex; align-items:center; gap:var(--s5); flex-wrap:wrap; }
   #pending-panel:has(.none) .head { margin-bottom:0; }
 
   /* Hosts */
   .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); flex:none; }
   .dot.off { background:transparent; border:2px solid var(--mut); }
-  details.sess summary { cursor:pointer; color:var(--mut); font-size:.88rem; min-height:32px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  details.sess summary { cursor:pointer; color:var(--mut); font-size:var(--fs3); min-height:var(--h-ctl-sm); display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; }
   details.sess summary:hover { color:var(--fg); }
-  details.sess ul { list-style:none; margin:6px 0 0; padding:0; display:grid; gap:6px; font-size:.82rem; }
+  details.sess ul { list-style:none; margin:var(--s3) 0 0; padding:0; display:grid; gap:var(--s3); font-size:var(--fs2); }
   /* A session stacks: its name heads the row, pid and cwd sit under it, and the restart
-     command comes last. A grid, not a flex row, so a long name cannot push the chips off. */
-  details.sess li { padding:7px 9px; background:var(--sunk); border-radius:6px; display:grid; gap:3px; min-width:0; }
-  details.sess li .srow { display:flex; gap:6px; align-items:center; flex-wrap:wrap; min-width:0; }
+     command comes last. A grid, not a flex row, so a long name cannot push the chips off.
+     Every row carries the same padding and the same minimum height, so a one-line row and a
+     four-line row in the same list sit on one rhythm instead of two. */
+  /* align-content:start, because in a two-column list a short row is stretched to its neighbour's
+     height and centred content then floats in the middle of its own box. Top-aligned, the names
+     of both sessions sit on one line. */
+  details.sess li { padding:var(--s4); background:var(--sunk); border-radius:var(--r-ctl); display:grid; gap:var(--s2); min-width:0; align-content:start; }
+  details.sess li .srow { display:flex; gap:var(--s3); align-items:center; flex-wrap:wrap; min-width:0; }
   /* The name is the row's heading. It stays on one line and truncates; the full name is in
      its title attribute, so nothing is lost. min-width:0 is what lets it shrink to ellipsis. */
-  .sname { font-weight:650; color:var(--fg); font-size:.88rem; min-width:0; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sname { font-weight:650; color:var(--fg); font-size:var(--fs3); flex:0 1 auto; }
   /* An unnamed session is headed by its pid, muted so a real name always reads stronger. */
   .sname.nameless { font-weight:550; color:var(--mut); }
-  .smeta { color:var(--mut); display:flex; gap:6px; align-items:baseline; flex-wrap:wrap; min-width:0; }
-  .smeta .scwd { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  /* A remote-control name is a name, not a path, so it keeps the body font. */
-  .smeta .srem { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .swap { display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-top:1px solid var(--line); padding-top:12px; min-height:56px; }
-  /* 120px basis: select, Swap and Revoke share one row in a 300px card instead of Revoke wrapping alone. */
-  .swap select { flex:1 1 120px; min-width:0; }
-  /* The ghost Copy button sits flush with the card's right edge, not inset by its own padding. */
-  details.sess li .btn.ghost { margin-right:-10px; }
-  .confirm { display:flex; gap:8px; flex-wrap:wrap; align-items:center; width:100%; }
+  .smeta { color:var(--mut); display:flex; gap:var(--s3); align-items:baseline; flex-wrap:wrap; min-width:0; }
+  .smeta .scwd { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .swap { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center; border-top:var(--bw) solid var(--line); padding-top:var(--s5);
+          min-height:calc(var(--h-ctl) + var(--s7)); }
+  /* 120px basis: select, Swap and Revoke share one row in a 300px card instead of Revoke wrapping
+     alone. The cap is what stops the same select stretching to 900px once the card owns its row:
+     a control is as wide as the longest account label, never as wide as the card. */
+  .swap select { flex:1 1 120px; min-width:0; max-width:260px; }
+  /* The Copy button keeps the row's padding rather than being pulled onto its edge. The pull it
+     used to carry put its right edge 8px past the content box of every row it sat in, so a
+     command row ended on a different line from the name and the chips above it; one right edge
+     per row is the whole point. */
+  .confirm { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center; width:100%; }
   .confirm .q { flex:1 1 100%; font-weight:600; }
   /* The swap verdict, on the card that produced it. Every press leaves one of these: working,
      swapped, already active, refused or failed. It takes the full row so it never squeezes the
      select, and the row reserves its height so the card does not jump when the verdict lands. */
-  .swap .why, .swap .swapmsg { flex:1 1 100%; font-size:.78rem; }
+  .swap .why, .swap .swapmsg { flex:1 1 100%; font-size:var(--fs1); }
   .swap .why { color:var(--mut); }
-  .swapmsg { display:flex; gap:6px; align-items:baseline; color:var(--mut); }
+  .swapmsg { display:flex; gap:var(--s3); align-items:baseline; color:var(--mut); }
   .swapmsg:empty { display:none; }
   .swapmsg.ok { color:var(--ok); }
   .swapmsg.bad { color:var(--bad); }
@@ -269,14 +372,14 @@
   /* Toasts repeat the verdict where the eye already is after a click, for the case where the card
      has scrolled off. Visual only: the announcement comes from the two live regions in the shell,
      which survive a card rebuild, so nothing is said twice. */
-  .toasts { position:fixed; right:16px; bottom:16px; z-index:30; display:grid; gap:8px;
-            width:min(22rem, calc(100vw - 32px)); pointer-events:none; }
-  .toast { background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--mut);
-           border-radius:var(--r); padding:10px 12px; font-size:.85rem; color:var(--fg);
-           box-shadow:0 6px 18px rgb(0 0 0 / .14); animation:toastin .18s ease-out; }
+  .toasts { position:fixed; right:var(--s6); bottom:var(--s6); z-index:30; display:grid; gap:var(--s4);
+            width:min(var(--w-toast), calc(100vw - var(--s9))); pointer-events:none; }
+  .toast { background:var(--surface); border:var(--bw) solid var(--line); border-left:var(--bw-edge) solid var(--mut);
+           border-radius:var(--r); padding:var(--s5); font-size:var(--fs2); color:var(--fg);
+           box-shadow:var(--sh-pop); animation:toastin .18s ease-out; }
   .toast.ok { border-left-color:var(--ok); }
   .toast.bad { border-left-color:var(--bad); }
-  .toast .who { color:var(--mut); font-size:.78rem; }
+  .toast .who { color:var(--mut); font-size:var(--fs1); }
   @keyframes toastin { from { opacity:0; transform:translateY(6px); } }
   @media (prefers-reduced-motion: reduce) {
     .swapmsg.work .dot { animation:none; }
@@ -285,40 +388,40 @@
 
   /* Session control. An inline message sits under the controls that produced it, never in the
      page-wide status line, so the error reads where the operator is looking. */
-  .msg { font-size:.85rem; color:var(--bad); }
+  .msg { font-size:var(--fs2); color:var(--bad); }
   .msg:empty { display:none; }
   /* The needs-reload callout: the one block that offers the estate-wide repair. It takes the
      warning edge the account cards use for the same state, not a tint of its own. */
-  .callout { background:var(--surface); border:1px solid var(--line); border-top:4px solid var(--warn);
-             border-radius:var(--r); padding:13px 16px; margin:0 0 16px; display:grid; gap:8px; }
-  .callout h2 { font-size:1rem; }
+  .callout { background:var(--surface); border:var(--bw) solid var(--line); border-top:var(--bw-edge) solid var(--warn);
+             border-radius:var(--r); padding:var(--pad-box); margin:0 0 var(--s6); display:grid; gap:var(--s4); }
   /* Host-wide asks sit on their own rule above the swap row, so "all sessions here" never reads
      as part of one session. */
-  .ctl { display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-top:1px solid var(--line); padding-top:12px; }
-  .ctl .ctl-h { flex:1 1 100%; font-size:.85rem; color:var(--mut); font-weight:600; }
+  .ctl { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center; border-top:var(--bw) solid var(--line); padding-top:var(--s5); }
+  .ctl .ctl-h { flex:1 1 100%; font-size:var(--fs2); color:var(--mut); font-weight:600; }
   .ctl .msg, .sctl .msg { flex:1 1 100%; }
   /* Per-session asks and their verdicts, inside the session row. */
-  .sctl { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-top:3px; }
-  .ctl .why, .sctl .why { font-size:.78rem; color:var(--mut); }
-  .cmds { display:grid; gap:4px; margin-top:2px; }
-  .cmd { display:flex; gap:6px; flex-wrap:wrap; align-items:baseline; min-width:0; }
-  .cmds .say { font-size:.78rem; color:var(--mut); }
-  /* The lead line carries the Copy button; the command itself runs full width underneath. */
+  .sctl { display:flex; gap:var(--s3); flex-wrap:wrap; align-items:center; margin-top:var(--s1); }
+  .ctl .why, .sctl .why { font-size:var(--fs1); color:var(--mut); }
+  .cmds { display:grid; gap:var(--s2); margin-top:var(--s1); }
+  .cmd { display:flex; gap:var(--s3); flex-wrap:wrap; align-items:baseline; min-width:0; }
+  .cmds .say { font-size:var(--fs1); color:var(--mut); }
+  /* The lead line carries the Copy button; the command itself runs full width underneath. A
+     command is pasted, so it wraps in full rather than truncating. */
   .copyline { display:grid; gap:1px; min-width:0; }
   .copyline code { overflow-wrap:anywhere; }
   /* The restart confirm names every session it would reach, one per row. A row carries a name, a
      subline and a command, so it gets the pitch a multi-line row needs rather than a data row's.
      The rows are separated by one tone step, never by a divider colour of their own, and the name
      wraps here instead of truncating: a confirm that abbreviates the name is not naming it. */
-  .slist { list-style:none; margin:0; padding:0; border:1px solid var(--line); border-radius:var(--r); }
-  .slist li { display:grid; gap:5px; padding:11px 12px; min-height:44px; align-content:center; min-width:0; }
-  .slist li + li { border-top:1px solid var(--line); }
+  .slist { list-style:none; margin:0; padding:0; border:var(--bw) solid var(--line); border-radius:var(--r); }
+  .slist li { display:grid; gap:var(--s3); padding:var(--s5); min-height:var(--h-row); align-content:center; min-width:0; }
+  .slist li + li { border-top:var(--bw) solid var(--line); }
   .slist .who { font-weight:650; overflow-wrap:anywhere; }
   .slist .who.nameless { font-weight:550; color:var(--mut); }
-  .slist .sub { font-size:.82rem; }
+  .slist .sub { font-size:var(--fs2); }
   /* A dialog body scrolls, so a long list is bounded here rather than pushing the buttons away. */
   #ctl-restart .slist { max-height:38vh; overflow:auto; }
-  .marked { font-size:.78rem; color:var(--mut); }
+  .marked { font-size:var(--fs1); color:var(--mut); }
 
   /* --- Tunnels ----------------------------------------------------------------------------
      The reverse SSH tunnel to each Linux host. Two rules shape this panel.
@@ -332,123 +435,127 @@
      column than an account card, the command runs full width under its Copy button, and it
      wraps anywhere rather than scrolling sideways. Monospace is for the key, the fingerprint
      and the command - the three places where it is the real typeface for the content. */
-  .tungrid { grid-template-columns:repeat(auto-fill, minmax(min(100%, 430px), 1fr)); }
-  .tun-tools { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 10px; }
-  .tun-tools .say { font-size:.85rem; color:var(--mut); }
+  .tungrid { grid-template-columns:repeat(auto-fill, minmax(min(100%, var(--col-wide)), 1fr)); }
+  .tun-tools { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; margin:0 0 var(--s5); }
+  .tun-tools .say { font-size:var(--fs2); color:var(--mut); }
   .tun-tools .gap { flex:1 1 0; min-width:0; }
-  .tun-meta { display:grid; gap:3px; font-size:.82rem; color:var(--mut); min-width:0; }
+  .tun-meta { display:grid; gap:var(--s1); font-size:var(--fs2); color:var(--mut); min-width:0; }
   .tun-meta .k { color:var(--mut); }
   .tun-meta .v { color:var(--fg); overflow-wrap:anywhere; }
-  .tun-meta .row { gap:6px; flex-wrap:wrap; align-items:baseline; }
+  .tun-meta .row { gap:var(--s3); flex-wrap:wrap; align-items:baseline; }
   /* The fingerprint is a key, so it keeps monospace, and it is quoted in full here: the Hosts
      tab carries only its first 8 characters, the same convention the enrolment fingerprint uses. */
-  .tun-fp { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.8rem;
+  .tun-fp { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:var(--fs1);
             color:var(--fg); overflow-wrap:anywhere; }
-  .tun-why { font-size:.82rem; color:var(--mut); }
+  .tun-why { font-size:var(--fs2); color:var(--mut); }
   .tun-why.bad { color:var(--bad); }
-  .tun-cmds { display:grid; gap:10px; border-top:1px solid var(--line); padding-top:12px; min-width:0; }
-  .tun-cmds code { font-size:.78rem; }
+  .tun-cmds { display:grid; gap:var(--s5); border-top:var(--bw) solid var(--line); padding-top:var(--s5); min-width:0; }
+  .tun-cmds code { font-size:var(--fs1); }
   /* The commands an operator needs only sometimes - the remove line, and the tightened line that
      has not been verified on a real host - fold away behind a disclosure, so the card leads with
      the one line that is actually pasted. display:flex on a summary drops the browser's own
      triangle, so the caret is drawn back explicitly: a disclosure nobody can see is not one. */
-  .tun-opt summary { cursor:pointer; color:var(--mut); font-size:.82rem; min-height:32px;
-                     display:flex; align-items:center; gap:4px; list-style:none; }
+  /* On a phone this is the only control on the card that is not a button, and it is the way to
+     every command the card is not already showing, so it takes the control height like the rest. */
+  .tun-opt summary { cursor:pointer; color:var(--mut); font-size:var(--fs2); min-height:var(--h-ctl-sm);
+                     display:flex; align-items:center; gap:var(--s2); list-style:none; }
   .tun-opt summary::-webkit-details-marker { display:none; }
   .tun-opt summary:hover { color:var(--fg); }
-  /* On a phone this is the only control on the card that is not a button, and it is the way to
-     every command the card is not already showing: it gets a thumb-sized target like the rest. */
-  @media (pointer:coarse) { .tun-opt summary { min-height:40px; } }
   .tun-opt summary .chev { transform:rotate(45deg); margin-top:-2px; }
   .tun-opt[open] summary .chev { transform:rotate(-135deg); margin-top:2px; }
-  .tun-opt .body { display:grid; gap:10px; margin-top:8px; }
-  .tun-acts { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
-              border-top:1px solid var(--line); padding-top:12px; }
+  .tun-opt .body { display:grid; gap:var(--s5); margin-top:var(--s4); }
+  .tun-acts { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center;
+              border-top:var(--bw) solid var(--line); padding-top:var(--s5); }
   /* Destructive actions last, in a group of their own, outlined in the negative colour, with
      the consequence written out above them. The confirmation names the host. */
-  .tun-danger { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
-                border-top:1px solid var(--line); padding-top:12px; }
-  .tun-danger .lead { flex:1 1 100%; font-size:.78rem; color:var(--mut); }
-  .tun-msg { flex:1 1 100%; font-size:.82rem; }
+  .tun-danger { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center;
+                border-top:var(--bw) solid var(--line); padding-top:var(--s5); }
+  .tun-danger .lead { flex:1 1 100%; font-size:var(--fs1); color:var(--mut); }
+  .tun-msg { flex:1 1 100%; font-size:var(--fs2); }
   .tun-msg:empty { display:none; }
   .tun-msg.ok { color:var(--ok); }
   .tun-msg.bad { color:var(--bad); }
-  .tun-add { display:grid; gap:12px; }
-  .tun-add .pair { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap:12px; }
+  .tun-add { display:grid; gap:var(--s5); }
+  .tun-add .pair { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, var(--fb-field)), 1fr)); gap:var(--s5); }
 
   /* Why a host names no account: one step in the ground inside the card that failed to name one,
      never a tinted ground of its own. The sentence is in the full ink; the fix is secondary. */
-  .whyid { background:var(--sunk); border-radius:var(--r); padding:10px 12px; display:grid; gap:6px; font-size:.9rem; min-width:0; }
+  .whyid { background:var(--sunk); border-radius:var(--r); padding:var(--s5); display:grid; gap:var(--s3); font-size:var(--fs3); min-width:0; }
   .whyid p { margin:0; overflow-wrap:anywhere; }
-  .whyid .fix { color:var(--mut); font-size:.85rem; }
+  .whyid .fix { color:var(--mut); font-size:var(--fs2); }
   #ctl-summary:empty, #ctl-name-for:empty { display:none; }
 
   /* Account menu: a disclosure button over a floating menu. A shadow is for what floats. */
   .menuwrap { position:relative; }
-  #acct-btn { display:inline-flex; align-items:center; gap:8px; }
+  #acct-btn { display:inline-flex; align-items:center; gap:var(--s4); }
   #acct-btn svg { width:15px; height:15px; flex:none; }
   .chev.dn { transform:rotate(45deg); margin:-3px 0 0 2px; }
   #acct-btn[aria-expanded="true"] .chev.dn { transform:rotate(-135deg); margin:3px 0 0 2px; }
-  .menu { position:absolute; right:0; top:calc(100% + 6px); z-index:30; min-width:236px; padding:6px; display:grid; gap:2px;
-          background:var(--surface); border:1px solid var(--line-strong); border-radius:var(--r); box-shadow:0 10px 28px rgb(0 0 0 / .18); }
-  .mi { width:100%; min-height:40px; padding:0 12px; display:flex; align-items:center; gap:16px; text-align:left; white-space:nowrap;
-        background:transparent; border:0; border-radius:6px; font:inherit; font-weight:500; color:inherit; cursor:pointer; }
+  .menu { position:absolute; right:0; top:calc(100% + var(--s3)); z-index:30; min-width:var(--w-menu); padding:var(--s3); display:grid; gap:var(--s1);
+          background:var(--surface); border:var(--bw) solid var(--line-strong); border-radius:var(--r); box-shadow:var(--sh-pop); }
+  .mi { width:100%; min-height:var(--h-ctl); padding:0 var(--s5); display:flex; align-items:center; gap:var(--s6); text-align:left; white-space:nowrap;
+        background:transparent; border:0; border-radius:var(--r-ctl); font:inherit; font-weight:500; color:inherit; cursor:pointer; }
   .mi:hover { background:var(--sunk); }
   .mi.out { color:var(--bad); }
-  .mi .note { margin-left:auto; font-size:.8rem; font-weight:400; color:var(--mut); }
-  .mi-rule { height:1px; margin:4px 8px; background:var(--line); }
-  @media (pointer:coarse) { .mi { min-height:44px; } }
-  #add-busy { display:inline-flex; align-items:center; gap:7px; }
+  .mi .note { margin-left:auto; font-size:var(--fs1); font-weight:400; color:var(--mut); }
+  .mi-rule { height:var(--bw); margin:var(--s2) var(--s4); background:var(--line); }
+  #add-busy { display:inline-flex; align-items:center; gap:var(--s3); }
   #add-busy .dot { background:var(--warn); }
 
   /* Modals: native <dialog>, so Esc closes, Tab stays inside and focus returns to the opener.
      Only [open] gets a display, or the UA's dialog:not([open]) rule is overridden and it never shuts. */
-  .modal { width:min(580px, calc(100vw - 28px)); max-height:86vh; max-height:calc(100dvh - 48px); padding:0; color:var(--fg);
-           background:var(--surface); border:1px solid var(--line-strong); border-radius:var(--r); box-shadow:0 20px 50px rgb(0 0 0 / .26); }
+  .modal { width:min(var(--w-modal), calc(100vw - var(--s8))); max-height:86vh; max-height:calc(100dvh - var(--s10)); padding:0; color:var(--fg);
+           background:var(--surface); border:var(--bw) solid var(--line-strong); border-radius:var(--r); box-shadow:var(--sh-modal); }
   .modal[open] { display:grid; grid-template-rows:auto minmax(0,1fr); }
   .modal::backdrop { background:rgb(0 0 0 / .55); }
-  .modal-head { display:flex; align-items:center; gap:12px; padding:13px 14px 13px 16px; border-bottom:1px solid var(--line); }
+  /* The head's own padding is one step tighter than the body's, so the close button lands on the
+     body's right edge rather than inside it. */
+  .modal-head { display:flex; align-items:center; gap:var(--s5); padding:var(--s5) var(--s5) var(--s5) var(--s6); border-bottom:var(--bw) solid var(--line); }
   .modal-head h2 { margin-right:auto; }
-  .modal-head .x { min-height:32px; padding:0 9px; }
+  /* The height comes from .btn.sm, which the close button already carries. */
+  .modal-head .x { padding:0 var(--s4); }
   .modal-head .x svg { width:13px; height:13px; display:block; }
-  .modal-body { padding:16px; overflow:auto; display:grid; grid-template-columns:minmax(0,1fr); gap:16px; align-content:start; }
-  .modal-foot { display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
-  .fld { display:grid; gap:6px; font-weight:500; }
+  .modal-body { padding:var(--s6); overflow:auto; display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s6); align-content:start; }
+  /* A dialog quotes fingerprints, keys and host names inside its prose, and a 50-character token
+     with no break opportunity in it pushed the whole dialog sideways on a phone. anywhere breaks
+     only when there is no other way, unlike break-all, so ordinary sentences are unaffected. */
+  .modal-body p { overflow-wrap:anywhere; }
+  .modal-foot { display:flex; justify-content:flex-end; gap:var(--s4); flex-wrap:wrap; }
+  .fld { display:grid; gap:var(--s3); font-weight:500; }
   .fld input { width:100%; }
-  .fld .hint { font-weight:400; font-size:.85rem; color:var(--mut); }
-  #pw-form, #ctl-name-form { display:grid; grid-template-columns:minmax(0,1fr); gap:14px; }
+  .fld .hint { font-weight:400; font-size:var(--fs2); color:var(--mut); }
+  #pw-form, #ctl-name-form { display:grid; grid-template-columns:minmax(0,1fr); gap:var(--gap); }
   #pw-msg:empty { display:none; }
 
   /* Import and add-account panels, both inside the Add a Claude account dialog */
-  .import { padding:14px 16px; border:1px solid var(--line); border-radius:var(--r); display:grid; grid-template-columns:minmax(0,1fr); gap:10px; background:var(--sunk); }
+  .import { padding:var(--pad-box); border:var(--bw) solid var(--line); border-radius:var(--r); display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s5); background:var(--sunk); }
   .import .lead { font-weight:600; color:var(--fg); }
-  .import form { display:flex; gap:8px; flex-wrap:wrap; }
-  .import select, .import input { flex:1 1 160px; min-width:0; }
+  .import form { display:flex; gap:var(--s4); flex-wrap:wrap; }
+  .import select, .import input { flex:1 1 var(--fb-field); min-width:0; }
   [hidden] { display:none !important; }
-  .add-flow { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; }
-  .add-flow form { display:flex; gap:8px; flex-wrap:wrap; }
+  .add-flow { display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s5); }
+  .add-flow form { display:flex; gap:var(--s4); flex-wrap:wrap; }
   .add-flow input { flex:1 1 220px; min-width:0; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   /* The sign-in link is an <a> styled as a button; only it needs the colour reset, or it would
      take the danger colour off the Cancel button beside it. */
   .add-flow a.btn { display:inline-flex; align-items:center; justify-content:center; text-decoration:none; width:fit-content; color:inherit; }
   .add-flow a.btn.primary { color:var(--bg); }
-  .add-flow .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .add-flow .actions { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center; }
 
   /* Login */
-  .login { max-width:380px; margin:12vh auto 0; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:24px; display:grid; gap:14px; }
-  .login form { display:grid; gap:14px; }
-  .login label { display:grid; gap:6px; font-weight:500; }
+  .login { max-width:var(--w-login); margin:12vh auto 0; background:var(--surface); border:var(--bw) solid var(--line); border-radius:var(--r); padding:var(--s8); display:grid; gap:var(--gap); }
+  .login form { display:grid; gap:var(--gap); }
+  .login label { display:grid; gap:var(--s3); font-weight:500; }
   .login input { width:100%; }
 
   @media (max-width:560px) {
-    .canvas { padding:14px 14px 48px; }
+    .canvas { padding:var(--s6) var(--s6) var(--s10); }
     /* The wordmark takes the first line; the enrolment button and the account menu share the
        second, so the header costs two rows rather than three and the tabs sit higher. */
-    .top { align-items:center; position:relative; padding-bottom:14px; }
+    .top { align-items:center; position:relative; padding-bottom:var(--s6); }
     .mark { flex:1 1 100%; margin-right:0; }
     .enrol { flex:0 1 auto; margin-right:auto; }
-    .fp { font-size:1.5rem; }
-    .stat dd { font-size:1.35rem; }
+    .fp { font-size:var(--fs7); }
     /* On a phone the menu spans the header instead of the button, or its labels wrap. */
     #acct { position:static; }
     .menuwrap { position:static; }
@@ -874,6 +981,9 @@
 (function () {
   var csrf = document.querySelector('meta[name="csrf-token"]').content;
   var $ = function (s) { return document.querySelector(s); };
+  // titled puts the full string in the title attribute of a node that truncates, so a clipped
+  // name, identity or path is still readable by pointer, by keyboard and to a screen reader.
+  function titled(e, full) { if (full) e.title = String(full); return e; }
   function el(tag, text, cls) { var e = document.createElement(tag); if (text !== undefined && text !== null) e.textContent = text; if (cls) e.className = cls; return e; }
   function say(msg) { $('#status').textContent = msg || ''; }
   function call(method, path, body) {
@@ -1108,8 +1218,11 @@
     var row = el('div', undefined, 'row between');
     function show() {
       editing = null; row.textContent = '';
-      var t = el('div'); t.style.setProperty('min-width', '0');
-      t.appendChild(el('div', a.identity, 'sub'));
+      var t = el('div', undefined, 'col');
+      // An identity is an email or a uuid, so it is long and it is not compared by eye: one line
+      // with an ellipsis, and the whole string in the title, which is also what a screen reader
+      // reads back when the text is clipped.
+      t.appendChild(titled(el('div', a.identity, 'sub trunc'), a.identity));
       row.appendChild(t);
       var r = row.appendChild(el('button', 'Rename', 'btn sm ghost')); r.type = 'button';
       r.setAttribute('aria-label', 'Rename ' + a.label);
@@ -1191,7 +1304,7 @@
     dis.id = 'acct-dis-' + a.id;
     dis.setAttribute('aria-expanded', open ? 'true' : 'false');
     dis.setAttribute('aria-controls', bodyID);
-    dis.appendChild(el('span', a.label, 'title'));
+    dis.appendChild(titled(el('span', a.label, 'title trunc'), a.label));
     var cv = el('span', undefined, 'chev dn'); cv.setAttribute('aria-hidden', 'true');
     dis.appendChild(cv);
     dis.addEventListener('click', function () { setOpen(c, dis.getAttribute('aria-expanded') !== 'true'); });
@@ -1217,7 +1330,7 @@
     body.appendChild(ms);
     var held = el('div', undefined, 'holder');
     held.appendChild(el('span', 'Held by'));
-    if (a.owner) { held.appendChild(el('span', undefined, 'dot')); held.appendChild(el('strong', a.owner)); }
+    if (a.owner) { held.appendChild(el('span', undefined, 'dot')); held.appendChild(titled(el('strong', a.owner, 'trunc'), a.owner)); }
     else held.appendChild(chip('Free', '', 'info'));
     body.appendChild(held);
     var foot = el('div', undefined, 'acct-foot');
@@ -1938,10 +2051,10 @@
     var li = el('li');
     var head = el('div', undefined, 'srow');
     var named = !!s.name;
-    var heading = el('span', named ? s.name : 'pid ' + s.pid, 'sname' + (named ? '' : ' nameless'));
     // A truncated name must still be readable in full, and the title is also what a
     // screen-reader user hears when the text is clipped.
-    if (named) heading.title = s.name;
+    var heading = titled(el('span', named ? s.name : 'pid ' + s.pid, 'sname trunc' + (named ? '' : ' nameless')),
+      named ? s.name : '');
     head.appendChild(heading);
     if (s.status) {
       var st = chip(String(s.status).slice(0, STATUS_CAP));
@@ -1958,18 +2071,11 @@
     // pid and cwd are secondary: the pid only repeats here when the name heads the row.
     var meta = el('div', undefined, 'smeta');
     if (named) meta.appendChild(el('span', 'pid ' + s.pid));
-    if (s.cwd) {
-      var cw = el('span', shortCwd(s.cwd), 'scwd');
-      cw.title = s.cwd;
-      meta.appendChild(cw);
-    }
+    if (s.cwd) meta.appendChild(titled(el('span', shortCwd(s.cwd), 'scwd trunc'), s.cwd));
     // A remote-control name is a separate field from the session's own name. Claude Code
-    // writes none today, so this line normally does not appear.
-    if (s.remoteName) {
-      var rn = el('span', 'remote: ' + s.remoteName, 'srem');
-      rn.title = s.remoteName;
-      meta.appendChild(rn);
-    }
+    // writes none today, so this line normally does not appear. It is a name, not a path, so
+    // it keeps the body font and only takes the shared truncation.
+    if (s.remoteName) meta.appendChild(titled(el('span', 'remote: ' + s.remoteName, 'trunc'), s.remoteName));
     if (meta.childNodes.length) li.appendChild(meta);
 
     // Nothing can reload a running session's login, so hand over the restart command.
@@ -1986,12 +2092,13 @@
   function hostCard(h) {
     var c = el('article', undefined, 'card'); c.dataset.host = h.hostId; c.tabIndex = -1;
     var top = el('div', undefined, 'row between');
-    var t = el('div'); t.style.setProperty('min-width', '0');
-    t.appendChild(el('div', h.name, 'title'));
+    var t = el('div', undefined, 'col');
+    t.appendChild(titled(el('div', h.name, 'title trunc'), h.name));
     // The run-as user belongs with the OS: both say what this host is, not what it is doing, so
     // it goes on the same subtitle line rather than competing with the account and state row.
     // Omitted when the agent has not reported one, so the line never reads 'runs as nothing'.
-    t.appendChild(el('div', h.runAs ? h.os + ' · agent runs as ' + h.runAs : h.os, 'sub'));
+    var os = h.runAs ? h.os + ' · agent runs as ' + h.runAs : h.os;
+    t.appendChild(titled(el('div', os, 'sub trunc'), os));
     top.appendChild(t);
     var state = el('span', undefined, 'row');
     state.appendChild(el('span', undefined, 'dot' + (h.online ? '' : ' off')));
@@ -2042,7 +2149,15 @@
     } else {
       var d = el('details', undefined, 'sess'), dflt = stale > 0 || cmdTotal > 0;
       d.open = !!pref(sessKey(h), dflt);
-      d.addEventListener('toggle', function () { if (d.open !== !!pref(sessKey(h), dflt)) { prefs[sessKey(h)] = d.open; savePrefs(); } });
+      // An open session list is what makes a host card tall, so the card is lifted onto a row of
+      // its own while it is open. Without it one open card sized the whole grid row and left its
+      // collapsed neighbours stranded beside ~1200px of empty grid at 1440. The class is set here
+      // rather than left to :has(), so the span is decided by the same state the preference is.
+      c.classList.toggle('wide', d.open);
+      d.addEventListener('toggle', function () {
+        c.classList.toggle('wide', d.open);
+        if (d.open !== !!pref(sessKey(h), dflt)) { prefs[sessKey(h)] = d.open; savePrefs(); }
+      });
       var sm = el('summary');
       sm.appendChild(el('span', label));
       if (stale) sm.appendChild(chip(stale === 1 ? '1 needs reload' : stale + ' need reload', 'warn', 'warn'));
