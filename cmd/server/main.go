@@ -196,8 +196,10 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, errO
 	defer cancel()
 	go h.Run(ctx)
 	// Poll every stored account, including ones a host currently holds: the agent sends no usage
-	// report, so the vault copy (refreshed by swap write-back) is the only source.
-	go poller.Run(ctx, v.List, nil)
+	// report, so the vault copy (refreshed by swap write-back) is the only source. The accounts are
+	// set before the listener starts, so an admin's Refresh cannot arrive before the source exists.
+	poller.SetAccounts(v.List)
+	go poller.Run(ctx, nil)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.ServeWS)
