@@ -1,8 +1,10 @@
 // Command server runs the claude-swap hub and admin UI on one TLS listener: agents connect to
-// /ws, the browser uses everything else.
+// /ws, the browser uses everything else. The set-password subcommand replaces the admin UI
+// password stored in the data dir.
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -13,9 +15,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
+	"claude-utilities/internal/adminpw"
 	"claude-utilities/internal/hub"
 	"claude-utilities/internal/logx"
 	"claude-utilities/internal/ownership"
@@ -31,9 +37,17 @@ const (
 	shutdownWait = 5 * time.Second
 )
 
+// usageText is the command summary; the name avoids the internal/usage import.
+const usageText = `usage: server <flags> | server set-password [--data-dir DIR]
+  --listen host:port     run the hub and admin UI (required, no default)
+  --data-dir DIR         vault, host list, TLS certificate and admin password hash
+  set-password           replace the admin UI password; it is read from a no-echo
+                         prompt when stdin is a terminal, else one line of stdin.
+                         There is no flag for it, by design.`
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Getenv, os.Stderr)
+	code := run(ctx, os.Args[1:], os.Getenv, os.Stdin, os.Stderr)
 	stop()
 	os.Exit(code)
 }
@@ -46,12 +60,16 @@ func defaultDataDir() string {
 }
 
 // run returns the process exit code: 0 clean stop, 1 runtime failure, 2 bad usage or missing secrets.
-func run(ctx context.Context, args []string, getenv func(string) string, errOut io.Writer) int {
+func run(ctx context.Context, args []string, getenv func(string) string, in io.Reader, errOut io.Writer) int {
+	if len(args) > 0 && args[0] == "set-password" {
+		return setPasswordCmd(args[1:], in, errOut)
+	}
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 	listen := fs.String("listen", "", "host:port to listen on (required, no default)")
-	dataDir := fs.String("data-dir", defaultDataDir(), "directory for the vault, host list and TLS certificate")
+	dataDir := fs.String("data-dir", defaultDataDir(), "directory for the vault, host list, TLS certificate and admin password hash")
 	if err := fs.Parse(args); err != nil {
+		_, _ = fmt.Fprintln(errOut, usageText)
 		return 2
 	}
 	if *listen == "" {
@@ -62,18 +80,104 @@ func run(ctx context.Context, args []string, getenv func(string) string, errOut 
 		_, _ = fmt.Fprintln(errOut, "server: --listen must be host:port")
 		return 2
 	}
-	if getenv(keyEnv) == "" || getenv(passwordEnv) == "" {
-		_, _ = fmt.Fprintf(errOut, "server: set %s (vault passphrase) and %s (admin UI password)\n", keyEnv, passwordEnv)
+	if getenv(keyEnv) == "" {
+		_, _ = fmt.Fprintf(errOut, "server: set %s (vault passphrase)\n", keyEnv)
 		return 2
 	}
-	if err := serve(ctx, *listen, *dataDir, getenv(passwordEnv), errOut); err != nil && !errors.Is(err, context.Canceled) {
+	// A stored hash wins over the environment variable, which is only the bootstrap for a data
+	// dir that has never had `server set-password` run against it.
+	pw, err := adminpw.Open(passwordPath(*dataDir), getenv(passwordEnv))
+	if err != nil {
+		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
+		return 1
+	}
+	if !pw.Stored() && getenv(passwordEnv) == "" {
+		_, _ = fmt.Fprintf(errOut, "server: set %s (admin UI password) or run `server set-password` first\n", passwordEnv)
+		return 2
+	}
+	if err := serve(ctx, *listen, *dataDir, pw, errOut); err != nil && !errors.Is(err, context.Canceled) {
 		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
 		return 1
 	}
 	return 0
 }
 
-func serve(ctx context.Context, listen, dataDir, password string, errOut io.Writer) error {
+// passwordPath is where the argon2id admin password hash lives inside a data dir.
+func passwordPath(dataDir string) string { return filepath.Join(dataDir, adminpw.FileName) }
+
+// setPasswordCmd replaces the stored admin password. The password is never taken from a flag:
+// argv is visible to every process on the host. With a terminal on stdin it is prompted for
+// twice with echo off; otherwise one line is read from stdin, so a script can pipe it in.
+func setPasswordCmd(args []string, in io.Reader, errOut io.Writer) int {
+	fs := flag.NewFlagSet("set-password", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	dataDir := fs.String("data-dir", defaultDataDir(), "directory holding the admin password hash")
+	if err := fs.Parse(args); err != nil {
+		_, _ = fmt.Fprintln(errOut, usageText)
+		return 2
+	}
+	if fs.NArg() != 0 {
+		_, _ = fmt.Fprintln(errOut, "set-password: the password is read from the prompt or stdin, never from an argument")
+		return 2
+	}
+	pwd, err := readNewPassword(in, errOut)
+	if err != nil {
+		_, _ = fmt.Fprintln(errOut, "set-password:", logx.Redact(err.Error()))
+		return 2
+	}
+	store, err := adminpw.Open(passwordPath(*dataDir), "")
+	if err != nil {
+		_, _ = fmt.Fprintln(errOut, "set-password:", logx.Redact(err.Error()))
+		return 1
+	}
+	if err := store.Set(pwd); err != nil {
+		_, _ = fmt.Fprintln(errOut, "set-password:", logx.Redact(err.Error()))
+		if errors.Is(err, adminpw.ErrTooShort) {
+			return 2
+		}
+		return 1
+	}
+	// A running server read the hash once at startup, so it keeps accepting the old password and
+	// keeps its sessions until it restarts. Only the UI's own change ends sessions immediately.
+	_, _ = fmt.Fprintf(errOut, "set-password: stored in %s; %s is no longer used. Restart the server to pick this up: "+
+		"a running one keeps the old password and its open sessions until then.\n", passwordPath(*dataDir), passwordEnv)
+	return 0
+}
+
+// readNewPassword reads the new password without echoing it when in is a terminal, and without a
+// confirmation prompt when it is not (a pipe cannot be asked twice).
+func readNewPassword(in io.Reader, errOut io.Writer) (string, error) {
+	if f, ok := in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		_, _ = fmt.Fprintf(errOut, "New admin password (%d characters or more, not echoed): ", adminpw.MinLength)
+		first, err := term.ReadPassword(int(f.Fd()))
+		_, _ = fmt.Fprintln(errOut)
+		if err != nil {
+			return "", fmt.Errorf("read password: %w", err)
+		}
+		_, _ = fmt.Fprint(errOut, "Repeat it: ")
+		second, err := term.ReadPassword(int(f.Fd()))
+		_, _ = fmt.Fprintln(errOut)
+		if err != nil {
+			return "", fmt.Errorf("read password: %w", err)
+		}
+		if string(first) != string(second) {
+			return "", errors.New("the two passwords do not match")
+		}
+		return string(first), nil
+	}
+	// Not a terminal: take exactly one line, so a trailing newline from `echo` is not part of it.
+	br := bufio.NewReader(io.LimitReader(in, maxStdinPassword))
+	line, err := br.ReadString('\n')
+	if err != nil && (!errors.Is(err, io.EOF) || line == "") {
+		return "", errors.New("no password on stdin")
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
+// maxStdinPassword bounds a piped password so a stuck or hostile producer cannot be read forever.
+const maxStdinPassword = 4 << 10
+
+func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, errOut io.Writer) error {
 	certFile, keyFile, fp, err := hub.EnsureCert(filepath.Join(dataDir, "tls"))
 	if err != nil {
 		return err
@@ -97,7 +201,7 @@ func serve(ctx context.Context, listen, dataDir, password string, errOut io.Writ
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.ServeWS)
-	mux.Handle("/", web.Handler(h, v, poller, password))
+	mux.Handle("/", web.Handler(h, v, poller, pw))
 	srv := &http.Server{Addr: listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
 	_, _ = fmt.Fprintf(errOut, "server: listening on https://%s  certificate sha256=%s\n", listen, fp)

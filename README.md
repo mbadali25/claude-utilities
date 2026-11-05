@@ -21,8 +21,22 @@ Environment variables:
 
 - `CLAUDESWAP_KEY`: passphrase for the server's account vault. Required for the server only; the agent does not use it.
 - `CLAUDESWAP_STATE_DIR`: the agent's state directory (set by the installed unit).
-- `CLAUDESWAP_ADMIN_PASSWORD`: password for the web UI.
+- `CLAUDESWAP_ADMIN_PASSWORD`: bootstrap password for the web UI. It is used only until a password is stored in the data dir; after that the stored one wins and this variable is ignored.
 - `CLAUDE_CONFIG_DIR`: where Claude Code keeps its credential file on a host (optional).
+
+## Admin password
+
+The server authenticates the admin UI against an argon2id hash in `<data-dir>/admin-password.json`
+(0600, owner-only ACL on Windows). While that file does not exist, `CLAUDESWAP_ADMIN_PASSWORD`
+is the bootstrap. Change the password either in the UI (**Admin password**, which ends every
+signed-in session) or from the command line:
+
+```
+go run ./cmd/server set-password [--data-dir DIR]
+```
+
+It prompts twice with echo off at a terminal, or reads one line from stdin when piped. There is no
+flag for the password: argv is readable by every process on the host. The minimum is 12 characters.
 
 ## Enrol an agent
 

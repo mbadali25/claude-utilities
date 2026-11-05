@@ -7,7 +7,6 @@ package web
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	_ "embed"
 	"encoding/base64"
@@ -22,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"claude-utilities/internal/adminpw"
 	"claude-utilities/internal/hub"
 	"claude-utilities/internal/logx"
 	"claude-utilities/internal/usage"
@@ -67,15 +67,22 @@ type usageAPI interface {
 	Last(accountID string) (usage.Usage, bool)
 }
 
-// Handler returns the admin UI and API. It panics if adminPassword is empty.
+// PasswordAPI is the part of *adminpw.Store the web layer uses: authenticate a submitted
+// password, and replace the stored one.
+type PasswordAPI interface {
+	Verify(password string) bool
+	Set(password string) error
+}
+
 // logger is the web layer's structured, allowlist-filtered logger.
 var logger = logx.New(os.Stderr).With("component", "web")
 
-func Handler(h *hub.Hub, v *vault.Vault, p *usage.Poller, adminPassword string) http.Handler {
-	if adminPassword == "" {
-		panic("web: adminPassword must be non-empty")
+// Handler returns the admin UI and API. It panics if pw is nil.
+func Handler(h *hub.Hub, v *vault.Vault, p *usage.Poller, pw PasswordAPI) http.Handler {
+	if pw == nil {
+		panic("web: a password store is required")
 	}
-	return newHandler(h, v, p, adminPassword, time.Now)
+	return newHandler(h, v, p, pw, time.Now)
 }
 
 type sess struct {
@@ -87,7 +94,7 @@ type server struct {
 	hub   hubAPI
 	vault *vault.Vault
 	usage usageAPI
-	pwSum [sha256.Size]byte
+	pw    PasswordAPI
 	now   func() time.Time
 
 	mu       sync.Mutex
@@ -95,11 +102,12 @@ type server struct {
 	failures map[string][]time.Time // per source IP
 }
 
-func newHandler(h hubAPI, v *vault.Vault, u usageAPI, password string, now func() time.Time) http.Handler {
-	s := &server{hub: h, vault: v, usage: u, pwSum: sha256.Sum256([]byte(password)), now: now, sessions: map[string]sess{}, failures: map[string][]time.Time{}}
+func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, now func() time.Time) http.Handler {
+	s := &server{hub: h, vault: v, usage: u, pw: pw, now: now, sessions: map[string]sess{}, failures: map[string][]time.Time{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
 	mux.HandleFunc("POST /login", s.login)
+	mux.HandleFunc("POST /api/password", s.authPost(s.setPassword))
 	mux.HandleFunc("GET /api/accounts", s.auth(s.accounts))
 	mux.HandleFunc("GET /api/hosts", s.auth(s.hosts))
 	mux.HandleFunc("GET /api/pending", s.auth(s.pending))
@@ -257,6 +265,25 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, d)
 }
 
+// overLimit reports whether this source has used up its failure budget for the window. Password
+// verification is deliberately outside s.mu: an argon2id derivation takes long enough that
+// holding the lock across it would stall every other request.
+func (s *server) overLimit(ip string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recentFailuresLocked(ip) >= maxLoginFailures
+}
+
+// noteFailure records one wrong password from this source. The tracked-IP cap bounds memory: a
+// new source is ignored once the table is full, so a spray cannot grow it without bound.
+func (s *server) noteFailure(ip string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.failures) < maxTrackedIPs || s.failures[ip] != nil {
+		s.failures[ip] = append(s.failures[ip], s.now())
+	}
+}
+
 // recentFailuresLocked prunes and counts one source's failures in the window. Callers hold s.mu.
 func (s *server) recentFailuresLocked(ip string) int {
 	cut := s.now().Add(-loginWindow)
@@ -287,24 +314,19 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusBadRequest, pageData{Error: "Bad request."})
 		return
 	}
-	got := sha256.Sum256([]byte(r.PostFormValue("password")))
 	ip := clientIP(r)
-	s.mu.Lock()
-	if s.recentFailuresLocked(ip) >= maxLoginFailures {
-		s.mu.Unlock()
+	if s.overLimit(ip) {
 		logger.Warn("login refused", "action", "login", "result", "refused", "reason", "too many failures", "source_ip", ip)
 		s.render(w, http.StatusTooManyRequests, pageData{Error: "Too many failed attempts. Wait a minute."})
 		return
 	}
-	if subtle.ConstantTimeCompare(got[:], s.pwSum[:]) != 1 {
-		if len(s.failures) < maxTrackedIPs || s.failures[ip] != nil {
-			s.failures[ip] = append(s.failures[ip], s.now())
-		}
-		s.mu.Unlock()
+	if !s.pw.Verify(r.PostFormValue("password")) {
+		s.noteFailure(ip)
 		logger.Warn("login failed", "action", "login", "result", "failed", "reason", "wrong password", "source_ip", ip)
 		s.render(w, http.StatusUnauthorized, pageData{Error: "Wrong password."})
 		return
 	}
+	s.mu.Lock()
 	if len(s.sessions) >= maxSessions { // bound memory: drop the soonest-to-expire
 		var oldID string
 		var oldAt time.Time
@@ -321,6 +343,68 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: id, Path: "/", HttpOnly: true, Secure: true,
 		SameSite: http.SameSiteStrictMode, MaxAge: int(sessionTTL.Seconds())})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// --- admin password ---
+
+// maxPassword bounds a submitted password so an argon2id derivation cannot be driven by a
+// megabyte of input. It is far above any real passphrase.
+const maxPassword = 1024
+
+// dropAllSessions invalidates every signed-in session, the caller's included.
+func (s *server) dropAllSessions() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions = map[string]sess{}
+}
+
+// setPassword changes the admin password. It needs a session and a CSRF token (authPost), the
+// current password, and a new one of at least adminpw.MinLength characters. On success every
+// session is invalidated, so the admin signs in again with the new password. A wrong current
+// password counts against the same per-IP budget as a failed login.
+func (s *server) setPassword(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Current string `json:"current"`
+		New     string `json:"new"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	ip := clientIP(r)
+	if s.overLimit(ip) {
+		logger.Warn("password change refused", "action", "set_password", "result", "refused",
+			"reason", "too many failures", "source_ip", ip)
+		writeErr(w, http.StatusTooManyRequests, "too many failed attempts; wait a minute")
+		return
+	}
+	if in.Current == "" || in.New == "" || len(in.Current) > maxPassword || len(in.New) > maxPassword {
+		writeErr(w, http.StatusBadRequest, "the current and the new password are both required")
+		return
+	}
+	if !s.pw.Verify(in.Current) {
+		s.noteFailure(ip)
+		logger.Warn("password change failed", "action", "set_password", "result", "failed",
+			"reason", "wrong current password", "source_ip", ip)
+		writeErr(w, http.StatusForbidden, "the current password is wrong")
+		return
+	}
+	switch err := s.pw.Set(in.New); {
+	case err == nil:
+	case errors.Is(err, adminpw.ErrTooShort):
+		logger.Warn("password change failed", "action", "set_password", "result", "failed",
+			"reason", "new password too short", "source_ip", ip)
+		writeErr(w, http.StatusBadRequest, adminpw.ErrTooShort.Error())
+		return
+	default:
+		logger.Error("password change failed", "action", "set_password", "result", "failed",
+			"reason", "could not store the new password", logx.Err(err))
+		writeErr(w, http.StatusInternalServerError, "could not store the new password; see the server log")
+		return
+	}
+	s.dropAllSessions()
+	logger.Warn("password changed", "action", "set_password", "result", "ok",
+		"reason", "all sessions invalidated", "source_ip", ip)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // --- API ---
