@@ -343,6 +343,11 @@ func resolvePath(path string) (string, error) {
 // design so a bad swap can be undone. On Windows owner-only ACLs (icacls) replace
 // the mode bits for the temp file, backup directory and backups.
 //
+// On Unix, when the agent runs as root the new file, the backup directory and the
+// backup keep the replaced file's uid and gid, so a swap done for another user
+// does not leave that user locked out of their own credentials. A chown that
+// fails aborts the swap rather than installing a root-owned file.
+//
 // Residual race: Claude Code can write the file between the final hash check
 // and the rename. ErrChangedDuringSwap narrows that window but cannot close it
 // without a cross-process lock Claude Code does not take.
@@ -455,6 +460,13 @@ func swap(path string, block json.RawMessage, withBackup bool, onPrev func(json.
 		return "", err
 	}
 	before := sha256.Sum256(original)
+	// The owner of the file being replaced, so a root agent swapping for another
+	// user hands every file it writes back to that user. nil when there is no
+	// file yet, or it cannot be stat'ed: then the default owner stands.
+	var owner os.FileInfo
+	if fi, serr := os.Stat(filepath.Clean(path)); serr == nil {
+		owner = fi
+	}
 
 	if withBackup {
 		prev, _ := findOAuth(entries)
@@ -464,6 +476,16 @@ func swap(path string, block json.RawMessage, withBackup bool, onPrev func(json.
 			}
 		}
 		if backup, err = writeBackup(filepath.Dir(path), prev); err != nil {
+			return "", err
+		}
+		// A root-owned .swap-backups breaks the next non-root swap outright: its
+		// os.Chmod on the directory fails and writeBackup returns an error.
+		if err = preserveOwner(filepath.Dir(backup), owner); err != nil {
+			removeQuiet(backup)
+			return "", err
+		}
+		if err = preserveOwner(backup, owner); err != nil {
+			removeQuiet(backup)
 			return "", err
 		}
 		afterBackupFn(backup)
@@ -484,6 +506,12 @@ func swap(path string, block json.RawMessage, withBackup bool, onPrev func(json.
 	// Always 0600: never inherit a looser mode from the existing file.
 	tmp, err := writeTemp(filepath.Dir(path), out, 0o600)
 	if err != nil {
+		return abort(err)
+	}
+	// Before the rename, never after: a file renamed into place with the wrong
+	// owner is already the breakage, and there is no second chance to fix it.
+	if err := preserveOwner(tmp, owner); err != nil {
+		removeQuiet(tmp)
 		return abort(err)
 	}
 	beforeRenameFn()
