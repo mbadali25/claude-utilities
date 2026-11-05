@@ -79,7 +79,8 @@ func TestReportCommandsAreAdditive(t *testing.T) {
 }
 
 func TestValidCommand(t *testing.T) {
-	for _, c := range []string{CmdReloadPlugins, CmdRemoteControlEnable, CmdRenameRemote, CmdRepair} {
+	for _, c := range []string{CmdReloadPlugins, CmdRemoteControlEnable, CmdRenameRemote, CmdRepair,
+		CmdRestartSessions} {
 		if !ValidCommand(c) {
 			t.Errorf("%s should be valid", c)
 		}
@@ -87,6 +88,21 @@ func TestValidCommand(t *testing.T) {
 	for _, c := range []string{"", "reload", "rm -rf /", "RELOAD_PLUGINS"} {
 		if ValidCommand(c) {
 			t.Errorf("%q should not be valid", c)
+		}
+	}
+}
+
+// A restart-type command is the one class the hub confirms at EVERY scope, so the predicate has to
+// name exactly restart_sessions: a command that wrongly reads as restart-type would start
+// demanding a confirm nobody asks for, and one that wrongly reads as ordinary would skip the
+// confirm that names the sessions.
+func TestIsRestartCommand(t *testing.T) {
+	if !IsRestartCommand(CmdRestartSessions) {
+		t.Errorf("%s should be restart-type", CmdRestartSessions)
+	}
+	for _, c := range []string{CmdReloadPlugins, CmdRemoteControlEnable, CmdRenameRemote, CmdRepair, "", "restart"} {
+		if IsRestartCommand(c) {
+			t.Errorf("%q should not be restart-type", c)
 		}
 	}
 }

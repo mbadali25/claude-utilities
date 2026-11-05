@@ -107,6 +107,63 @@ func TestCommandHostScopeNeedsConfirm(t *testing.T) {
 	a.answerCommands(1, proto.CommandRes{Status: proto.StatusQueued})
 }
 
+// THE requirement for the restart action: a restart-type command is refused unless the operator
+// confirmed, at EVERY scope - session scope included, which is the one scope the ordinary rule
+// lets through. The UI's confirm dialog is what names the sessions, so a restart that could be
+// dispatched without a confirm would be a restart nobody was shown the names for.
+// ErrConfirmRequired is a 409 at the HTTP edge (see internal/web/control.go).
+func TestRestartCommandNeedsConfirmAtEveryScope(t *testing.T) {
+	f := newFixture(t)
+	a, _, hostID := f.enrol("box")
+	f.report(a, hostID, proto.Report{Sessions: []proto.Session{sess("s-1", "alpha", 11)}})
+
+	for _, scope := range []CommandScope{ScopeSession, ScopeHost, ScopeAll} {
+		_, err := f.h.Command(context.Background(), CommandRequest{
+			Command: proto.CmdRestartSessions, Scope: scope, HostID: hostID, SessionID: "s-1"})
+		if err != ErrConfirmRequired {
+			t.Fatalf("scope %s without confirm: err = %v, want ErrConfirmRequired", scope, err)
+		}
+	}
+	// Nothing went out: a refused request never reaches an agent.
+	if _, err := a.recvWithin(150 * time.Millisecond); err == nil {
+		t.Fatal("a command_req went out for a restart with no confirm")
+	}
+}
+
+// With the confirm, a restart dispatches one restart_sessions per session and carries the
+// session's own name, so the relaunch command the agent builds is the one that latches that name.
+func TestRestartCommandWithConfirmCarriesTheSessionsOwnName(t *testing.T) {
+	f := newFixture(t)
+	a, _, hostID := f.enrol("box")
+	f.report(a, hostID, proto.Report{Sessions: []proto.Session{sess("s-1", "alpha work", 11)}})
+
+	v, err := f.h.Command(context.Background(), CommandRequest{
+		Command: proto.CmdRestartSessions, Scope: ScopeSession, HostID: hostID, SessionID: "s-1",
+		Confirm: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Counts.Total != 1 || v.Targets[0].Command != proto.CmdRestartSessions {
+		t.Fatalf("view = %+v", v)
+	}
+	reqs := a.answerCommands(1, proto.CommandRes{Status: proto.StatusUnsupported,
+		Code: proto.CodeRequiresRestart, Mechanism: "relaunch"})
+	if reqs[0].Name != "alpha work" {
+		t.Fatalf("restart name = %q, want the session's own name", reqs[0].Name)
+	}
+	f.waitStatus(v.ID, func(x CommandView) bool { return x.Counts.Unsupported == 1 })
+}
+
+// The composite stays what it was: a restart is never folded into repair, so "Apply to all
+// needs-reload sessions" cannot restart anything.
+func TestRepairNeverExpandsToARestart(t *testing.T) {
+	for _, step := range repairSteps {
+		if proto.IsRestartCommand(step) {
+			t.Fatalf("repair expands to the restart-type command %q", step)
+		}
+	}
+}
+
 func TestCommandAllScopeCoversEveryHost(t *testing.T) {
 	f := newFixture(t)
 	a1, _, h1 := f.enrol("box1")

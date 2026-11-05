@@ -26,17 +26,41 @@ const (
 	e2eSlow    = "h-slow"
 )
 
+// e2eVerdicts gives the first three sessions one verdict each, so the browser run photographs
+// every status label the UI can draw - including the two that share the "unsupported" status and
+// are told apart only by their reason code (Restart required against Unsupported).
+func e2eVerdicts(i int, id string) []hub.CommandTargetView {
+	now := time.Now().UTC()
+	v := func(cmd, status, code, mech, hint string) []hub.CommandTargetView {
+		return []hub.CommandTargetView{{ID: "e2e-" + id, Command: cmd, Status: status, Code: code,
+			Mechanism: mech, Hint: hint, CreatedAt: now, UpdatedAt: now}}
+	}
+	switch i {
+	case 0:
+		return v(proto.CmdRestartSessions, proto.StatusUnsupported, proto.CodeRequiresRestart,
+			"relaunch", "claude --resume "+id+" --remote-control \"api refactor\"")
+	case 1:
+		return v(proto.CmdReloadPlugins, proto.StatusDelivered, "", "hook-queue", "")
+	case 2:
+		return v(proto.CmdRemoteControlEnable, proto.StatusUnsupported, proto.CodeInboxUnproven,
+			"inbox", "the experimental per-session inbox has an unproven wire frame; nothing was sent")
+	}
+	return nil
+}
+
 func e2eSessions(n int, stale bool) []hub.SessionView {
 	out := make([]hub.SessionView, 0, n)
 	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("8c1d9e%02d-11d4-4e7a-9a21-7c5be0d4a1%02d", i, i)
 		out = append(out, hub.SessionView{
 			Session: proto.Session{
-				PID: 4100 + i, ID: fmt.Sprintf("8c1d9e%02d-11d4-4e7a-9a21-7c5be0d4a1%02d", i, i),
+				PID: 4100 + i, ID: id,
 				Name: []string{"api refactor", "docs sweep", "release notes", "flaky test", "infra bump", "review queue"}[i%6],
 				Cwd:  []string{"/home/dev/src/api", "/home/dev/src/docs"}[i%2], Status: "busy",
 				StartedAt: time.Now().Add(-time.Duration(20+i*7) * time.Minute).UTC(),
 			},
 			NeedsReload: stale,
+			Commands:    e2eVerdicts(i, id),
 		})
 	}
 	return out

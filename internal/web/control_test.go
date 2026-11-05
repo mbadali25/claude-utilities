@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -263,7 +264,7 @@ func TestPageCarriesSessionControlSurface(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Delivered: the session runs it at its next prompt.",
-		"Needs restart: cannot be done on a running session.",
+		"Restart required: cannot be done on a running session.",
 		"Queued: nothing has reached the session yet.",
 	} {
 		if !strings.Contains(p, want) {
@@ -283,6 +284,128 @@ func TestPageCarriesSessionControlSurface(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("index.html lacks %q, so a button cannot be disabled in flight", want)
 		}
+	}
+}
+
+// THE requirement for the restart action: the confirm dialog NAMES the sessions. The names are
+// filled in by the poll, so the served page can only be held to the element that holds them - but
+// it can be held to that absolutely, because a dialog with no list element cannot name anything.
+// The names themselves are proved in the browser run (docs/runbooks/claude-swap-e2e.md).
+func TestRestartConfirmDialogListsTheSessionsItWouldRestart(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+
+	if !strings.Contains(p, `<dialog class="modal" id="ctl-restart"`) {
+		t.Fatal("there is no restart confirm dialog")
+	}
+	dlg := element(t, p, `id="ctl-restart"`, "</dialog>")
+	for _, want := range []string{
+		// The element the session names go into, and the one that counts them.
+		`id="ctl-restart-list"`, `id="ctl-restart-sub"`,
+		// The promise, stated where the operator is about to act, not only in the docs.
+		"Nothing is stopped, killed or restarted",
+		// The no-op, labelled as local so it cannot be read as having restarted anything.
+		`id="ctl-restart-mark"`,
+		// A cancel path and an inline alert, like every other control dialog.
+		`data-close="ctl-restart"`, `id="ctl-restart-msg"`,
+	} {
+		if !strings.Contains(dlg, want) {
+			t.Errorf("the restart confirm dialog lacks %q", want)
+		}
+	}
+	if msg := element(t, p, `id="ctl-restart-msg"`, ">"); !strings.Contains(msg, `role="alert"`) {
+		t.Errorf("ctl-restart-msg is not an alert: %q", msg)
+	}
+	// The list is built from the sessions the ask would reach, each one named, and the exact
+	// relaunch command is offered to copy rather than run.
+	for _, want := range []string{
+		"function restartTargets(", "openRestartDialog(", "$('#ctl-restart-list')",
+		"Copy the relaunch command for ", "markRestartedLocally(",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+	// The wire shape: a restart always carries confirm:true, because the hub refuses it otherwise
+	// at every scope.
+	if !strings.Contains(p, "command: 'restart_sessions'") {
+		t.Error("index.html never asks for restart_sessions")
+	}
+	i := strings.Index(p, "command: 'restart_sessions'")
+	if j := strings.Index(p[i:], "}"); j < 0 || !strings.Contains(p[i:i+j], "confirm: true") {
+		t.Error("the restart ask does not carry confirm: true")
+	}
+	// The dialog and the callout above it must count the same sessions. restartTargets therefore
+	// does NOT skip an offline host: staleSessions() does not either, and a dialog that quietly
+	// listed fewer sessions than the callout counts would put two numbers on one screen that
+	// disagree. The row says the host is offline instead.
+	rt := p[strings.Index(p, "function restartTargets("):]
+	rt = rt[:strings.Index(rt, "\n  function ")]
+	if strings.Contains(rt, "if (!h.online) return") {
+		t.Error("restartTargets drops offline hosts, so its count can disagree with the callout's")
+	}
+	if !strings.Contains(p, "host offline, so the ask will not reach it") {
+		t.Error("a session on an offline host is listed without saying the ask cannot reach it")
+	}
+	// Nothing in the page may terminate or kill anything, and no confirm token exists to unlock
+	// one: the decision is copy-only (docs/runbooks/session-control.md).
+	for _, bad := range []string{"'terminate'", "'kill'", "confirmToken", "confirm_token"} {
+		if strings.Contains(p, bad) {
+			t.Errorf("index.html carries %q: the restart action is copy-only", bad)
+		}
+	}
+}
+
+// A second `function sessKey` in the page's one scope silently replaced the per-host disclosure
+// key, and every host card threw on the first render - a whole tab blank, with nothing in the Go
+// tests or the linter to catch it. Nothing in this page may declare the same top-level function
+// name twice.
+func TestPageDeclaresNoFunctionNameTwice(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+
+	// This covers top-level `function NAME(` declarations only. A duplicate `var` at the same
+	// scope, or a `var f = function`, fails the same way and is NOT caught here.
+	//
+	// Exactly two spaces of indent is the page's one shared scope, the body of its IIFE. A helper
+	// nested inside another function is indented further and has a scope of its own, so two of
+	// those may share a name (`mk` does) without replacing anything.
+	seen := map[string]int{}
+	for _, m := range regexp.MustCompile(`(?m)^  function ([A-Za-z_$][\w$]*)\s*\(`).FindAllStringSubmatch(p, -1) {
+		seen[m[1]]++
+	}
+	if len(seen) < 20 {
+		t.Fatalf("only %d function declarations found; the pattern no longer matches the page", len(seen))
+	}
+	for name, n := range seen {
+		if n > 1 {
+			t.Errorf("function %s is declared %d times; the later one replaces the earlier", name, n)
+		}
+	}
+}
+
+// Three labels an operator has to be able to tell apart: a restart-type decline, any other
+// decline, and an instruction that only reached the session.
+func TestStatusLabelsSeparateRestartRequiredFromUnsupported(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+
+	for _, want := range []string{
+		"Restart required", "Unsupported", "Delivered",
+		"Delivered: the session runs it at its next prompt.",
+		"Restart required: cannot be done on a running session.",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks the label %q", want)
+		}
+	}
+	// The split is on the reason code, not on the status: an unsupported that is NOT a
+	// requires-restart (an unproven inbox, a missing mechanism) must not read as "restart".
+	if !strings.Contains(p, proto.CodeRequiresRestart) {
+		t.Errorf("index.html never reads the %q code, so it cannot tell the two declines apart", proto.CodeRequiresRestart)
+	}
+	if !strings.Contains(p, "stOf(c.status, c.code)") {
+		t.Error("the chip is not built from the status AND the code")
 	}
 }
 
