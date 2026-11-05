@@ -13,7 +13,7 @@ else echo "go not installed"; exit 77; fi
 rc=0
 "$GO" build ./... || { echo "FAIL go-build"; rc=1; }
 "$GO" vet ./... || { echo "FAIL go-vet"; rc=1; }
-o="$("$GOFMT" -l . 2>&1)"
+o="$("$GOFMT" -l cmd internal 2>&1)" # not ".": skips .claude/worktrees (other agents' checkouts)
 [ -z "$o" ] || { echo "FAIL gofmt: $o"; rc=1; }
 "$GO" test -count=1 ./... || { echo "FAIL go-test"; rc=1; }
 exit "$rc"
