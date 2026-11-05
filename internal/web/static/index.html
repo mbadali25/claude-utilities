@@ -3,39 +3,178 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>claude-swap</title>
 {{if .LoggedIn}}<meta name="csrf-token" content="{{.CSRF}}">{{end}}
 <style nonce="{{.Nonce}}">
-  :root { --bg:#fff; --fg:#1b1b1f; --mut:#5c5f66; --line:#d9dbe0; --acc:#2f5fd0; --bad:#b3261e; --ok:#1e7a3c; --warn:#8a5a00; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#16171a; --fg:#e8e9ec; --mut:#9a9ea8; --line:#34363c; --acc:#7a9cf0; --bad:#f2928b; --ok:#6fcf8f; --warn:#e0b45a; } }
-  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui, sans-serif; max-width:1100px; margin-inline:auto; }
-  h1 { font-size:1.3rem; } h2 { font-size:1.05rem; margin-top:1.6rem; }
-  table { border-collapse:collapse; width:100%; } th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
-  .wrap { overflow-x:auto; }
+  /* Tokens. Colour sits on data (meters) and on status; chrome stays neutral. */
+  :root {
+    --bg:#f4f5f7; --surface:#fff; --sunk:#eceef2; --fg:#16181d; --mut:#586070; --line:#dde0e6; --line-strong:#b9bec8;
+    --acc:#2447b8; --acc-ink:#fff; --bad:#a8231b; --bad-bg:#fdecea; --ok:#176b36; --ok-bg:#e6f4ea; --warn:#7a4f00; --warn-bg:#fdf1d6;
+    --track:#e3e6ec; --focus:#2447b8;
+    --r:8px; --gap:16px;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    --bg:#101114; --surface:#181a1f; --sunk:#22252b; --fg:#ecedf0; --mut:#a2a8b4; --line:#2b2f37; --line-strong:#454a55;
+    --acc:#8fabf6; --acc-ink:#0e1424; --bad:#f4958e; --bad-bg:#3a1f1d; --ok:#74d194; --ok-bg:#16301f; --warn:#e6bb62; --warn-bg:#352a10;
+    --track:#2b2f37; --focus:#8fabf6;
+  } }
+  * { box-sizing:border-box; }
+  html { -webkit-text-size-adjust:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .canvas { max-width:1180px; margin:0 auto; padding:20px 20px 56px; }
+  h1, h2, h3, p { margin:0; }
+  button, input, select { font:inherit; color:inherit; }
+  :focus-visible { outline:2px solid var(--focus); outline-offset:2px; border-radius:4px; }
+  .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
   .mut { color:var(--mut); } .err { color:var(--bad); } .ok { color:var(--ok); }
-  .badge { display:inline-block; padding:0 6px; border-radius:8px; border:1px solid var(--warn); color:var(--warn); font-size:.8rem; }
-  .fp { font:700 1.8rem/1.2 ui-monospace, monospace; letter-spacing:.08em; }
-  .pend { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:8px 0; }
-  button { font:inherit; padding:4px 12px; border:1px solid var(--acc); background:transparent; color:var(--acc); border-radius:6px; cursor:pointer; }
-  button.deny { border-color:var(--bad); color:var(--bad); }
-  input, select { font:inherit; padding:4px 6px; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; }
-  .notice { border-left:3px solid var(--warn); padding:4px 10px; margin:10px 0; }
+  .num { font-variant-numeric:tabular-nums; }
+
+  /* Header */
+  .top { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:4px 0 16px; }
+  .mark { display:flex; align-items:center; gap:10px; margin-right:auto; }
+  .mark svg { width:28px; height:28px; flex:none; color:var(--acc); }
+  h1 { font-size:1.25rem; font-weight:700; letter-spacing:-.01em; }
+  .scope { font-size:.85rem; color:var(--mut); }
+  .enrol { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  #enrol-out { font-size:.9rem; min-height:1.5em; }
+  #enrol-out .code { font:600 1.05rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:.06em; color:var(--fg); }
+
+  /* Buttons: one primary per region, rest outlined. 36px+ hit height, 44px on touch. */
+  .btn { min-height:36px; padding:0 14px; border:1px solid var(--line-strong); background:var(--surface); border-radius:6px; cursor:pointer; font-weight:500; }
+  .btn:hover:not(:disabled) { border-color:var(--fg); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .btn.primary { background:var(--fg); color:var(--bg); border-color:var(--fg); }
+  .btn.danger { color:var(--bad); border-color:var(--bad); }
+  .btn.sm { min-height:30px; padding:0 10px; font-size:.85rem; }
+  .btn.ghost { border-color:transparent; background:transparent; color:var(--mut); }
+  .btn.ghost:hover:not(:disabled) { color:var(--fg); border-color:var(--line-strong); }
+  @media (pointer:coarse) { .btn { min-height:44px; } .btn.sm { min-height:40px; } }
+
+  input, select { min-height:36px; padding:0 10px; background:var(--surface); border:1px solid var(--line-strong); border-radius:6px; max-width:100%; }
+  @media (pointer:coarse) { input, select { min-height:44px; font-size:16px; } }
+
+  .notice { display:flex; gap:10px; align-items:flex-start; padding:10px 14px; margin-bottom:12px; background:var(--sunk); border-radius:var(--r); font-size:.9rem; color:var(--mut); }
+  .notice svg { width:18px; height:18px; flex:none; margin-top:2px; }
+  #status { min-height:1.5em; margin-bottom:8px; font-weight:500; }
+
+  section { margin-top:28px; }
+  .head { display:flex; align-items:baseline; gap:10px; margin-bottom:12px; }
+  h2 { font-size:1rem; font-weight:700; }
+  .count { color:var(--mut); font-size:.9rem; }
+
+  /* Cards */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap:var(--gap); align-items:start; }
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:14px 16px; display:flex; flex-direction:column; gap:12px; min-width:0; }
+  .row { display:flex; align-items:center; gap:8px; min-width:0; }
+  .row.between { justify-content:space-between; }
+  .row.wrap { flex-wrap:wrap; }
+  .title { font-weight:650; font-size:1.02rem; overflow-wrap:anywhere; }
+  .sub { color:var(--mut); font-size:.88rem; overflow-wrap:anywhere; }
+  .empty { padding:16px; border:1px dashed var(--line-strong); border-radius:var(--r); color:var(--mut); }
+
+  /* Chips carry a glyph and a word, never colour alone. */
+  .chip { display:inline-flex; align-items:center; gap:5px; min-height:22px; padding:0 8px; border-radius:11px; font-size:.78rem; font-weight:600; white-space:nowrap; flex:none; background:var(--sunk); color:var(--mut); }
+  .chip.ok { background:var(--ok-bg); color:var(--ok); }
+  .chip.bad { background:var(--bad-bg); color:var(--bad); }
+  .chip.warn { background:var(--warn-bg); color:var(--warn); }
+  .chip svg { width:11px; height:11px; flex:none; }
+
+  /* Meters: the bar length, the % text and the Low/Out label each say the same thing. */
+  .meter { display:grid; grid-template-columns:3.2em 1fr auto; align-items:center; column-gap:10px; row-gap:2px; }
+  .meter .lbl { font-size:.82rem; color:var(--mut); }
+  .meter .val { font-weight:650; text-align:right; min-width:5.2em; }
+  .bar { height:10px; border-radius:5px; background:var(--track); overflow:hidden; }
+  .bar > i { display:block; width:0; height:100%; background:var(--acc); border-radius:5px; }
+  .bar.low > i { background:repeating-linear-gradient(135deg, var(--warn) 0 4px, transparent 4px 7px); outline:1px solid var(--warn); outline-offset:-1px; }
+  .bar.out > i { background:var(--bad); }
+  .meter .reset { grid-column:2 / 4; font-size:.78rem; color:var(--mut); }
+  .meter.none .bar { background:repeating-linear-gradient(135deg, var(--track) 0 4px, transparent 4px 8px); }
+
+  .acct-foot { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; font-size:.85rem; color:var(--mut); border-top:1px solid var(--line); padding-top:10px; min-height:44px; }
+
+  /* Rename */
+  .rename { display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex:1; min-width:0; }
+  .rename input { flex:1 1 140px; min-width:0; }
+  .rename .msg { flex-basis:100%; font-size:.85rem; color:var(--bad); min-height:0; }
+  .rename .msg:empty { display:none; }
+
+  /* Pending connections */
+  .pend { border:2px solid var(--acc); border-radius:var(--r); background:var(--surface); padding:14px 16px; margin-top:10px; display:grid; gap:6px; }
+  .fp { font:700 1.9rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:.1em; overflow-wrap:anywhere; }
+  .pend .actions { display:flex; gap:8px; margin-top:6px; flex-wrap:wrap; }
+  #pending-list > p { margin-top:2px; }
+  #pending-panel .none { color:var(--mut); }
+
+  /* Hosts */
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); flex:none; }
+  .dot.off { background:transparent; border:2px solid var(--mut); }
+  details.sess summary { cursor:pointer; color:var(--mut); font-size:.88rem; min-height:28px; display:flex; align-items:center; }
+  details.sess ul { list-style:none; margin:6px 0 0; padding:0; display:grid; gap:6px; font-size:.82rem; }
+  details.sess li { padding:6px 8px; background:var(--sunk); border-radius:6px; overflow-wrap:anywhere; display:flex; gap:8px; justify-content:space-between; align-items:center; flex-wrap:wrap; }
+  .swap { display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-top:1px solid var(--line); padding-top:12px; min-height:56px; }
+  .swap select { flex:1 1 160px; min-width:0; }
+  .confirm { display:flex; gap:8px; flex-wrap:wrap; align-items:center; width:100%; }
+  .confirm .q { flex:1 1 100%; font-weight:600; }
+
+  /* Import */
+  .import { margin-top:var(--gap); padding:14px 16px; border:1px dashed var(--line-strong); border-radius:var(--r); display:grid; gap:10px; }
+  .import form { display:flex; gap:8px; flex-wrap:wrap; }
+  .import select, .import input { flex:1 1 160px; min-width:0; }
+
+  /* Login */
+  .login { max-width:380px; margin:12vh auto 0; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:24px; display:grid; gap:14px; }
+  .login label { display:grid; gap:6px; font-weight:500; }
+  .login input { width:100%; }
+
+  @media (max-width:560px) {
+    .canvas { padding:14px 14px 48px; }
+    .top { align-items:flex-start; }
+    .enrol { width:100%; }
+    .fp { font-size:1.5rem; }
+    .meter { grid-template-columns:2.8em 1fr auto; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .bar > i { transition:width .3s ease; }
+    .btn { transition:border-color .15s, color .15s; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
 </style>
 </head>
 <body>
-<h1>claude-swap</h1>
+<div class="canvas">
 {{if not .LoggedIn}}
-<form method="post" action="/login">
-  <p><label>Admin password <input type="password" name="password" autocomplete="current-password" required autofocus></label>
-  <button type="submit">Sign in</button></p>
-  {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
-</form>
+<div class="login">
+  <div class="mark">
+    <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10h18M18 5l5 5-5 5M24 18H6M10 13l-5 5 5 5"/></svg>
+    <h1>claude-swap</h1>
+  </div>
+  <form method="post" action="/login">
+    <label>Admin password <input type="password" name="password" autocomplete="current-password" required autofocus></label>
+    <button type="submit" class="btn primary">Sign in</button>
+    {{if .Error}}<p class="err" role="alert">{{.Error}}</p>{{end}}
+  </form>
+</div>
 {{else}}
-<div class="notice mut">MCP logins may belong to another account: swapping replaces only the Claude login, never the MCP server logins stored beside it.</div>
+<header class="top">
+  <div class="mark">
+    <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10h18M18 5l5 5-5 5M24 18H6M10 13l-5 5 5 5"/></svg>
+    <div><h1>claude-swap</h1><div class="scope">Claude Code logins on this network</div></div>
+  </div>
+  <div class="enrol">
+    <button type="button" class="btn" id="enrol">New enrolment code</button>
+    <span id="enrol-out" class="mut" role="status"></span>
+  </div>
+</header>
+
+<div class="notice">
+  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="10" cy="10" r="8"/><path d="M10 9v5M10 6v.01"/></svg>
+  <span>MCP logins may belong to another account: swapping replaces only the Claude login, never the MCP server logins stored beside it.</span>
+</div>
 <p id="status" class="err" role="status"></p>
 
-<section id="pending-panel">
-  <h2>Pending connections</h2>
+<section id="pending-panel" aria-labelledby="pending-h">
+  <div class="head"><h2 id="pending-h">Pending connections</h2></div>
   <div id="pending-list">
   {{if .Pending}}
     <p>Match this code with the one the agent printed before you click Allow</p>
@@ -44,37 +183,38 @@
       <div class="fp">{{.Fingerprint}}</div>
       <div>{{.HostName}} &middot; {{.OS}} &middot; {{.SourceIP}}</div>
       <div class="mut">since {{.Since}} &middot; expires {{.Expires}}</div>
-      <button type="button" data-act="allow">Allow</button> <button type="button" class="deny" data-act="deny">Deny</button>
+      <div class="actions"><button type="button" class="btn primary" data-act="allow">Allow</button> <button type="button" class="btn danger" data-act="deny">Deny</button></div>
     </div>
     {{end}}
   {{else}}
-    <p class="mut">No pending connections.</p>
+    <p class="none">No pending connections.</p>
   {{end}}
   </div>
 </section>
 
-<section>
-  <h2>Accounts</h2>
-  <div class="wrap"><table id="accounts"><thead><tr><th>Label</th><th>Identity</th><th>5h left</th><th>7d left</th><th>Resets</th><th>Age</th><th>Owner</th><th>Status</th></tr></thead><tbody></tbody></table></div>
-  <p class="mut">Add account: import from a logged-in host</p>
-  <form id="import-form">
-    <select name="host" id="import-host" aria-label="Host"></select>
-    <input name="label" placeholder="Label" maxlength="64" required aria-label="Label">
-    <button type="submit">Import</button>
-  </form>
+<section aria-labelledby="acc-h">
+  <div class="head"><h2 id="acc-h">Accounts</h2><span class="count" id="acc-count"></span></div>
+  <div id="accounts" class="grid"><p class="empty">Loading accounts...</p></div>
+  <div class="import">
+    <p class="mut">Add account: import from a logged-in host</p>
+    <form id="import-form">
+      <select name="host" id="import-host" aria-label="Host"></select>
+      <input name="label" placeholder="Label" maxlength="64" required aria-label="Label" autocomplete="off">
+      <button type="submit" class="btn primary">Import</button>
+    </form>
+  </div>
 </section>
 
-<section>
-  <h2>Hosts</h2>
-  <div class="wrap"><table id="hosts"><thead><tr><th>Host</th><th>OS</th><th>State</th><th>Active account</th><th>Sessions</th><th>Swap to</th><th></th></tr></thead><tbody></tbody></table></div>
-  <p><button type="button" id="enrol">New enrolment code</button> <span id="enrol-out" class="mut"></span></p>
+<section aria-labelledby="host-h">
+  <div class="head"><h2 id="host-h">Hosts</h2><span class="count" id="host-count"></span></div>
+  <div id="hosts" class="grid"><p class="empty">Loading hosts...</p></div>
 </section>
 
 <script nonce="{{.Nonce}}">
 (function () {
   var csrf = document.querySelector('meta[name="csrf-token"]').content;
   var $ = function (s) { return document.querySelector(s); };
-  function el(tag, text, cls) { var e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
+  function el(tag, text, cls) { var e = document.createElement(tag); if (text !== undefined && text !== null) e.textContent = text; if (cls) e.className = cls; return e; }
   function say(msg) { $('#status').textContent = msg || ''; }
   function call(method, path, body) {
     var o = { method: method, headers: { 'X-CSRF-Token': csrf }, credentials: 'same-origin' };
@@ -88,83 +228,213 @@
       });
     });
   }
-  function pct(w) { return w ? Math.round(w.leftPct) + '%' : '-'; }
-  function age(s) { if (s == null) return '-'; if (s < 90) return s + 's'; if (s < 5400) return Math.round(s / 60) + 'm'; return Math.round(s / 3600) + 'h'; }
-  var hostsCache = [];
+  var SVG = 'http://www.w3.org/2000/svg';
+  function glyph(d) {
+    var s = document.createElementNS(SVG, 'svg'); s.setAttribute('viewBox', '0 0 12 12'); s.setAttribute('aria-hidden', 'true');
+    s.setAttribute('fill', 'none'); s.setAttribute('stroke', 'currentColor'); s.setAttribute('stroke-width', '1.8'); s.setAttribute('stroke-linecap', 'round'); s.setAttribute('stroke-linejoin', 'round');
+    var p = document.createElementNS(SVG, 'path'); p.setAttribute('d', d); s.appendChild(p); return s;
+  }
+  var G = { ok: 'M2 6.5l2.5 2.5L10 3', bad: 'M3 3l6 6M9 3l-6 6', warn: 'M6 2v5M6 10v.01', info: 'M6 5v4M6 2.5v.01' };
+  function chip(text, kind, g) { var c = el('span', undefined, 'chip' + (kind ? ' ' + kind : '')); if (g) c.appendChild(glyph(G[g])); c.appendChild(document.createTextNode(text)); return c; }
+  function fmtDate(iso) {
+    var d = new Date(iso); if (isNaN(d)) return '-';
+    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+  function ago(s) { if (s == null) return ''; if (s < 90) return s + 's ago'; if (s < 5400) return Math.round(s / 60) + 'm ago'; return Math.round(s / 3600) + 'h ago'; }
+
+  // Re-render a region only when its data changed and the user is not mid-interaction in it.
+  var sig = {};
+  function changed(key, data) { var s = JSON.stringify(data); if (sig[key] === s) return false; sig[key] = s; return true; }
+
+  var accountsCache = [], hostsCache = [], editing = null, confirming = null;
+
+  function meter(name, w) {
+    var m = el('div', undefined, 'meter' + (w ? '' : ' none'));
+    m.appendChild(el('span', name, 'lbl'));
+    var bar = el('div', undefined, 'bar'), fill = el('i'), val = el('span', '-', 'val num');
+    bar.appendChild(fill); m.appendChild(bar);
+    if (w) {
+      var p = Math.max(0, Math.min(100, Math.round(w.leftPct)));
+      bar.setAttribute('role', 'meter'); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', '100'); bar.setAttribute('aria-valuenow', String(p));
+      bar.setAttribute('aria-label', name + ' usage left: ' + p + ' percent');
+      fill.style.setProperty('width', p + '%');
+      if (p === 0) bar.classList.add('out'); else if (p <= 15) bar.classList.add('low');
+      val.textContent = p + '% left' + (p === 0 ? ' (out)' : p <= 15 ? ' (low)' : '');
+    } else { bar.setAttribute('aria-label', name + ' usage: not available'); }
+    m.appendChild(val);
+    m.appendChild(el('span', w ? 'Resets ' + fmtDate(w.resetsAt) : 'No data', 'reset'));
+    return m;
+  }
+
+  function nameRow(card, a) {
+    var row = el('div', undefined, 'row between');
+    function show() {
+      editing = null; row.textContent = '';
+      var t = el('div'); t.style.setProperty('min-width', '0');
+      t.appendChild(el('div', a.label, 'title'));
+      t.appendChild(el('div', a.identity, 'sub'));
+      row.appendChild(t);
+      var r = row.appendChild(el('button', 'Rename', 'btn sm ghost')); r.type = 'button';
+      r.setAttribute('aria-label', 'Rename ' + a.label);
+      r.addEventListener('click', edit);
+    }
+    function edit() {
+      editing = a.id; row.textContent = '';
+      var f = el('form', undefined, 'rename');
+      var inp = el('input'); inp.value = a.label; inp.maxLength = 64; inp.required = true; inp.autocomplete = 'off';
+      inp.setAttribute('aria-label', 'New label for ' + a.label);
+      var ok = el('button', 'Save', 'btn sm primary'); ok.type = 'submit';
+      var no = el('button', 'Cancel', 'btn sm'); no.type = 'button';
+      var msg = el('div', '', 'msg'); msg.setAttribute('role', 'alert');
+      no.addEventListener('click', function () { show(); r2().focus(); });
+      function r2() { return row.querySelector('button'); }
+      inp.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') { ev.preventDefault(); no.click(); } });
+      f.addEventListener('submit', function (ev) {
+        ev.preventDefault(); msg.textContent = ''; ok.disabled = true;
+        call('POST', '/api/accounts/' + encodeURIComponent(a.id) + '/label', { label: inp.value })
+          .then(function () { editing = null; return refresh(); })
+          .catch(function (e) { msg.textContent = e.message; ok.disabled = false; inp.focus(); });
+      });
+      f.appendChild(inp); f.appendChild(ok); f.appendChild(no); f.appendChild(msg);
+      row.appendChild(f); inp.focus(); inp.select();
+    }
+    if (editing === a.id) edit(); else show();
+    return row;
+  }
+
+  function accountCard(a) {
+    var c = el('article', undefined, 'card');
+    c.dataset.id = a.id;
+    c.appendChild(nameRow(c, a));
+    c.appendChild(meter('5h', a.fiveHour));
+    c.appendChild(meter('7d', a.sevenDay));
+    var foot = el('div', undefined, 'acct-foot');
+    foot.appendChild(el('span', 'Owner: ' + (a.owner || 'none')));
+    var st;
+    if (a.error) st = chip(a.error, 'bad', 'bad');
+    else if (a.ageSeconds == null) st = chip('Not polled', '', 'info');
+    else if (a.ageSeconds > 900) st = chip('Stale, ' + ago(a.ageSeconds), 'warn', 'warn');
+    else st = chip('Updated ' + ago(a.ageSeconds), 'ok', 'ok');
+    foot.appendChild(st);
+    c.appendChild(foot);
+    return c;
+  }
 
   function loadAccounts() {
     return call('GET', '/api/accounts').then(function (list) {
-      var tb = $('#accounts tbody'); tb.textContent = '';
-      list.forEach(function (a) {
-        var w = a.sevenDay || a.fiveHour;
-        var tr = el('tr');
-        tr.appendChild(el('td', a.label));
-        tr.appendChild(el('td', a.identity, 'mut'));
-        tr.appendChild(el('td', pct(a.fiveHour)));
-        tr.appendChild(el('td', pct(a.sevenDay)));
-        tr.appendChild(el('td', w ? new Date(w.resetsAt).toLocaleString() : '-'));
-        tr.appendChild(el('td', age(a.ageSeconds)));
-        tr.appendChild(el('td', a.owner));
-        tr.appendChild(el('td', a.error || (a.ageSeconds == null ? 'not polled' : 'ok'), a.error ? 'err' : 'mut'));
-        tb.appendChild(tr);
-      });
+      accountsCache = list;
+      $('#acc-count').textContent = list.length ? String(list.length) : '';
+      if (editing && $('#accounts .rename')) return list; // keep an open rename
+      if (!changed('acc', list) && !$('#accounts .empty')) return list;
+      var box = $('#accounts'); box.textContent = '';
+      if (!list.length) box.appendChild(el('p', 'No accounts yet. Import one from a logged-in host below.', 'empty'));
+      list.forEach(function (a) { box.appendChild(accountCard(a)); });
       return list;
     });
   }
 
-  function loadHosts(accounts) {
+  function hostCard(h) {
+    var c = el('article', undefined, 'card'); c.dataset.host = h.hostId;
+    var top = el('div', undefined, 'row between');
+    var t = el('div'); t.style.setProperty('min-width', '0');
+    t.appendChild(el('div', h.name, 'title')); t.appendChild(el('div', h.os, 'sub'));
+    top.appendChild(t);
+    var state = el('span', undefined, 'row');
+    state.appendChild(el('span', undefined, 'dot' + (h.online ? '' : ' off')));
+    state.appendChild(el('span', h.online ? 'online' : 'offline', h.online ? 'ok' : 'mut'));
+    top.appendChild(state); c.appendChild(top);
+
+    var act = (accountsCache.filter(function (a) { return a.id === h.activeAccount; })[0] || {}).label;
+    var line = el('div', undefined, 'row wrap');
+    line.appendChild(el('span', 'Active account', 'mut'));
+    line.appendChild(el('strong', h.activeAccount ? (act || '?') : '-'));
+    if (h.needsReload) line.appendChild(chip('Needs reload', 'warn', 'warn'));
+    if (h.swapBlocked) line.appendChild(chip('Swaps blocked', 'bad', 'bad'));
+    c.appendChild(line);
+
+    var d = el('details', undefined, 'sess');
+    d.appendChild(el('summary', h.sessions.length + ' session(s)'));
+    if (h.sessions.length) {
+      var ul = el('ul');
+      h.sessions.forEach(function (s) {
+        var li = el('li'); li.appendChild(el('span', (s.cwd || 'pid ' + s.pid)));
+        if (s.needsReload) li.appendChild(chip('Needs reload', 'warn', 'warn'));
+        ul.appendChild(li);
+      });
+      d.appendChild(ul);
+    }
+    c.appendChild(d);
+
+    var sw = el('div', undefined, 'swap');
+    var pick = el('select'); pick.setAttribute('aria-label', 'Account for ' + h.name);
+    accountsCache.forEach(function (a) { var o = el('option', a.label); o.value = a.id; if (a.id === h.activeAccount) o.selected = true; pick.appendChild(o); });
+    var go = el('button', 'Swap', 'btn primary'); go.type = 'button'; go.disabled = !h.online || !accountsCache.length;
+    var rv = el('button', 'Revoke', 'btn danger'); rv.type = 'button';
+    function idle() {
+      confirming = null; sw.textContent = '';
+      sw.appendChild(pick); sw.appendChild(go); sw.appendChild(rv);
+    }
+    go.addEventListener('click', function () {
+      var label = pick.options[pick.selectedIndex] ? pick.options[pick.selectedIndex].text : '';
+      confirming = h.hostId; sw.textContent = '';
+      var box = el('div', undefined, 'confirm');
+      box.appendChild(el('div', 'Swap ' + h.name + ' to ' + label + '?', 'q'));
+      var yes = el('button', 'Confirm swap', 'btn primary'); yes.type = 'button';
+      var no = el('button', 'Cancel', 'btn'); no.type = 'button';
+      no.addEventListener('click', function () { idle(); go.focus(); });
+      box.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') { no.click(); } });
+      yes.addEventListener('click', function () {
+        yes.disabled = true; say('');
+        call('POST', '/api/swap', { host: h.hostId, account: pick.value })
+          .then(function () { confirming = null; return refresh(); })
+          .catch(function (e) { say(e.message); idle(); });
+      });
+      box.appendChild(yes); box.appendChild(no); sw.appendChild(box); yes.focus();
+    });
+    rv.addEventListener('click', function () {
+      if (!confirm('Revoke ' + h.name + '?')) return;
+      call('POST', '/api/hosts/' + encodeURIComponent(h.hostId) + '/revoke').then(refresh).catch(function (e) { say(e.message); });
+    });
+    idle();
+    c.appendChild(sw);
+    return c;
+  }
+
+  function loadHosts() {
     return call('GET', '/api/hosts').then(function (list) {
       hostsCache = list;
-      var tb = $('#hosts tbody'); tb.textContent = '';
-      var sel = $('#import-host'); sel.textContent = '';
-      list.forEach(function (h) {
-        var tr = el('tr');
-        tr.appendChild(el('td', h.name));
-        tr.appendChild(el('td', h.os));
-        tr.appendChild(el('td', h.online ? 'online' : 'offline', h.online ? 'ok' : 'err'));
-        tr.appendChild(el('td', h.activeAccount ? ((accounts.filter(function (a) { return a.id === h.activeAccount; })[0] || {}).label || '?') : '-'));
-        var td = el('td', h.sessions.length + ' session(s) ');
-        if (h.needsReload) td.appendChild(el('span', 'Needs reload', 'badge'));
-        if (h.swapBlocked) td.appendChild(el('span', 'Swaps blocked', 'badge err'));
-        tr.appendChild(td);
-        var form = el('td'); var pick = el('select'); pick.setAttribute('aria-label', 'Account for ' + h.name);
-        accounts.forEach(function (a) { var o = el('option', a.label); o.value = a.id; pick.appendChild(o); });
-        form.appendChild(pick); tr.appendChild(form);
-        var act = el('td'); var go = el('button', 'Swap'); go.type = 'button'; go.disabled = !h.online;
-        go.addEventListener('click', function () {
-          go.disabled = true; say('');
-          call('POST', '/api/swap', { host: h.hostId, account: pick.value }).then(refresh).catch(function (e) { say(e.message); go.disabled = false; });
-        });
-        var rv = el('button', 'Revoke', 'deny'); rv.type = 'button';
-        rv.addEventListener('click', function () {
-          if (!confirm('Revoke ' + h.name + '?')) return;
-          call('POST', '/api/hosts/' + encodeURIComponent(h.hostId) + '/revoke').then(refresh).catch(function (e) { say(e.message); });
-        });
-        act.appendChild(go); act.appendChild(document.createTextNode(' ')); act.appendChild(rv); tr.appendChild(act);
-        tb.appendChild(tr);
-        var o2 = el('option', h.name); o2.value = h.hostId; sel.appendChild(o2);
-      });
+      $('#host-count').textContent = list.length ? String(list.length) : '';
+      var sel = $('#import-host'), keep = sel.value; sel.textContent = '';
+      list.forEach(function (h) { var o = el('option', h.name); o.value = h.hostId; sel.appendChild(o); });
+      if (keep) sel.value = keep;
+      if (confirming && $('#hosts .confirm')) return; // keep an open confirm
+      if (!changed('host', [list, accountsCache]) && !$('#hosts .empty')) return;
+      var box = $('#hosts'); box.textContent = '';
+      if (!list.length) box.appendChild(el('p', 'No hosts enrolled. Generate an enrolment code and run the agent on a machine.', 'empty'));
+      list.forEach(function (h) { box.appendChild(hostCard(h)); });
     });
   }
 
   function renderPending(list) {
+    if (!changed('pend', list)) return;
     var box = $('#pending-list'); box.textContent = '';
-    if (!list.length) { box.appendChild(el('p', 'No pending connections.', 'mut')); return; }
+    if (!list.length) { box.appendChild(el('p', 'No pending connections.', 'none')); return; }
     box.appendChild(el('p', 'Match this code with the one the agent printed before you click Allow'));
     list.forEach(function (p) {
-      var d = el('div', undefined, 'pend');
+      var d = el('div', undefined, 'pend'); d.dataset.fp = p.fingerprint;
       d.appendChild(el('div', p.fingerprint, 'fp'));
       d.appendChild(el('div', p.hostName + ' · ' + p.os + ' · ' + p.sourceIp));
       d.appendChild(el('div', 'since ' + new Date(p.since).toLocaleString() + ' · expires ' + new Date(p.expires).toLocaleString(), 'mut'));
+      var acts = el('div', undefined, 'actions');
       ['allow', 'deny'].forEach(function (act) {
-        var b = el('button', act === 'allow' ? 'Allow' : 'Deny', act === 'deny' ? 'deny' : ''); b.type = 'button';
+        var b = el('button', act === 'allow' ? 'Allow' : 'Deny', act === 'deny' ? 'btn danger' : 'btn primary'); b.type = 'button';
         b.addEventListener('click', function () {
           b.disabled = true; say('');
-          call('POST', '/api/pending/' + encodeURIComponent(p.fingerprint) + '/' + act).then(refresh).catch(function (e) { say(e.message); loadPending(); });
+          call('POST', '/api/pending/' + encodeURIComponent(p.fingerprint) + '/' + act).then(refresh).catch(function (e) { say(e.message); sig.pend = null; loadPending(); });
         });
-        d.appendChild(b); d.appendChild(document.createTextNode(' '));
+        acts.appendChild(b);
       });
-      box.appendChild(d);
+      d.appendChild(acts); box.appendChild(d);
     });
   }
   function loadPending() { return call('GET', '/api/pending').then(renderPending).catch(function (e) { say(e.message); }); }
@@ -180,15 +450,18 @@
   });
   $('#enrol').addEventListener('click', function () {
     call('POST', '/api/enrol-code').then(function (r) {
-      $('#enrol-out').textContent = 'Code ' + r.code + ' (single use, expires ' + new Date(r.expires).toLocaleTimeString() + ')';
+      var out = $('#enrol-out'); out.textContent = '';
+      out.appendChild(el('span', r.code, 'code'));
+      out.appendChild(document.createTextNode(' single use, expires ' + new Date(r.expires).toLocaleTimeString()));
     }).catch(function (e) { say(e.message); });
   });
 
   refresh();
   setInterval(loadPending, 5000);
-  setInterval(refresh, 30000);
+  setInterval(function () { if (!editing && !confirming) refresh(); }, 30000); // never discard an open rename or confirm
 })();
 </script>
 {{end}}
+</div>
 </body>
 </html>
