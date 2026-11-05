@@ -133,6 +133,8 @@ func TestIdentityProbeHomeMismatch(t *testing.T) {
 	}
 }
 
+// The glob is capped, and the cap must not push the named files (/root) off the end: a host with
+// many home directories where only root is signed in is still a home_mismatch.
 func TestIdentityProbeHomeMismatchIsBounded(t *testing.T) {
 	root := t.TempDir()
 	for i := 0; i < maxOtherHomes+5; i++ {
@@ -140,15 +142,19 @@ func TestIdentityProbeHomeMismatchIsBounded(t *testing.T) {
 		if err := os.Mkdir(d, 0o700); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
-		writeFile(t, filepath.Join(d, ".claude.json"), signedIn)
+		writeFile(t, filepath.Join(d, ".claude.json"), "") // crowds the glob; an empty file is no sign-in
 	}
+	// The named file stands in for /root: outside the glob, so only the cap can lose it.
+	super := t.TempDir()
+	writeFile(t, filepath.Join(super, ".claude.json"), signedIn)
 	p := identityProbe{home: filepath.Join(root, "none"),
-		otherHomeGlobs: []string{filepath.Join(root, "*", ".claude.json")}}
-	if _, reason := p.run(); reason != proto.ReasonHomeMismatch {
-		t.Fatalf("reason = %q", reason)
+		otherHomeGlobs: []string{filepath.Join(root, "*", ".claude.json")},
+		otherHomeFiles: []string{filepath.Join(super, ".claude.json")}}
+	if n := len(p.candidates()); n > maxOtherHomes+len(p.otherHomeFiles) {
+		t.Fatalf("probed %d candidates, cap is %d plus the named files", n, maxOtherHomes)
 	}
-	if n := len(p.candidates()); n > maxOtherHomes {
-		t.Fatalf("probed %d candidates, cap is %d", n, maxOtherHomes)
+	if _, reason := p.run(); reason != proto.ReasonHomeMismatch {
+		t.Fatalf("the named file was capped away: reason = %q", reason)
 	}
 }
 

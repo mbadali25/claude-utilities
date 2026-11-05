@@ -118,11 +118,12 @@ func (p identityProbe) candidates() []string {
 		}
 		cands = append(cands, m...)
 	}
-	cands = append(cands, p.otherHomeFiles...)
+	// The cap bounds the globbed part only: the named files are a fixed, short list, and a host
+	// with more than maxOtherHomes home directories must not push /root off the end.
 	if len(cands) > maxOtherHomes {
 		cands = cands[:maxOtherHomes]
 	}
-	return cands
+	return append(cands, p.otherHomeFiles...)
 }
 
 // otherHomeSignedIn reports whether another user on this host has a .claude.json. It only stats:
