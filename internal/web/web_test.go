@@ -44,7 +44,19 @@ type fakeHub struct {
 	revoked    []string
 	importFn   func(host, label string) (vault.Account, error)
 	relabelFn  func(id, label string) error
+
+	addFn    func(host, label string) (string, error)
+	statusFn func(id string) (hub.AddView, error)
+	codeFn   func(id, code string) error
+	cancelFn func(id string) error
 }
+
+func (f *fakeHub) AddAccount(_ context.Context, host, label string) (string, error) {
+	return f.addFn(host, label)
+}
+func (f *fakeHub) AddStatus(id string) (hub.AddView, error) { return f.statusFn(id) }
+func (f *fakeHub) AddCode(id, code string) error            { return f.codeFn(id, code) }
+func (f *fakeHub) AddCancel(id string) error                { return f.cancelFn(id) }
 
 func (f *fakeHub) Hosts() []hub.HostView { f.mu.Lock(); defer f.mu.Unlock(); return f.hosts }
 func (f *fakeHub) Pending() []hub.PendingView {

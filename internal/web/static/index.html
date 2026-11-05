@@ -122,6 +122,14 @@
   .import form { display:flex; gap:8px; flex-wrap:wrap; }
   .import select, .import input { flex:1 1 160px; min-width:0; }
 
+  /* Add account (sign-in relay) */
+  [hidden] { display:none !important; }
+  .add-flow { display:grid; gap:10px; }
+  .add-flow form { display:flex; gap:8px; flex-wrap:wrap; }
+  .add-flow input { flex:1 1 220px; min-width:0; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .add-flow .btn { display:inline-flex; align-items:center; justify-content:center; text-decoration:none; width:fit-content; color:inherit; }
+  .add-flow .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+
   /* Login */
   .login { max-width:380px; margin:12vh auto 0; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:24px; display:grid; gap:14px; }
   .login label { display:grid; gap:6px; font-weight:500; }
@@ -202,6 +210,24 @@
       <input name="label" placeholder="Label" maxlength="64" required aria-label="Label" autocomplete="off">
       <button type="submit" class="btn primary">Import</button>
     </form>
+  </div>
+  <div class="import" id="add-panel" aria-labelledby="add-h">
+    <p class="mut" id="add-h">Add account: sign in with Anthropic</p>
+    <form id="add-form">
+      <select name="host" id="add-host" aria-label="Host that runs the sign-in"></select>
+      <input name="label" placeholder="Label" maxlength="64" required aria-label="Label for the new account" autocomplete="off">
+      <button type="submit" class="btn primary" id="add-start">Start sign-in</button>
+    </form>
+    <div class="add-flow" id="add-flow" hidden>
+      <p id="add-msg" role="status" aria-live="polite"></p>
+      <a class="btn primary" id="add-link" target="_blank" rel="noopener noreferrer" hidden>Open Anthropic sign-in</a>
+      <form id="add-code-form" hidden>
+        <input name="code" id="add-code" autocomplete="off" spellcheck="false" maxlength="2048" required aria-label="Code from Anthropic's page">
+        <button type="submit" class="btn primary" id="add-send">Submit code</button>
+      </form>
+      <div class="actions"><button type="button" class="btn" id="add-cancel">Cancel</button></div>
+    </div>
+    <p class="sub">The sign-in is completed on Anthropic's own page. claude-swap never sees your password; it only passes the link and the one-time code.</p>
   </div>
 </section>
 
@@ -404,9 +430,11 @@
     return call('GET', '/api/hosts').then(function (list) {
       hostsCache = list;
       $('#host-count').textContent = list.length ? String(list.length) : '';
-      var sel = $('#import-host'), keep = sel.value; sel.textContent = '';
-      list.forEach(function (h) { var o = el('option', h.name); o.value = h.hostId; sel.appendChild(o); });
-      if (keep) sel.value = keep;
+      ['#import-host', '#add-host'].forEach(function (id) {
+        var sel = $(id), keep = sel.value; sel.textContent = '';
+        list.forEach(function (h) { var o = el('option', h.name); o.value = h.hostId; sel.appendChild(o); });
+        if (keep) sel.value = keep;
+      });
       if (confirming && $('#hosts .confirm')) return; // keep an open confirm
       if (!changed('host', [list, accountsCache]) && !$('#hosts .empty')) return;
       var box = $('#hosts'); box.textContent = '';
@@ -448,6 +476,62 @@
     call('POST', '/api/import', { host: $('#import-host').value, label: ev.target.label.value })
       .then(function () { ev.target.label.value = ''; return refresh(); }).catch(function (e) { say(e.message); });
   });
+  // Add account. The sign-in URL and the code live only in the DOM and in memory: never in
+  // storage, the address bar or the title. The link is shown only while the hub says awaiting_code.
+  var add = { id: null, timer: null, state: '' };
+  var A = { form: $('#add-form'), start: $('#add-start'), flow: $('#add-flow'), msg: $('#add-msg'), link: $('#add-link'),
+            codeForm: $('#add-code-form'), code: $('#add-code'), send: $('#add-send'), cancel: $('#add-cancel') };
+  var LINK_OK = /^https:\/\/claude\.(com|ai)\//;
+  function addMsg(text, bad) { A.msg.textContent = text; A.msg.className = bad ? 'err' : ''; }
+  function addIdle() { // back to the start form; drops the link and any code
+    clearTimeout(add.timer); add.id = null; add.state = '';
+    A.flow.hidden = true; A.link.hidden = true; A.link.removeAttribute('href'); A.codeForm.hidden = true;
+    A.code.value = ''; A.start.disabled = false; A.cancel.textContent = 'Cancel';
+  }
+  function addRender(j) {
+    var prev = add.state; add.state = j.state;
+    A.link.hidden = true; A.link.removeAttribute('href'); A.codeForm.hidden = true;
+    if (j.state === 'starting') { addMsg('Starting the sign-in on the host...'); }
+    else if (j.state === 'awaiting_code') {
+      if (j.url && LINK_OK.test(j.url)) { A.link.href = j.url; A.link.hidden = false; }
+      A.codeForm.hidden = false;
+      addMsg("Open the link, sign in on Anthropic's own page, then paste the code it shows.");
+      if (prev !== 'awaiting_code') A.code.focus();
+    } else if (j.state === 'finishing') { addMsg('Finishing the sign-in...'); }
+    else if (j.state === 'done') {
+      addMsg('Added ' + (j.account ? j.account.label : 'the account') + '. It is stored free; swap it onto a host to use it.');
+      A.cancel.textContent = 'Close'; refresh();
+    } else if (j.state === 'failed') { addMsg(j.error || 'The sign-in failed.', true); A.cancel.textContent = 'Close'; }
+    else if (j.state === 'cancelled') { addIdle(); }
+  }
+  function addPoll() {
+    if (!add.id) return;
+    call('GET', '/api/accounts/add/' + encodeURIComponent(add.id)).then(function (j) {
+      if (!add.id) return;
+      addRender(j);
+      if (['starting', 'awaiting_code', 'finishing'].indexOf(j.state) >= 0) add.timer = setTimeout(addPoll, 2000);
+    }).catch(function (e) { addMsg(e.message, true); A.cancel.textContent = 'Close'; add.state = 'failed'; });
+  }
+  A.form.addEventListener('submit', function (ev) {
+    ev.preventDefault(); say(''); A.start.disabled = true;
+    call('POST', '/api/accounts/add', { host: $('#add-host').value, label: A.form.label.value }).then(function (r) {
+      add.id = r.id; A.form.label.value = ''; A.flow.hidden = false; addMsg('Starting the sign-in on the host...'); addPoll();
+    }).catch(function (e) { say(e.message); A.start.disabled = false; });
+  });
+  A.codeForm.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var code = A.code.value; A.code.value = ''; A.send.disabled = true;
+    call('POST', '/api/accounts/add/' + encodeURIComponent(add.id) + '/code', { code: code })
+      .then(function () { addMsg('Finishing the sign-in...'); A.codeForm.hidden = true; A.link.hidden = true; clearTimeout(add.timer); addPoll(); })
+      .catch(function (e) { addMsg(e.message, true); })
+      .then(function () { A.send.disabled = false; });
+  });
+  A.cancel.addEventListener('click', function () {
+    var id = add.id, finished = add.state === 'done' || add.state === 'failed';
+    addIdle();
+    if (id && !finished) call('POST', '/api/accounts/add/' + encodeURIComponent(id) + '/cancel').catch(function (e) { say(e.message); });
+  });
+
   $('#enrol').addEventListener('click', function () {
     call('POST', '/api/enrol-code').then(function (r) {
       var out = $('#enrol-out'); out.textContent = '';

@@ -54,6 +54,10 @@ type hubAPI interface {
 	Revoke(hostID string) error
 	Import(ctx context.Context, hostID, label string) (vault.Account, error)
 	Relabel(accountID, label string) error
+	AddAccount(ctx context.Context, hostID, label string) (string, error)
+	AddStatus(id string) (hub.AddView, error)
+	AddCode(id, code string) error
+	AddCancel(id string) error
 	Allow(fingerprint string) (string, error)
 	Deny(fingerprint string) error
 }
@@ -104,6 +108,10 @@ func newHandler(h hubAPI, v *vault.Vault, u usageAPI, password string, now func(
 	mux.HandleFunc("POST /api/hosts/{id}/revoke", s.authPost(s.revoke))
 	mux.HandleFunc("POST /api/import", s.authPost(s.importLogin))
 	mux.HandleFunc("POST /api/accounts/{id}/label", s.authPost(s.relabel))
+	mux.HandleFunc("POST /api/accounts/add", s.authPost(s.addAccount))
+	mux.HandleFunc("GET /api/accounts/add/{id}", s.auth(s.addStatus))
+	mux.HandleFunc("POST /api/accounts/add/{id}/code", s.authPost(s.addCode))
+	mux.HandleFunc("POST /api/accounts/add/{id}/cancel", s.authPost(s.addCancel))
 	mux.HandleFunc("POST /api/pending/{fp}/allow", s.authPost(s.allow))
 	mux.HandleFunc("POST /api/pending/{fp}/deny", s.authPost(s.deny))
 	return headers(s.apiGate(mux))
@@ -424,8 +432,12 @@ func (s *server) hosts(w http.ResponseWriter, _ *http.Request) {
 // their (redacted) text: hub errors already carry operator-facing reasons, never a token.
 func hubError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, hub.ErrUnknownHost), errors.Is(err, hub.ErrUnknownAccount), errors.Is(err, hub.ErrNotPending):
+	case errors.Is(err, hub.ErrUnknownHost), errors.Is(err, hub.ErrUnknownAccount), errors.Is(err, hub.ErrNotPending), errors.Is(err, hub.ErrNoAdd):
 		writeErr(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, hub.ErrAddBusy), errors.Is(err, hub.ErrNotAwaitingCode):
+		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, vault.ErrLabelTaken):
+		writeErr(w, http.StatusConflict, "an account with that label already exists")
 	case errors.Is(err, hub.ErrPendingExpired):
 		writeErr(w, http.StatusGone, "the pending connection expired; the agent must reconnect")
 	case errors.Is(err, hub.ErrUnknownLiveAccount), errors.Is(err, hub.ErrAgentOffline), errors.Is(err, hub.ErrAlreadyStored):
@@ -501,6 +513,109 @@ func (s *server) importLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.view(a, s.owners()))
+}
+
+// --- add account (sign-in relay) ---
+
+const maxCode = 2048
+
+// jobID returns the {id} path value if it has the shape of a hub job id; otherwise it answers 404.
+func jobID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := r.PathValue("id")
+	if len(id) != 16 || strings.Trim(id, "0123456789abcdef") != "" {
+		writeErr(w, http.StatusNotFound, hub.ErrNoAdd.Error())
+		return "", false
+	}
+	return id, true
+}
+
+func (s *server) addAccount(w http.ResponseWriter, r *http.Request) {
+	var in struct{ Host, Label string }
+	if !readJSON(w, r, &in) {
+		return
+	}
+	in.Label = strings.TrimSpace(in.Label)
+	if in.Host == "" || in.Label == "" || len(in.Label) > maxLabel {
+		writeErr(w, http.StatusBadRequest, "host and a label of 1-64 characters are required")
+		return
+	}
+	for _, a := range s.vault.ListPublic() {
+		if strings.EqualFold(a.Label, in.Label) {
+			writeErr(w, http.StatusConflict, "an account with that label already exists")
+			return
+		}
+	}
+	id, err := s.hub.AddAccount(r.Context(), in.Host, in.Label)
+	if err != nil {
+		hubError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"id": id})
+}
+
+// addStatusJSON never carries a credential block: accountView has no field for one. url appears
+// only while the job awaits the code.
+type addStatusJSON struct {
+	State   string       `json:"state"`
+	URL     string       `json:"url,omitempty"`
+	Account *accountView `json:"account,omitempty"`
+	Error   string       `json:"error,omitempty"`
+}
+
+func (s *server) addStatus(w http.ResponseWriter, r *http.Request) {
+	id, ok := jobID(w, r)
+	if !ok {
+		return
+	}
+	v, err := s.hub.AddStatus(id)
+	if err != nil {
+		hubError(w, err)
+		return
+	}
+	out := addStatusJSON{State: string(v.State), Error: v.Error}
+	if v.State == hub.AddAwaitingCode {
+		out.URL = v.URL
+	}
+	if v.Account != nil {
+		a := *v.Account
+		a.Block = nil
+		av := s.view(a, s.owners())
+		out.Account = &av
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *server) addCode(w http.ResponseWriter, r *http.Request) {
+	id, ok := jobID(w, r)
+	if !ok {
+		return
+	}
+	var in struct{ Code string }
+	if !readJSON(w, r, &in) {
+		return
+	}
+	in.Code = strings.TrimSpace(in.Code)
+	if in.Code == "" || len(in.Code) > maxCode {
+		writeErr(w, http.StatusBadRequest, "paste the code from Anthropic's page (1-2048 characters)")
+		return
+	}
+	if err := s.hub.AddCode(id, in.Code); err != nil {
+		hubError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *server) addCancel(w http.ResponseWriter, r *http.Request) {
+	id, ok := jobID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.hub.AddCancel(id); err != nil {
+		hubError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *server) relabel(w http.ResponseWriter, r *http.Request) {
