@@ -44,6 +44,15 @@ const (
 //go:embed static/index.html
 var indexHTML string
 
+// The site icons. They are served unauthenticated: the login page carries them too, and neither
+// file says anything about the estate.
+//
+//go:embed static/favicon.svg
+var faviconSVG []byte
+
+//go:embed static/apple-touch-icon.png
+var appleTouchPNG []byte
+
 var pageTmpl = template.Must(template.New("index").Parse(indexHTML))
 
 // hubAPI is the part of *hub.Hub the web layer uses.
@@ -115,6 +124,8 @@ func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, now func()
 		failures: map[string][]time.Time{}, commandHits: map[string][]time.Time{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
+	mux.HandleFunc("GET /favicon.svg", icon("image/svg+xml", faviconSVG))
+	mux.HandleFunc("GET /apple-touch-icon.png", icon("image/png", appleTouchPNG))
 	mux.HandleFunc("POST /login", s.login)
 	mux.HandleFunc("POST /api/logout", s.authPost(s.logout))
 	mux.HandleFunc("POST /api/password", s.authPost(s.setPassword))
@@ -149,6 +160,20 @@ func (s *server) apiGate(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// icon serves one embedded site icon. These are the only cacheable responses the server has: the
+// bytes are fixed at build time and hold no account data, so the blanket no-store from headers is
+// replaced here rather than making every browser refetch the mark on each page load.
+func icon(contentType string, body []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		hd := w.Header()
+		hd.Set("Content-Type", contentType)
+		hd.Set("Cache-Control", "public, max-age=86400")
+		if _, err := w.Write(body); err != nil {
+			logger.Error("icon write failed", "action", "icon", "result", "failed", logx.Err(err))
+		}
+	}
 }
 
 func headers(next http.Handler) http.Handler {
@@ -263,8 +288,11 @@ type pageData struct {
 func (s *server) render(w http.ResponseWriter, code int, d pageData) {
 	d.Nonce = randToken(16)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// img-src is the one addition the site icons need: a <link rel="icon"> fetch has the "image"
+	// destination, so default-src 'none' would block it. 'self' only - the icons are embedded and
+	// served from this origin, and nothing else on the page loads an image.
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'nonce-"+d.Nonce+
-		"'; style-src 'nonce-"+d.Nonce+"'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		"'; style-src 'nonce-"+d.Nonce+"'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	w.WriteHeader(code)
 	if err := pageTmpl.Execute(w, d); err != nil {
 		logger.Error("render failed", "action", "render", "result", "failed", logx.Err(err))

@@ -4,7 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>claude-swap</title>
+<title>{{if .LoggedIn}}claude-swap - Claude Code logins on this network{{else}}Sign in - claude-swap{{end}}</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101114" media="(prefers-color-scheme: dark)">
 {{if .LoggedIn}}<meta name="csrf-token" content="{{.CSRF}}">{{end}}
 <style nonce="{{.Nonce}}">
   /* Tokens. Colour sits on data (meters) and on status; chrome stays neutral. */
@@ -36,7 +40,12 @@
   /* Header */
   .top { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:4px 0 16px; }
   .mark { display:flex; align-items:center; gap:10px; margin-right:auto; }
-  .mark svg { width:28px; height:28px; flex:none; color:var(--acc); }
+  /* The mark is the favicon, inline: the same tile and glyph, so the tab and the header match.
+     Rules, not style attributes - a style-src nonce does not cover inline style attributes. */
+  .mark svg { width:28px; height:28px; flex:none; }
+  .mark .t { fill:var(--acc); }
+  .mark .s { fill:none; stroke:var(--acc-ink); stroke-width:3; }
+  .mark .h { fill:var(--acc-ink); }
   h1 { font-size:1.25rem; font-weight:700; letter-spacing:-.01em; }
   .scope { font-size:.85rem; color:var(--mut); }
   .enrol { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
@@ -394,7 +403,7 @@
 {{if not .LoggedIn}}
 <main class="login">
   <div class="mark">
-    <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10h18M18 5l5 5-5 5M24 18H6M10 13l-5 5 5 5"/></svg>
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect class="t" width="32" height="32" rx="7"/><path class="s" d="M5.5 11.5h15.8M26.5 20.5H10.7"/><path class="h" d="M26.5 11.5 20.8 7.5v8zM5.5 20.5 11.2 16.5v8z"/></svg>
     <h1>claude-swap</h1>
   </div>
   <form method="post" action="/login">
@@ -407,7 +416,7 @@
 <a class="skip" href="#main">Skip to accounts and hosts</a>
 <header class="top">
   <div class="mark">
-    <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10h18M18 5l5 5-5 5M24 18H6M10 13l-5 5 5 5"/></svg>
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect class="t" width="32" height="32" rx="7"/><path class="s" d="M5.5 11.5h15.8M26.5 20.5H10.7"/><path class="h" d="M26.5 11.5 20.8 7.5v8zM5.5 20.5 11.2 16.5v8z"/></svg>
     <div><h1>claude-swap</h1><div class="scope">Claude Code logins on this network</div></div>
   </div>
   <div class="enrol">

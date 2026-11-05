@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="claude-swap">
+<!-- The swap mark: two arrows exchanging, heads at opposite ends so they never collide at 16px.
+     The glyph is knocked out of a filled tile, so its contrast is against the tile and not against
+     whatever colour the browser paints behind a tab. Colours are the app's accent token pair.
+     Keep every theme inside this file: a favicon gets no stylesheet from the page. -->
+<style>
+.t { fill:#2447b8 }
+.s { fill:none; stroke:#fff; stroke-width:3 }
+.h { fill:#fff }
+@media (prefers-color-scheme: dark) {
+  .t { fill:#8fabf6 }
+  .s { stroke:#0e1424 }
+  .h { fill:#0e1424 }
+}
+</style>
+<rect class="t" width="32" height="32" rx="7"/>
+<path class="s" d="M5.5 11.5h15.8M26.5 20.5H10.7"/>
+<path class="h" d="M26.5 11.5 20.8 7.5v8zM5.5 20.5 11.2 16.5v8z"/>
+</svg>
