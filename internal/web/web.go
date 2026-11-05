@@ -64,9 +64,11 @@ type hubAPI interface {
 	Command(ctx context.Context, req hub.CommandRequest) (hub.CommandView, error)
 }
 
-// usageAPI is the part of *usage.Poller the web layer uses.
+// usageAPI is the part of *usage.Poller the web layer uses: the last answer for the page, and an
+// on-demand poll for the Refresh buttons (usagerefresh.go).
 type usageAPI interface {
 	Last(accountID string) (usage.Usage, bool)
+	RefreshNow(ctx context.Context, ids []string) []usage.RefreshResult
 }
 
 // PasswordAPI is the part of *adminpw.Store the web layer uses: authenticate a submitted
@@ -104,6 +106,8 @@ type server struct {
 	failures map[string][]time.Time // per source IP
 	// commandHits rate limits POST /api/sessions/command per source IP (control.go).
 	commandHits map[string][]time.Time
+	// refreshHits rate limits POST /api/usage/refresh across every session (usagerefresh.go).
+	refreshHits []time.Time
 }
 
 func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, now func() time.Time) http.Handler {
@@ -115,6 +119,7 @@ func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, now func()
 	mux.HandleFunc("POST /api/logout", s.authPost(s.logout))
 	mux.HandleFunc("POST /api/password", s.authPost(s.setPassword))
 	mux.HandleFunc("GET /api/accounts", s.auth(s.accounts))
+	mux.HandleFunc("POST /api/usage/refresh", s.authPost(s.usageRefresh))
 	mux.HandleFunc("GET /api/hosts", s.auth(s.hosts))
 	mux.HandleFunc("GET /api/pending", s.auth(s.pending))
 	mux.HandleFunc("POST /api/swap", s.authPost(s.swap))
