@@ -306,6 +306,19 @@
   /* The lead line carries the Copy button; the command itself runs full width underneath. */
   .copyline { display:grid; gap:1px; min-width:0; }
   .copyline code { overflow-wrap:anywhere; }
+  /* The restart confirm names every session it would reach, one per row. A row carries a name, a
+     subline and a command, so it gets the pitch a multi-line row needs rather than a data row's.
+     The rows are separated by one tone step, never by a divider colour of their own, and the name
+     wraps here instead of truncating: a confirm that abbreviates the name is not naming it. */
+  .slist { list-style:none; margin:0; padding:0; border:1px solid var(--line); border-radius:var(--r); }
+  .slist li { display:grid; gap:5px; padding:11px 12px; min-height:44px; align-content:center; min-width:0; }
+  .slist li + li { border-top:1px solid var(--line); }
+  .slist .who { font-weight:650; overflow-wrap:anywhere; }
+  .slist .who.nameless { font-weight:550; color:var(--mut); }
+  .slist .sub { font-size:.82rem; }
+  /* A dialog body scrolls, so a long list is bounded here rather than pushing the buttons away. */
+  #ctl-restart .slist { max-height:38vh; overflow:auto; }
+  .marked { font-size:.78rem; color:var(--mut); }
 
   /* Why a host names no account: one step in the ground inside the card that failed to name one,
      never a tinted ground of its own. The sentence is in the full ink; the fix is secondary. */
@@ -505,6 +518,7 @@
     <p class="sub" id="ctl-repair-sub"></p>
     <div class="row wrap">
       <button type="button" class="btn primary" id="ctl-repair-go">Apply to all needs-reload sessions</button>
+      <button type="button" class="btn" id="ctl-restart-all">Restart sessions</button>
       <span class="sub">Asks each one to reload plugins and reports the restart it still needs. Nothing is killed.</span>
     </div>
   </div>
@@ -628,6 +642,35 @@
     <div class="modal-foot">
       <button type="button" class="btn" data-close="ctl-confirm">Cancel</button>
       <button type="button" class="btn primary" id="ctl-confirm-go">Ask the sessions</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- The restart confirm. Its whole job is to NAME the sessions before anything is asked of them,
+     because a restart is the one ask whose subject is a session's life. claude-swap stops nothing:
+     the decision is copy-only (docs/runbooks/session-control.md), so the dialog hands over the
+     exact commands and says in the body that nothing here is killed. The counts line is a live
+     region, the list is a real <ul>, and "Mark as restarted" is labelled as a local note so it
+     cannot be read as having restarted anything. -->
+<dialog class="modal" id="ctl-restart" aria-labelledby="ctl-restart-h" aria-describedby="ctl-restart-sub">
+  <div class="modal-head">
+    <h2 id="ctl-restart-h">Restart sessions</h2>
+    <button type="button" class="btn sm ghost x" data-close="ctl-restart" aria-label="Close without asking">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p id="ctl-restart-sub" role="status" aria-atomic="true"></p>
+    <p class="mut">Nothing is stopped, killed or restarted by claude-swap. A session holds whatever
+      somebody is doing in it, so the restart is yours to run: copy a command below and run it in
+      that session's own terminal. Asking records the request and brings back each session's exact
+      command.</p>
+    <ul class="slist" id="ctl-restart-list"></ul>
+    <p class="msg" id="ctl-restart-msg" role="alert"></p>
+    <div class="modal-foot">
+      <button type="button" class="btn" data-close="ctl-restart">Cancel</button>
+      <button type="button" class="btn" id="ctl-restart-mark">Mark as restarted</button>
+      <button type="button" class="btn primary" id="ctl-restart-go">Ask and show the commands</button>
     </div>
   </div>
 </dialog>
@@ -1252,7 +1295,7 @@
   // title cannot be set on a running session at all, so those come back "needs restart".
   var CMD_LABEL = {
     reload_plugins: 'Reload plugins', remote_control_enable: 'Enable remote',
-    rename_remote: 'Fix name', repair: 'Repair'
+    rename_remote: 'Fix name', repair: 'Repair', restart_sessions: 'Restart sessions'
   };
   var ST = {
     queued: { word: 'Queued', count: 'queued', kind: '', g: 'info',
@@ -1263,16 +1306,29 @@
       say: 'The session ran it.' },
     failed: { word: 'Failed', count: 'failed', kind: 'bad', g: 'bad',
       say: 'Failed: nothing was asked of the session.' },
-    unsupported: { word: 'Needs restart', count: 'need a restart', kind: 'warn', g: 'warn',
-      say: 'Needs restart: cannot be done on a running session.' }
+    unsupported: { word: 'Unsupported', count: 'unsupported', kind: 'warn', g: 'warn',
+      say: 'Unsupported: no proven mechanism can do this on a running session.' }
+  };
+  // "unsupported" covers two different answers and an operator has to act on them differently:
+  // one says a relaunch fixes it and carries the command, the other says nothing can. The reason
+  // code is what separates them, so the word comes off the code when there is one for it.
+  var ST_CODE = {
+    'unsupported-requires-restart': { word: 'Restart required', kind: 'warn', g: 'warn',
+      say: 'Restart required: cannot be done on a running session. Nothing was stopped.' }
   };
   // A status word is agent-reported, so an unknown one reads as itself rather than as nothing.
-  function stOf(k) { return ST[k] || { word: String(k || 'unknown').slice(0, STATUS_CAP), count: 'in an unknown state', kind: '', g: 'info', say: '' }; }
+  // The count word stays per-status: the summary line tallies by status, not by code.
+  function stOf(k, code) {
+    var base = ST[k] || { word: String(k || 'unknown').slice(0, STATUS_CAP), count: 'in an unknown state', kind: '', g: 'info', say: '' };
+    var over = code && ST_CODE[code];
+    if (!over) return base;
+    return { word: over.word, count: base.count, kind: over.kind, g: over.g, say: over.say };
+  }
 
   var ctlBusy = {}, lastAsk = null, nameAsk = null, confirmAsk = null;
   var fastTimer = null, fastUntil = 0;
   function ctlWorking() { for (var k in ctlBusy) { if (ctlBusy[k]) return true; } return false; }
-  function ctlDialogOpen() { return !!($('#ctl-name').open || $('#ctl-confirm').open); }
+  function ctlDialogOpen() { return !!($('#ctl-name').open || $('#ctl-confirm').open || $('#ctl-restart').open); }
   // One idempotency key per button press. The server forgets it 15 minutes after the request
   // finishes, so it is only ever reused by retrying that same press.
   function reqId() { return 'ui-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
@@ -1372,6 +1428,95 @@
     }, function () {});
   });
 
+  // --- Restart sessions: the ask that NAMES its targets, and kills nothing ------------------
+  // The decision recorded in docs/runbooks/session-control.md is copy-only: no code in this
+  // program, on the server or on a host, stops a session, so there is no confirm token and
+  // nothing for one to unlock. What this flow owes the operator instead is the full list of
+  // sessions the ask would reach, by name, with each one's exact relaunch command to copy. The
+  // hub refuses restart_sessions without confirm:true at EVERY scope, so this dialog is the
+  // confirm the wire insists on and not a courtesy.
+  var restartAsk = null;
+  // Sessions marked restarted in THIS BROWSER only. It is a note, never a claim: the hub forgets
+  // a session's needs-reload flag when the session ends, and nothing here may assert that for it.
+  var restartedLocal = {};
+  function sessKey(h, s) { return h.hostId + '|' + s.pid + ':' + (s.id || ''); }
+  function restartMarked(h, s) { return !!restartedLocal[sessKey(h, s)]; }
+
+  // restartTargets collects what one restart ask would reach, in the order the page shows them.
+  // stale:true is the estate-wide ask (every host, needs-reload only); a hostId is one host.
+  function restartTargets(opts) {
+    var out = [];
+    hostsCache.forEach(function (h) {
+      if (opts.hostId && h.hostId !== opts.hostId) return;
+      if (!h.online) return; // nothing can be asked of a host that is not connected
+      (h.sessions || []).forEach(function (s) {
+        if (opts.stale && !s.needsReload) return;
+        if (opts.stale && restartMarked(h, s)) return;
+        out.push({ host: h, sess: s });
+      });
+    });
+    return out;
+  }
+
+  function openRestartDialog(title, opts) {
+    var targets = restartTargets(opts);
+    restartAsk = { opts: opts, targets: targets };
+    $('#ctl-restart-h').textContent = title;
+    var n = targets.length;
+    $('#ctl-restart-sub').textContent = n
+      ? 'These ' + (n === 1 ? 'session is' : n + ' sessions are') + ' named below. Run each command yourself to restart that session.'
+      : 'No session matches this ask, so there is nothing to restart.';
+    var list = $('#ctl-restart-list');
+    list.textContent = '';
+    if (!n) {
+      var none = el('li'); none.appendChild(el('span', 'Nothing to list.', 'sub'));
+      list.appendChild(none);
+    }
+    targets.forEach(function (t) {
+      var li = el('li'), named = !!t.sess.name;
+      li.appendChild(el('span', named ? t.sess.name : 'Unnamed session', 'who' + (named ? '' : ' nameless')));
+      li.appendChild(el('span', t.host.name + ' · pid ' + t.sess.pid + (t.sess.needsReload ? ' · on the old login' : ''), 'sub'));
+      // The command is known up front only for a session a swap left stale and whose id can be
+      // resumed; otherwise the ask is what brings it back, which is what the row says.
+      if (t.sess.restartCommand) {
+        li.appendChild(copyLine('Restart with', t.sess.restartCommand,
+          'Copy the relaunch command for ' + (named ? t.sess.name : 'pid ' + t.sess.pid)));
+      } else {
+        li.appendChild(el('span', 'Ask to get this session’s exact command.', 'sub'));
+      }
+      if (restartMarked(t.host, t.sess)) li.appendChild(el('span', 'Marked as restarted in this browser.', 'marked'));
+      list.appendChild(li);
+    });
+    $('#ctl-restart-msg').textContent = '';
+    var go = $('#ctl-restart-go'), mark = $('#ctl-restart-mark');
+    go.disabled = !n; mark.disabled = !n;
+    openModal('#ctl-restart');
+    (n ? go : $('#ctl-restart-mark')).focus();
+  }
+
+  // markRestartedLocally records the operator's own note and nothing else: no request is sent,
+  // no server state changes, and the session keeps being listed until it really ends. Saying so
+  // on the control is the whole point - a silent dismissal would read as a restart.
+  function markRestartedLocally(targets) {
+    targets.forEach(function (t) { restartedLocal[sessKey(t.host, t.sess)] = true; });
+    renderRepair(); renderHosts();
+  }
+  $('#ctl-restart-mark').addEventListener('click', function () {
+    if (!restartAsk) return;
+    markRestartedLocally(restartAsk.targets);
+    restartAsk = null; $('#ctl-restart').close();
+    say('Marked as restarted in this browser only. Each session stays listed until it ends.');
+  });
+  $('#ctl-restart-go').addEventListener('click', function () {
+    var a = restartAsk, b = $('#ctl-restart-go');
+    if (!a) return;
+    var body = { command: 'restart_sessions', confirm: true };
+    if (a.opts.hostId) { body.scope = 'host'; body.host = a.opts.hostId; }
+    else { body.scope = 'all'; body.onlyNeedsReload = true; }
+    ask(body, 'restart/' + (a.opts.hostId || 'all'), $('#ctl-restart-msg'), [b])
+      .then(function () { restartAsk = null; $('#ctl-restart').close(); }, function () {});
+  });
+
   // Fix name. The field is prefilled with the name the session carries now, and the limit is
   // checked here as well as by maxlength, which counts UTF-16 units rather than runes. 256 is
   // the field's cap; proto.CleanRemoteName shortens anything past 200 runes when it is applied,
@@ -1409,7 +1554,7 @@
   function commandList(cmds) {
     var box = el('div', undefined, 'cmds');
     cmds.forEach(function (c) {
-      var st = stOf(c.status), label = CMD_LABEL[c.command] || c.command;
+      var st = stOf(c.status, c.code), label = CMD_LABEL[c.command] || c.command;
       var row = el('div', undefined, 'cmd');
       row.appendChild(chip(label + ': ' + st.word, st.kind, st.g));
       if (st.say) row.appendChild(el('span', st.say, 'say'));
@@ -1478,6 +1623,15 @@
       'Ask every session on ' + h.name + ' to bind remote control?',
       'Remote control cannot be bound on a running session, so each answers with the restart that would.',
       'remote_control_enable');
+    // Restart goes to its own dialog, not the shared confirm: this is the one ask that has to
+    // name the sessions, which a one-line count cannot do.
+    var rb = el('button', 'Restart sessions', 'btn sm'); rb.type = 'button';
+    rb.disabled = !h.online || !n;
+    rb.setAttribute('aria-label', 'Restart sessions on ' + h.name);
+    rb.addEventListener('click', function () {
+      openRestartDialog('Restart sessions on ' + h.name, { hostId: h.hostId });
+    });
+    btns.push(rb); box.appendChild(rb);
     if (!h.online) box.appendChild(el('span', 'The host is offline.', 'why'));
     else if (!n) box.appendChild(el('span', 'No sessions are reported here.', 'why'));
     box.appendChild(msg);
@@ -1486,10 +1640,13 @@
 
   // The estate-wide repair: repair with onlyNeedsReload, the ask that fits what a swap leaves
   // behind. The bar shows only while there is something for it to do.
+  // A session the operator has marked restarted here is left out of the callout's count, which is
+  // what the note is for. It is still in the host card and still carries the hub's own Needs
+  // reload chip, so the local note hides a nag and never a fact.
   function staleSessions() {
     var sess = 0, hosts = 0;
     hostsCache.forEach(function (h) {
-      var n = (h.sessions || []).filter(function (s) { return s.needsReload; }).length;
+      var n = (h.sessions || []).filter(function (s) { return s.needsReload && !restartMarked(h, s); }).length;
       if (n) { sess += n; hosts++; }
     });
     return { sessions: sess, hosts: hosts };
@@ -1521,6 +1678,9 @@
         return ask({ command: 'repair', scope: 'all', onlyNeedsReload: true, confirm: true },
           'all/repair', dmsg, dbtns);
       });
+  });
+  $('#ctl-restart-all').addEventListener('click', function () {
+    openRestartDialog('Restart every session on an old login', { stale: true });
   });
 
   // The verdict of the last Swap press, per host, kept out of the DOM on purpose: renderHosts
@@ -1641,6 +1801,10 @@
 
     // Nothing can reload a running session's login, so hand over the restart command.
     if (s.restartCommand) li.appendChild(restartLine(s.restartCommand));
+    // The operator's own note, said plainly: it is local and it changed nothing on the host.
+    if (restartMarked(h, s)) {
+      li.appendChild(el('div', 'Marked as restarted in this browser only; it stays listed until the session ends.', 'marked'));
+    }
     // commands is omitted, not empty, when a session has never been asked anything.
     if (s.commands && s.commands.length) li.appendChild(commandList(s.commands));
     li.appendChild(sessionControls(h, s));
