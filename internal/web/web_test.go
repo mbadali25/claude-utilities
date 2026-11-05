@@ -54,10 +54,11 @@ type fakeHub struct {
 	removeCalls [][2]any
 	removeFn    func(id string, force bool) error
 
-	addFn    func(host, label string) (string, error)
-	statusFn func(id string) (hub.AddView, error)
-	codeFn   func(id, code string) error
-	cancelFn func(id string) error
+	addFn     func(host, label string) (string, error)
+	replaceFn func(host, account string) (string, error)
+	statusFn  func(id string) (hub.AddView, error)
+	codeFn    func(id, code string) error
+	cancelFn  func(id string) error
 
 	commandCalls []hub.CommandRequest
 	commandView  hub.CommandView
@@ -82,6 +83,9 @@ func (f *fakeHub) commands() []hub.CommandRequest {
 
 func (f *fakeHub) AddAccount(_ context.Context, host, label string) (string, error) {
 	return f.addFn(host, label)
+}
+func (f *fakeHub) ReplaceLogin(_ context.Context, host, account string) (string, error) {
+	return f.replaceFn(host, account)
 }
 func (f *fakeHub) AddStatus(id string) (hub.AddView, error) { return f.statusFn(id) }
 func (f *fakeHub) AddCode(id, code string) error            { return f.codeFn(id, code) }
