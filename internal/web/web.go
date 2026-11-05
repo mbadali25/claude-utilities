@@ -14,6 +14,7 @@ import (
 	"errors"
 	"html/template"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -79,6 +80,9 @@ type hubAPI interface {
 type usageAPI interface {
 	Last(accountID string) (usage.Usage, bool)
 	RefreshNow(ctx context.Context, ids []string) []usage.RefreshResult
+	// Info is the account's schedule (tier, interval, next poll); Touch says someone is looking at it.
+	Info(accountID string) usage.Info
+	Touch(accountID string)
 }
 
 // PasswordAPI is the part of *adminpw.Store the web layer uses: authenticate a submitted
@@ -165,6 +169,7 @@ func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, tn tunnelA
 	mux.HandleFunc("POST /api/password", s.authPost(s.setPassword))
 	mux.HandleFunc("GET /api/accounts", s.auth(s.accounts))
 	mux.HandleFunc("POST /api/usage/refresh", s.authPost(s.usageRefresh))
+	mux.HandleFunc("POST /api/usage/watch", s.authPost(s.usageWatch))
 	mux.HandleFunc("GET /api/hosts", s.auth(s.hosts))
 	mux.HandleFunc("GET /api/pending", s.auth(s.pending))
 	mux.HandleFunc("POST /api/swap", s.authPost(s.swap))
@@ -528,6 +533,11 @@ type accountView struct {
 	FetchedAt  *time.Time  `json:"fetchedAt"`
 	AgeSeconds *int64      `json:"ageSeconds"`
 	Error      string      `json:"error,omitempty"`
+	// Tier is active, idle or backoff; CheckEverySec is the tier's polling interval (absent in
+	// backoff); RetryInSec is how long until the next poll after a failed one.
+	Tier          string `json:"tier,omitempty"`
+	CheckEverySec int64  `json:"checkEverySec,omitempty"`
+	RetryInSec    *int64 `json:"retryInSec,omitempty"`
 }
 
 func window(w usage.Window) *windowView {
@@ -563,7 +573,16 @@ func (s *server) view(a vault.Account, owners map[string]string) accountView {
 			}
 			v.FetchedAt, v.AgeSeconds = &f, &age
 		}
+		if !u.RetryAt.IsZero() {
+			left := int64(math.Ceil(u.RetryAt.Sub(s.now()).Seconds()))
+			if left < 0 {
+				left = 0
+			}
+			v.RetryInSec = &left
+		}
 	}
+	in := s.usage.Info(a.ID)
+	v.Tier, v.CheckEverySec = string(in.Tier), int64(in.Every.Seconds())
 	return v
 }
 
