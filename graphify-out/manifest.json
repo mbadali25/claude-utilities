@@ -1,0 +1,68 @@
+{
+  ".claude/workflows/spec-to-landing.js": {
+    "mtime": 1793834053.4175599,
+    "seen": 1793836562.0233364,
+    "ast_hash": "21c2a1227e39223556f77490532cfb39",
+    "semantic_hash": "21c2a1227e39223556f77490532cfb39"
+  },
+  "_verify/run-all.sh": {
+    "mtime": 1793752861.5629897,
+    "seen": 1793836562.023341,
+    "ast_hash": "16ae111091b3d7a6dfe00037b4d09462",
+    "semantic_hash": "16ae111091b3d7a6dfe00037b4d09462"
+  },
+  "_verify/smoke.sh": {
+    "mtime": 1793835671.5779843,
+    "seen": 1793836562.023343,
+    "ast_hash": "59bef39730b3067349e989db51be32fa",
+    "semantic_hash": "59bef39730b3067349e989db51be32fa"
+  },
+  "go.mod": {
+    "mtime": 1793834240.124469,
+    "seen": 1793836562.023344,
+    "ast_hash": "8ac73ca1b7db4d5be470d2f1fbd1d17c",
+    "semantic_hash": "8ac73ca1b7db4d5be470d2f1fbd1d17c"
+  },
+  "internal/logx/logx.go": {
+    "mtime": 1793835561.792296,
+    "seen": 1793836562.0233452,
+    "ast_hash": "cdedd956b83554338005f85e7dbe702f",
+    "semantic_hash": "cdedd956b83554338005f85e7dbe702f"
+  },
+  "internal/logx/logx_allowlist_test.go": {
+    "mtime": 1793835561.7917814,
+    "seen": 1793836562.023346,
+    "ast_hash": "9f9de9c2042505825c54a71e4d0da666",
+    "semantic_hash": "9f9de9c2042505825c54a71e4d0da666"
+  },
+  "internal/logx/logx_review_test.go": {
+    "mtime": 1793835476.2962613,
+    "seen": 1793836562.0233471,
+    "ast_hash": "9390ffbabb2680508cbb3606637ff51d",
+    "semantic_hash": "9390ffbabb2680508cbb3606637ff51d"
+  },
+  "internal/logx/logx_test.go": {
+    "mtime": 1793835471.20278,
+    "seen": 1793836562.0233483,
+    "ast_hash": "e6eb803efdc8e7ccea307af174371dd3",
+    "semantic_hash": "e6eb803efdc8e7ccea307af174371dd3"
+  },
+  "internal/proto/proto.go": {
+    "mtime": 1793834758.840263,
+    "seen": 1793836562.023349,
+    "ast_hash": "de4852a77a3534048a34777c7459e339",
+    "semantic_hash": "de4852a77a3534048a34777c7459e339"
+  },
+  "internal/proto/proto_test.go": {
+    "mtime": 1793834537.537986,
+    "seen": 1793836562.02335,
+    "ast_hash": "8407b5bc20100513360253b7443fc423",
+    "semantic_hash": "8407b5bc20100513360253b7443fc423"
+  },
+  "internal/proto/swapres_test.go": {
+    "mtime": 1793834766.65993,
+    "seen": 1793836562.023351,
+    "ast_hash": "ce2c1e48c5f90fa4427c57155dc3fcfe",
+    "semantic_hash": "ce2c1e48c5f90fa4427c57155dc3fcfe"
+  }
+}

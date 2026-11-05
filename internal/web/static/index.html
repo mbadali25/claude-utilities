@@ -1,0 +1,3024 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{{if .LoggedIn}}claude-swap - Claude Code logins on this network{{else}}Sign in - claude-swap{{end}}</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101114" media="(prefers-color-scheme: dark)">
+{{if .LoggedIn}}<meta name="csrf-token" content="{{.CSRF}}">{{end}}
+<style nonce="{{.Nonce}}">
+  /* Tokens. Colour sits on data (meters) and on status; chrome stays neutral.
+     Every measurement in this sheet comes from one of the scales below. A literal px past this
+     block is a bug, with one documented exception: the geometry of a drawn glyph (an svg box, the
+     caret, the state dot, a meter's bar), which is a shape rather than a step on a scale. */
+  :root {
+    --bg:#f4f5f7; --surface:#fff; --sunk:#eceef2; --fg:#16181d; --mut:#586070; --line:#dde0e6; --line-strong:#b9bec8;
+    --acc:#2447b8; --acc-ink:#fff; --bad:#a8231b; --bad-bg:#fdecea; --ok:#176b36; --ok-bg:#e6f4ea; --warn:#7a4f00; --warn-bg:#fdf1d6;
+    --track:#e3e6ec; --focus:#2447b8;
+
+    /* Space, on a 4px base. s3 is the one half-step, for the inner gaps of a chip or a meta row. */
+    --s1:2px; --s2:4px; --s3:6px; --s4:8px; --s5:12px; --s6:16px; --s7:20px; --s8:24px; --s9:32px; --s10:48px;
+    /* Type: eight steps on a 16px root - 12 13 14 15 16 20 24 30. fs1 is the floor; nothing
+       smaller carries words. The body sits on fs4, which is the 15px this sheet already used. */
+    --fs1:.75rem; --fs2:.8125rem; --fs3:.875rem; --fs4:.9375rem; --fs5:1rem; --fs6:1.25rem; --fs7:1.5rem; --fs8:1.875rem;
+    --lh:1.5; --lh-tight:1.2;
+    /* Radii step down: the card, a control inside it, a pill, the small inner rectangle. */
+    --r:10px; --r-ctl:6px; --r-pill:999px; --r-sm:4px;
+    /* One row, one height. Every control height is here, so the coarse-pointer block below moves
+       them together instead of each component restating its own touch size. */
+    --h-ctl:36px; --h-ctl-sm:30px; --h-dis:30px; --h-chip:22px; --h-row:44px; --tabh:46px;
+    /* Borders: the hairline everything is separated by, and the 4px edge that states a worst case. */
+    --bw:1px; --bw-edge:4px;
+    /* One focus ring, two offsets: tight on a control, wider on a box whose own border would
+       otherwise sit under the ring. The ring itself never changes width or colour. */
+    --fo:2px; --fo-box:4px;
+    /* Widths that bound a container rather than space its contents. */
+    --w-canvas:1440px; --w-modal:580px; --w-login:380px; --w-menu:236px; --w-toast:22rem;
+    /* The basis a form field falls back to in a row that wraps: below it the field wraps to its
+       own line instead of shrinking into a box nothing can be typed into. */
+    --fb-field:160px;
+    /* Two shadows, both for things that float. Nothing at rest carries one. */
+    --sh-pop:0 10px 28px rgb(0 0 0 / .18); --sh-modal:0 20px 50px rgb(0 0 0 / .26);
+    /* Grid: one gap in both directions, and the column floor per card kind. */
+    --gap:var(--s6); --col:300px; --col-wide:430px; --side:300px;
+    --pad-card:var(--s6); --pad-box:var(--s6);
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    --bg:#101114; --surface:#181a1f; --sunk:#22252b; --fg:#ecedf0; --mut:#a2a8b4; --line:#2b2f37; --line-strong:#454a55;
+    --acc:#8fabf6; --acc-ink:#0e1424; --bad:#f4958e; --bad-bg:#3a1f1d; --ok:#74d194; --ok-bg:#16301f; --warn:#e6bb62; --warn-bg:#352a10;
+    --track:#2b2f37; --focus:#8fabf6;
+  } }
+  /* A thumb needs 44px, and controls that share a row must still share one height. Raising the
+     three tokens in one place does both; a component that hard-codes its own touch height does not. */
+  @media (pointer:coarse) { :root { --h-ctl:44px; --h-ctl-sm:40px; --h-dis:40px; } }
+  * { box-sizing:border-box; }
+  /* scroll-padding clears the sticky tab bar, or an anchored card lands underneath it. */
+  html { -webkit-text-size-adjust:100%; scroll-padding-top:calc(var(--tabh) + var(--s7)); }
+  body { margin:0; background:var(--bg); color:var(--fg); font:var(--fs4)/var(--lh) system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .canvas { max-width:var(--w-canvas); margin:0 auto; padding:var(--s7) var(--s8) var(--s10); }
+  h1, h2, h3, p { margin:0; }
+  button, input, select { font:inherit; color:inherit; }
+  :focus-visible { outline:var(--fo) solid var(--focus); outline-offset:var(--fo); border-radius:var(--r-sm); }
+  .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+  .skip { position:absolute; left:var(--s5); top:-60px; z-index:10; padding:var(--s4) var(--s6); background:var(--fg); color:var(--bg); border-radius:var(--r-ctl); text-decoration:none; font-weight:600; }
+  .skip:focus { top:var(--s5); }
+  .mut { color:var(--mut); } .err { color:var(--bad); } .ok { color:var(--ok); }
+  .num { font-variant-numeric:tabular-nums; }
+  /* The two shrink-to-fit helpers. A flex or grid child needs min-width:0 before it can ellipsis
+     at all, and .col/.trunc replace the inline style attributes the card builders used to set -
+     which a style-src nonce does not cover, so they were also the one CSP-shaped hole in here. */
+  /* minmax(0,1fr), not the implicit auto: an auto grid column is sized to its content, so a long
+     name would widen the column past the box and defeat the min-width:0 beside it. */
+  .col { display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s1); min-width:0; }
+  .trunc { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* Header */
+  .top { display:flex; align-items:center; gap:var(--s5); flex-wrap:wrap; padding:var(--s2) 0 var(--s6); }
+  .mark { display:flex; align-items:center; gap:var(--s4); margin-right:auto; }
+  /* The mark is the favicon, inline: the same tile and glyph, so the tab and the header match.
+     Rules, not style attributes - a style-src nonce does not cover inline style attributes. */
+  .mark svg { width:28px; height:28px; flex:none; }
+  .mark .t { fill:var(--acc); }
+  .mark .s { fill:none; stroke:var(--acc-ink); stroke-width:3; }
+  .mark .h { fill:var(--acc-ink); }
+  h1 { font-size:var(--fs6); font-weight:700; letter-spacing:-.01em; line-height:var(--lh-tight); }
+  .scope { font-size:var(--fs2); color:var(--mut); }
+  .enrol { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; }
+  #enrol-out { font-size:var(--fs3); min-height:1.5em; }
+  /* #acct only: the account cards carry a .acct class too, and a flex-centre here shrank their meters. */
+  #acct { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; }
+  #enrol-out .code { font:600 var(--fs5)/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:.06em; color:var(--fg); }
+
+  /* Buttons: one primary per region, rest outlined. The height comes from --h-ctl, so a button,
+     an input and a select that share a row are the same height at every pointer type. */
+  .btn { min-height:var(--h-ctl); padding:0 var(--s6); border:var(--bw) solid var(--line-strong); background:var(--surface); border-radius:var(--r-ctl); cursor:pointer; font-weight:500; }
+  .btn:hover:not(:disabled) { border-color:var(--fg); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .btn.primary { background:var(--fg); color:var(--bg); border-color:var(--fg); }
+  .btn.danger { color:var(--bad); border-color:var(--bad); }
+  .btn.sm { min-height:var(--h-ctl-sm); padding:0 var(--s5); font-size:var(--fs2); }
+  .btn.ghost { border-color:transparent; background:transparent; color:var(--mut); }
+  .btn.ghost:hover:not(:disabled) { color:var(--fg); border-color:var(--line-strong); }
+  /* ghost comes after danger, so a borderless destructive button needs both named to keep its
+     colour; on hover the border appears in the same colour rather than going neutral. */
+  .btn.ghost.danger { color:var(--bad); }
+  .btn.ghost.danger:hover:not(:disabled) { color:var(--bad); border-color:var(--bad); }
+
+  input, select { min-height:var(--h-ctl); padding:0 var(--s5); background:var(--surface); border:var(--bw) solid var(--line-strong); border-radius:var(--r-ctl); max-width:100%; }
+  /* 16px is the one size that is not a token: below it iOS zooms the page on focus. */
+  @media (pointer:coarse) { input, select { font-size:16px; } }
+
+  .notice { display:flex; gap:var(--s5); align-items:flex-start; padding:var(--s5) var(--s6); margin-bottom:var(--s5); background:var(--sunk); border-radius:var(--r); font-size:var(--fs3); color:var(--mut); }
+  .notice svg { width:18px; height:18px; flex:none; margin-top:2px; }
+  #status { min-height:1.5em; margin-bottom:var(--s4); font-weight:500; }
+
+  /* Shell: sidebar beside the main column on wide screens, a top section on narrow ones. */
+  .shell { display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s7); align-items:start; }
+  @media (min-width:1000px) {
+    .shell { grid-template-columns:var(--side) minmax(0,1fr); gap:var(--s8); }
+    /* The markup is content-first; on a wide screen the sidebar goes back to the left column. */
+    .side { grid-area:1 / 1; position:sticky; top:var(--s6); max-height:calc(100vh - var(--s9)); overflow:auto; }
+    .main { grid-area:1 / 2; }
+  }
+  .side { display:grid; gap:var(--gap); min-width:0; }
+  .panel { background:var(--surface); border:var(--bw) solid var(--line); border-radius:var(--r); padding:var(--pad-box); display:grid; gap:var(--s5); min-width:0; align-content:start; }
+
+  .main { display:grid; gap:var(--s9); min-width:0; }
+  .head { display:flex; align-items:center; gap:var(--s5); margin-bottom:var(--s5); }
+  h2 { font-size:var(--fs5); font-weight:700; }
+  .count { color:var(--mut); font-size:var(--fs3); }
+  .head .count { margin-right:auto; }
+
+  /* The caret, shared by the account menu's disclosure button. */
+  .chev { width:8px; height:8px; flex:none; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(-45deg); margin:0 2px 0 4px; }
+
+  /* Summary. Four equal cells on one grid, so the labels share a baseline and the figures share
+     a left edge whatever the numbers are; the figure is a step on the type ladder, not a size of
+     its own. Each cell is align-content:start, so a two-line label never shifts its neighbour. */
+  .stats { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:var(--s4); margin:0; }
+  .stat { background:var(--sunk); border-radius:var(--r-ctl); padding:var(--s4) var(--s5); display:grid; gap:var(--s1); align-content:start; min-width:0; }
+  .stat dt { font-size:var(--fs1); color:var(--mut); }
+  .stat dd { margin:0; font-size:var(--fs7); line-height:var(--lh-tight); font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+  .stat dd small { font-size:var(--fs1); font-weight:500; color:var(--mut); letter-spacing:0; }
+  .stat.alert { background:var(--warn-bg); } .stat.alert dd, .stat.alert dt { color:var(--warn); }
+  .stat.hot { background:var(--bad-bg); } .stat.hot dd, .stat.hot dt { color:var(--bad); }
+
+  /* Filters */
+  .filters { display:grid; gap:var(--s5); }
+  .filters input[type="search"] { width:100%; }
+  .seg { display:flex; flex-wrap:wrap; gap:var(--s3); }
+  .seg button { min-height:var(--h-ctl-sm); padding:0 var(--s5); border:var(--bw) solid var(--line-strong); background:var(--surface); border-radius:var(--r-pill); cursor:pointer; font-size:var(--fs2); font-weight:500; display:inline-flex; align-items:center; gap:var(--s3); }
+  .seg button:hover { border-color:var(--fg); }
+  .seg button[aria-pressed="true"] { background:var(--fg); color:var(--bg); border-color:var(--fg); }
+  .seg button .n { font-variant-numeric:tabular-nums; opacity:.75; }
+
+  /* Tabs: the main column's two destinations. An underline on one full-width rule, so the bar reads
+     as an edge rather than as a row of buttons, and sticky, so switching never needs a scroll back
+     up. The count rides in the label; selection is the ink and the 2px underline, never colour. */
+  .tabwrap { display:grid; min-width:0; }
+  .tabs { position:sticky; top:0; z-index:4; display:flex; flex-wrap:wrap; margin:0 0 var(--s6); padding-top:var(--s4);
+          background:var(--bg); box-shadow:inset 0 calc(var(--bw) * -1) 0 var(--line); }
+  .tabs [role="tab"] { position:relative; min-height:var(--tabh); margin-right:var(--s8); padding:0 var(--s1); background:none; border:0;
+          font:inherit; font-size:var(--fs5); font-weight:600; color:var(--mut); cursor:pointer; display:inline-flex; align-items:center; gap:var(--s4); }
+  .tabs [role="tab"]:hover { color:var(--fg); }
+  .tabs [role="tab"]::after { content:""; position:absolute; left:0; right:0; bottom:0; height:2px; background:transparent; }
+  .tabs [role="tab"][aria-selected="true"] { color:var(--fg); }
+  .tabs [role="tab"][aria-selected="true"]::after { background:var(--fg); }
+  /* The tab bar is sticky, so its ring turns inward: at a positive offset the ring would be
+     clipped by the bar's own edge. */
+  .tabs [role="tab"]:focus-visible { outline-offset:calc(var(--fo) * -1); }
+  .tabs .n { padding:var(--s1) var(--s3); border-radius:var(--r-pill); background:var(--sunk); font-size:var(--fs1); font-weight:650; font-variant-numeric:tabular-nums; }
+  .tabs [role="tab"][aria-selected="true"] .n { color:var(--fg); }
+  [role="tabpanel"]:focus-visible { outline-offset:var(--fo-box); }
+  .panel-meta { margin:0 0 var(--s5); }
+  .panel-meta:empty { display:none; }
+
+  /* --- Cards and the row policy -------------------------------------------------------------
+     One policy for every card grid, and it is forced by what a CSS grid row does: a row is as
+     tall as its tallest item, whatever align-items says.
+
+       - Cards in a row STRETCH, so a row of collapsed cards shares a bottom edge. That is the
+         alignment an operator scans down, and it is what the measurement script checks.
+       - Any card whose disclosure is OPEN is lifted out of the shared row onto one of its own.
+         Without that second half, one open host card sized its whole row and left its two
+         collapsed neighbours stranded at the top of ~1200px of empty grid at 1440, with the
+         remaining rows pushed below the fold. align-items:start does not fix that - it only
+         moves the hole from inside the cards to beside them. Spanning does fix it: an open card
+         grows as much as its sessions need, stretches no sibling, and leaves no gap next to it.
+       - Because a stretched card can be taller than its own content, the card's footer row is
+         pinned to its bottom edge, so the slack lands behind the action rather than as a blank
+         band in the middle of a card. */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, var(--col)), 1fr)); gap:var(--gap); align-items:stretch; }
+  .card { background:var(--surface); border:var(--bw) solid var(--line); border-radius:var(--r); padding:var(--pad-card); display:flex; flex-direction:column; gap:var(--s5); min-width:0; }
+  /* .wide is set on a host card while its session list is open; the account cards already carry
+     .open. At one column every card is the whole row anyway, so this costs nothing on a phone.
+     The whole grid goes to one column, not only the open card: spanning just the open one left
+     its shut neighbours as orphans, one card wide in a three-column row with two columns of
+     nothing beside them (pine, between two expanded hosts). So a grid holding anything open is a
+     list, and a grid holding nothing open is the three-up wall of cards it was. That is also the
+     pair of states the Expand all / Collapse all buttons already switch between. */
+  .grid:has(> .card.wide) > .card, .grid:has(> .card.acct.open) > .card { grid-column:1 / -1; }
+  .card > .swap, .card > .tun-danger { margin-top:auto; }
+  /* A card in a listed grid has the width of the whole column, so what is inside it stops growing
+     once it has the width it needs: the session list runs in two columns, which is also what
+     keeps an open card from pushing the rows after it off the screen. */
+  @media (min-width:900px) {
+    .card.wide details.sess ul { grid-template-columns:repeat(2, minmax(0,1fr)); }
+    /* An odd count would otherwise end the list with one row half empty, which is the same hole
+       the grid policy above exists to close. The last row takes the full width instead. */
+    .card.wide details.sess li:last-child:nth-child(odd) { grid-column:1 / -1; }
+  }
+  .card:focus-visible { outline-offset:var(--fo-box); }
+  .card.acct { border-top:var(--bw-edge) solid var(--line-strong); }
+  .card.acct.s-ok { border-top-color:var(--ok); }
+  .card.acct.s-low { border-top-color:var(--warn); }
+  .card.acct.s-out, .card.acct.s-err { border-top-color:var(--bad); }
+  .row { display:flex; align-items:center; gap:var(--s4); min-width:0; }
+  .row.between { justify-content:space-between; }
+  .row.wrap { flex-wrap:wrap; }
+  .row.between > :first-child { flex:1 1 0; min-width:0; } /* so a long name shrinks instead of pushing the state out of the card */
+  /* A name and an identity are one line each and truncate; the full string is in the title
+     attribute, which is also what a screen reader reads when the text is clipped. Only content
+     that must be compared character by character - a fingerprint, a key, a command - wraps. */
+  .title { font-weight:650; font-size:var(--fs5); }
+  .sub { color:var(--mut); font-size:var(--fs3); }
+  .empty { padding:var(--s6); border:var(--bw) dashed var(--line-strong); border-radius:var(--r); color:var(--mut); grid-column:1 / -1; }
+
+  /* Chips carry a glyph and a word, never colour alone. A chip never shrinks and never wraps:
+     squeezed in a flex row it used to collapse to a box with its word spilling out. */
+  .chip { display:inline-flex; align-items:center; gap:var(--s3); min-height:var(--h-chip); padding:0 var(--s4); border-radius:var(--r-pill); font-size:var(--fs1); font-weight:600; white-space:nowrap; flex:none; background:var(--sunk); color:var(--mut); }
+  .chip.ok { background:var(--ok-bg); color:var(--ok); }
+  .chip.bad { background:var(--bad-bg); color:var(--bad); }
+  .chip.warn { background:var(--warn-bg); color:var(--warn); }
+  .chip svg { width:11px; height:11px; flex:none; }
+
+  /* Meters: the bar length, the % text and the Low/Out label each say the same thing. The label
+     and the value share one baseline; the bar and the reset time run the grid's full width, so
+     every meter in every card is the same three-row block of the same height. */
+  .meters { display:grid; gap:var(--s5); }
+  .meter { display:grid; grid-template-columns:1fr auto; align-items:baseline; column-gap:var(--s5); row-gap:var(--s3); }
+  .meter .lbl { font-size:var(--fs2); color:var(--mut); font-weight:600; }
+  .meter .val { font-weight:700; text-align:right; font-variant-numeric:tabular-nums; }
+  .meter .bar { grid-column:1 / -1; }
+  /* The bar's own geometry: a 10px track with a fully round cap, not a step on the space scale. */
+  .bar { height:10px; border-radius:5px; background:var(--track); overflow:hidden; }
+  .bar > i { display:block; width:0; height:100%; background:var(--acc); border-radius:5px; }
+  .bar.low > i { background:repeating-linear-gradient(135deg, var(--warn) 0 4px, transparent 4px 7px); outline:var(--bw) solid var(--warn); outline-offset:calc(var(--bw) * -1); }
+  .bar.out > i { background:var(--bad); }
+  .meter .reset { grid-column:1 / -1; font-size:var(--fs1); color:var(--mut); }
+  .meter.none .bar { background:repeating-linear-gradient(135deg, var(--track) 0 4px, transparent 4px 8px); }
+
+  .holder { display:flex; align-items:center; gap:var(--s4); font-size:var(--fs3); color:var(--mut); min-width:0; }
+  .holder strong { color:var(--fg); font-weight:650; }
+  /* The foot of an open card: when it was last polled, and the button that polls it now. */
+  .acct-foot { display:flex; align-items:center; justify-content:space-between; gap:var(--s4); flex-wrap:wrap; font-size:var(--fs2); color:var(--mut); border-top:var(--bw) solid var(--line); padding-top:var(--s5); }
+  /* The foot's two buttons sit in one group, so they share the card's right edge instead of
+     spreading to the two ends of the row - and they wrap together when the card is narrow. */
+  .acct-acts { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; }
+
+  /* --- Accounts tab: collapsed cards and refresh ------------------------------------------
+     A card is closed by default and opens on its own header. The header is a real button, so
+     Enter and Space come from the browser, and it carries the label and the caret; the freshness
+     or error chip sits beside it, outside the button, so it is read as state and not as part of
+     the button's name. Closed, the card shows the name, the 7-day meter and that chip - what an
+     operator scans a wall of cards for. The rest is one hidden block. */
+  .acct-top { display:flex; align-items:center; gap:var(--s4); }
+  .acct-h { flex:1 1 0; min-width:0; font:inherit; }
+  /* The caret is a rotated square, so its drawn corners reach about 1.7px past its 8px layout
+     box. The trailing 2px keeps those corners inside the header instead of over the card's
+     content edge, which is where the caret used to sit by a hair. */
+  .acct-dis { width:100%; min-height:var(--h-dis); display:flex; align-items:center; gap:var(--s3); padding:0 var(--s1) 0 0;
+              background:none; border:0; color:inherit; font:inherit; text-align:left; cursor:pointer; }
+  .acct-dis:hover .title { color:var(--acc); }
+  /* No right margin: the button is width:100%, so the caret's own trailing margin pushed 2px of
+     the header past the card's content box. */
+  .acct-dis .chev { margin:0 0 0 var(--s1); color:var(--mut); }
+  .acct-dis[aria-expanded="true"] .chev { transform:rotate(-135deg); margin-top:4px; }
+  /* Closed, the 7-day meter keeps its bar and its percentage and drops its reset time: the reset
+     time is detail, and it belongs with the other detail. Dropping it is also what makes every
+     collapsed card the same height - the one row that varies with the data is gone. */
+  .card.acct:not(.open) .acct-brief .reset { display:none; }
+  /* An open card owns its whole row, so at a width that can hold two columns its detail runs in
+     two rather than as one stack across a 1000px card with air down the right. */
+  .acct-body { display:grid; gap:var(--s5); align-content:start; }
+  /* The identity row and the foot take the full width; the 5-hour meter and the holder share the
+     middle row. Every cell is filled, so widening the card never leaves an empty half-row. */
+  @media (min-width:720px) {
+    .card.acct.open .acct-body { grid-template-columns:repeat(2, minmax(0,1fr)); column-gap:var(--s8); }
+    .card.acct.open .acct-body > :first-child, .card.acct.open .acct-foot { grid-column:1 / -1; }
+  }
+  /* What one refresh said about this card. It stays visible closed, because a refused refresh is
+     the one answer the card's own data cannot show. */
+  .acct-note { font-size:var(--fs2); color:var(--mut); }
+  .acct-note.bad { color:var(--bad); }
+  .acct-note:empty { display:none; }
+  /* An account whose login the endpoint refuses. The sentence says it in words and the primary
+     button is the one way out, so it sits on the collapsed face where the card is scanned. */
+  .acct-resign { display:flex; align-items:center; justify-content:space-between; gap:var(--s4) var(--s5); flex-wrap:wrap; }
+  .acct-resign p { flex:1 1 200px; min-width:0; font-size:var(--fs2); color:var(--fg); }
+  @media (pointer:coarse) { .acct-resign .btn { min-height:44px; } }
+  .import input[readonly] { background:var(--sunk); color:var(--mut); cursor:default; }
+  .add-flow .warn-note { color:var(--fg); font-weight:600; }
+  /* The Accounts toolbar: open/close every card, and ask for a poll. */
+  .acc-tools { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; margin:0 0 var(--s5); }
+  .acc-tools .count, .acc-tools .say { font-size:var(--fs2); color:var(--mut); }
+  /* A refused round is a result; a request that did not land is a failure, and reads as one. */
+  .acc-tools .say.bad { color:var(--bad); }
+  .acc-tools .gap { flex:1 1 0; min-width:0; }
+  .btn[aria-busy="true"] { opacity:1; }
+  /* The busy mark is the word on the button; this ring is decoration. Under reduced motion the
+     sheet's last rule stops every animation, so the ring is hidden there rather than left frozen. */
+  .spin { width:12px; height:12px; flex:none; margin-left:var(--s3); display:inline-block; vertical-align:-1px;
+          border:2px solid var(--line-strong); border-top-color:var(--fg); border-radius:50%; }
+  @media (prefers-reduced-motion: reduce) { .spin { display:none !important; } }
+
+  /* Rename */
+  .rename { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; flex:1; min-width:0; }
+  .rename input { flex:1 1 var(--fb-field); min-width:0; }
+  .rename .msg { flex-basis:100%; font-size:var(--fs2); color:var(--bad); min-height:0; }
+  .rename .msg:empty { display:none; }
+
+  /* Pending connections */
+  .pend { border:2px solid var(--acc); border-radius:var(--r); background:var(--surface); padding:var(--pad-box); margin-top:var(--s5); display:grid; gap:var(--s3); }
+  /* The fingerprint is compared character by character against what the agent printed, so it is
+     the one string on the page that wraps rather than truncates. */
+  .fp { font:700 var(--fs8)/var(--lh-tight) ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:.1em; overflow-wrap:anywhere; }
+  .pend .actions { display:flex; gap:var(--s4); margin-top:var(--s3); flex-wrap:wrap; }
+  #pending-list > p { margin-top:var(--s1); }
+  #pending-panel .none { color:var(--mut); padding:var(--s4) var(--s5); background:var(--sunk); border-radius:var(--r); font-size:var(--fs3); }
+  /* With an empty queue the panel is one row, so it costs no scroll above the tabs. Browsers
+     without :has() just keep the two-line stack. */
+  #pending-panel:has(.none) { display:flex; align-items:center; gap:var(--s5); flex-wrap:wrap; }
+  #pending-panel:has(.none) .head { margin-bottom:0; }
+
+  /* Hosts */
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); flex:none; }
+  .dot.off { background:transparent; border:2px solid var(--mut); }
+  details.sess summary { cursor:pointer; color:var(--mut); font-size:var(--fs3); min-height:var(--h-ctl-sm); display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; }
+  details.sess summary:hover { color:var(--fg); }
+  details.sess ul { list-style:none; margin:var(--s3) 0 0; padding:0; display:grid; gap:var(--s3); font-size:var(--fs2); }
+  /* A session stacks: its name heads the row, pid and cwd sit under it, and the restart
+     command comes last. A grid, not a flex row, so a long name cannot push the chips off.
+     Every row carries the same padding and the same minimum height, so a one-line row and a
+     four-line row in the same list sit on one rhythm instead of two. */
+  /* align-content:start, because in a two-column list a short row is stretched to its neighbour's
+     height and centred content then floats in the middle of its own box. Top-aligned, the names
+     of both sessions sit on one line. */
+  details.sess li { padding:var(--s4); background:var(--sunk); border-radius:var(--r-ctl); display:grid; gap:var(--s2); min-width:0; align-content:start; }
+  details.sess li .srow { display:flex; gap:var(--s3); align-items:center; flex-wrap:wrap; min-width:0; }
+  /* The name is the row's heading. It stays on one line and truncates; the full name is in
+     its title attribute, so nothing is lost. min-width:0 is what lets it shrink to ellipsis. */
+  .sname { font-weight:650; color:var(--fg); font-size:var(--fs3); flex:0 1 auto; }
+  /* An unnamed session is headed by its pid, muted so a real name always reads stronger. */
+  .sname.nameless { font-weight:550; color:var(--mut); }
+  .smeta { color:var(--mut); display:flex; gap:var(--s3); align-items:baseline; flex-wrap:wrap; min-width:0; }
+  .smeta .scwd { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .swap { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center; border-top:var(--bw) solid var(--line); padding-top:var(--s5);
+          min-height:calc(var(--h-ctl) + var(--s7)); }
+  /* 120px basis: select, Swap and Revoke share one row in a 300px card instead of Revoke wrapping
+     alone. The cap is what stops the same select stretching to 900px once the card owns its row:
+     a control is as wide as the longest account label, never as wide as the card. */
+  .swap select { flex:1 1 120px; min-width:0; max-width:260px; }
+  /* The Copy button keeps the row's padding rather than being pulled onto its edge. The pull it
+     used to carry put its right edge 8px past the content box of every row it sat in, so a
+     command row ended on a different line from the name and the chips above it; one right edge
+     per row is the whole point. */
+  .confirm { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center; width:100%; }
+  .confirm .q { flex:1 1 100%; font-weight:600; }
+  /* The swap verdict, on the card that produced it. Every press leaves one of these: working,
+     swapped, already active, refused or failed. It takes the full row so it never squeezes the
+     select, and the row reserves its height so the card does not jump when the verdict lands. */
+  .swap .why, .swap .swapmsg { flex:1 1 100%; font-size:var(--fs1); }
+  .swap .why { color:var(--mut); }
+  .swapmsg { display:flex; gap:var(--s3); align-items:baseline; color:var(--mut); }
+  .swapmsg:empty { display:none; }
+  .swapmsg.ok { color:var(--ok); }
+  .swapmsg.bad { color:var(--bad); }
+  /* A no-op is neither good nor bad news, so it stays neutral rather than borrowing the ok green. */
+  .swapmsg.info { color:var(--mut); }
+  .swapmsg .dot { flex:none; width:7px; height:7px; border-radius:50%; background:currentColor; align-self:center; }
+  .swapmsg.work .dot { animation:pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.25; } }
+  /* Toasts repeat the verdict where the eye already is after a click, for the case where the card
+     has scrolled off. Visual only: the announcement comes from the two live regions in the shell,
+     which survive a card rebuild, so nothing is said twice. */
+  .toasts { position:fixed; right:var(--s6); bottom:var(--s6); z-index:30; display:grid; gap:var(--s4);
+            width:min(var(--w-toast), calc(100vw - var(--s9))); pointer-events:none; }
+  .toast { background:var(--surface); border:var(--bw) solid var(--line); border-left:var(--bw-edge) solid var(--mut);
+           border-radius:var(--r); padding:var(--s5); font-size:var(--fs2); color:var(--fg);
+           box-shadow:var(--sh-pop); animation:toastin .18s ease-out; }
+  .toast.ok { border-left-color:var(--ok); }
+  .toast.bad { border-left-color:var(--bad); }
+  .toast .who { color:var(--mut); font-size:var(--fs1); }
+  @keyframes toastin { from { opacity:0; transform:translateY(6px); } }
+  @media (prefers-reduced-motion: reduce) {
+    .swapmsg.work .dot { animation:none; }
+    .toast { animation:none; }
+  }
+
+  /* Session control. An inline message sits under the controls that produced it, never in the
+     page-wide status line, so the error reads where the operator is looking. */
+  .msg { font-size:var(--fs2); color:var(--bad); }
+  .msg:empty { display:none; }
+  /* The needs-reload callout: the one block that offers the estate-wide repair. It takes the
+     warning edge the account cards use for the same state, not a tint of its own. */
+  .callout { background:var(--surface); border:var(--bw) solid var(--line); border-top:var(--bw-edge) solid var(--warn);
+             border-radius:var(--r); padding:var(--pad-box); margin:0 0 var(--s6); display:grid; gap:var(--s4); }
+  /* Host-wide asks sit on their own rule above the swap row, so "all sessions here" never reads
+     as part of one session. */
+  .ctl { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center; border-top:var(--bw) solid var(--line); padding-top:var(--s5); }
+  .ctl .ctl-h { flex:1 1 100%; font-size:var(--fs2); color:var(--mut); font-weight:600; }
+  .ctl .msg, .sctl .msg { flex:1 1 100%; }
+  /* Per-session asks and their verdicts, inside the session row. */
+  .sctl { display:flex; gap:var(--s3); flex-wrap:wrap; align-items:center; margin-top:var(--s1); }
+  .ctl .why, .sctl .why { font-size:var(--fs1); color:var(--mut); }
+  .cmds { display:grid; gap:var(--s2); margin-top:var(--s1); }
+  .cmd { display:flex; gap:var(--s3); flex-wrap:wrap; align-items:baseline; min-width:0; }
+  .cmds .say { font-size:var(--fs1); color:var(--mut); }
+  /* The lead line carries the Copy button; the command itself runs full width underneath. A
+     command is pasted, so it wraps in full rather than truncating. */
+  .copyline { display:grid; gap:1px; min-width:0; }
+  .copyline code { overflow-wrap:anywhere; }
+  /* The restart confirm names every session it would reach, one per row. A row carries a name, a
+     subline and a command, so it gets the pitch a multi-line row needs rather than a data row's.
+     The rows are separated by one tone step, never by a divider colour of their own, and the name
+     wraps here instead of truncating: a confirm that abbreviates the name is not naming it. */
+  .slist { list-style:none; margin:0; padding:0; border:var(--bw) solid var(--line); border-radius:var(--r); }
+  .slist li { display:grid; gap:var(--s3); padding:var(--s5); min-height:var(--h-row); align-content:center; min-width:0; }
+  .slist li + li { border-top:var(--bw) solid var(--line); }
+  .slist .who { font-weight:650; overflow-wrap:anywhere; }
+  .slist .who.nameless { font-weight:550; color:var(--mut); }
+  .slist .sub { font-size:var(--fs2); }
+  /* A dialog body scrolls, so a long list is bounded here rather than pushing the buttons away. */
+  #ctl-restart .slist { max-height:38vh; overflow:auto; }
+  .marked { font-size:var(--fs1); color:var(--mut); }
+
+  /* --- Tunnels ----------------------------------------------------------------------------
+     The reverse SSH tunnel to each Linux host. Two rules shape this panel.
+
+     First, the state chip here is the TUNNEL's, never the agent's. "Tunnel up, agent offline"
+     is the diagnostic case, so the Hosts tab shows both indicators side by side and nothing
+     merges them. The chip always carries a word as well as a tint: the state must never be
+     readable by colour alone.
+
+     Second, these cards carry generated shell one-liners, which are long. They get a wider
+     column than an account card, the command runs full width under its Copy button, and it
+     wraps anywhere rather than scrolling sideways. Monospace is for the key, the fingerprint
+     and the command - the three places where it is the real typeface for the content. */
+  .tungrid { grid-template-columns:repeat(auto-fill, minmax(min(100%, var(--col-wide)), 1fr)); }
+  .tun-tools { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; margin:0 0 var(--s5); }
+  .tun-tools .say { font-size:var(--fs2); color:var(--mut); }
+  .tun-tools .gap { flex:1 1 0; min-width:0; }
+  .tun-meta { display:grid; gap:var(--s1); font-size:var(--fs2); color:var(--mut); min-width:0; }
+  .tun-meta .k { color:var(--mut); }
+  .tun-meta .v { color:var(--fg); overflow-wrap:anywhere; }
+  .tun-meta .row { gap:var(--s3); flex-wrap:wrap; align-items:baseline; }
+  /* The fingerprint is a key, so it keeps monospace, and it is quoted in full here: the Hosts
+     tab carries only its first 8 characters, the same convention the enrolment fingerprint uses. */
+  .tun-fp { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:var(--fs1);
+            color:var(--fg); overflow-wrap:anywhere; }
+  .tun-why { font-size:var(--fs2); color:var(--mut); }
+  .tun-why.bad { color:var(--bad); }
+  .tun-cmds { display:grid; gap:var(--s5); border-top:var(--bw) solid var(--line); padding-top:var(--s5); min-width:0; }
+  .tun-cmds code { font-size:var(--fs1); }
+  /* The commands an operator needs only sometimes - the remove line, and the tightened line that
+     has not been verified on a real host - fold away behind a disclosure, so the card leads with
+     the one line that is actually pasted. display:flex on a summary drops the browser's own
+     triangle, so the caret is drawn back explicitly: a disclosure nobody can see is not one. */
+  /* On a phone this is the only control on the card that is not a button, and it is the way to
+     every command the card is not already showing, so it takes the control height like the rest. */
+  .tun-opt summary { cursor:pointer; color:var(--mut); font-size:var(--fs2); min-height:var(--h-ctl-sm);
+                     display:flex; align-items:center; gap:var(--s2); list-style:none; }
+  .tun-opt summary::-webkit-details-marker { display:none; }
+  .tun-opt summary:hover { color:var(--fg); }
+  .tun-opt summary .chev { transform:rotate(45deg); margin-top:-2px; }
+  .tun-opt[open] summary .chev { transform:rotate(-135deg); margin-top:2px; }
+  .tun-opt .body { display:grid; gap:var(--s5); margin-top:var(--s4); }
+  .tun-acts { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center;
+              border-top:var(--bw) solid var(--line); padding-top:var(--s5); }
+  /* Destructive actions last, in a group of their own, outlined in the negative colour, with
+     the consequence written out above them. The confirmation names the host. */
+  .tun-danger { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center;
+                border-top:var(--bw) solid var(--line); padding-top:var(--s5); }
+  .tun-danger .lead { flex:1 1 100%; font-size:var(--fs1); color:var(--mut); }
+  .tun-msg { flex:1 1 100%; font-size:var(--fs2); }
+  .tun-msg:empty { display:none; }
+  .tun-msg.ok { color:var(--ok); }
+  .tun-msg.bad { color:var(--bad); }
+  .tun-add { display:grid; gap:var(--s5); }
+  .tun-add .pair { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, var(--fb-field)), 1fr)); gap:var(--s5); }
+
+  /* Why a host names no account: one step in the ground inside the card that failed to name one,
+     never a tinted ground of its own. The sentence is in the full ink; the fix is secondary. */
+  .whyid { background:var(--sunk); border-radius:var(--r); padding:var(--s5); display:grid; gap:var(--s3); font-size:var(--fs3); min-width:0; }
+  .whyid p { margin:0; overflow-wrap:anywhere; }
+  .whyid .fix { color:var(--mut); font-size:var(--fs2); }
+  #ctl-summary:empty, #ctl-name-for:empty { display:none; }
+
+  /* Account menu: a disclosure button over a floating menu. A shadow is for what floats. */
+  .menuwrap { position:relative; }
+  #acct-btn { display:inline-flex; align-items:center; gap:var(--s4); }
+  #acct-btn svg { width:15px; height:15px; flex:none; }
+  .chev.dn { transform:rotate(45deg); margin:-3px 0 0 2px; }
+  #acct-btn[aria-expanded="true"] .chev.dn { transform:rotate(-135deg); margin:3px 0 0 2px; }
+  .menu { position:absolute; right:0; top:calc(100% + var(--s3)); z-index:30; min-width:var(--w-menu); padding:var(--s3); display:grid; gap:var(--s1);
+          background:var(--surface); border:var(--bw) solid var(--line-strong); border-radius:var(--r); box-shadow:var(--sh-pop); }
+  .mi { width:100%; min-height:var(--h-ctl); padding:0 var(--s5); display:flex; align-items:center; gap:var(--s6); text-align:left; white-space:nowrap;
+        background:transparent; border:0; border-radius:var(--r-ctl); font:inherit; font-weight:500; color:inherit; cursor:pointer; }
+  .mi:hover { background:var(--sunk); }
+  .mi.out { color:var(--bad); }
+  .mi .note { margin-left:auto; font-size:var(--fs1); font-weight:400; color:var(--mut); }
+  .mi-rule { height:var(--bw); margin:var(--s2) var(--s4); background:var(--line); }
+  #add-busy { display:inline-flex; align-items:center; gap:var(--s3); }
+  #add-busy .dot { background:var(--warn); }
+
+  /* Modals: native <dialog>, so Esc closes, Tab stays inside and focus returns to the opener.
+     Only [open] gets a display, or the UA's dialog:not([open]) rule is overridden and it never shuts. */
+  .modal { width:min(var(--w-modal), calc(100vw - var(--s8))); max-height:86vh; max-height:calc(100dvh - var(--s10)); padding:0; color:var(--fg);
+           background:var(--surface); border:var(--bw) solid var(--line-strong); border-radius:var(--r); box-shadow:var(--sh-modal); }
+  .modal[open] { display:grid; grid-template-rows:auto minmax(0,1fr); }
+  .modal::backdrop { background:rgb(0 0 0 / .55); }
+  /* The head's own padding is one step tighter than the body's, so the close button lands on the
+     body's right edge rather than inside it. */
+  .modal-head { display:flex; align-items:center; gap:var(--s5); padding:var(--s5) var(--s5) var(--s5) var(--s6); border-bottom:var(--bw) solid var(--line); }
+  .modal-head h2 { margin-right:auto; }
+  /* The height comes from .btn.sm, which the close button already carries. */
+  .modal-head .x { padding:0 var(--s4); }
+  .modal-head .x svg { width:13px; height:13px; display:block; }
+  .modal-body { padding:var(--s6); overflow:auto; display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s6); align-content:start; }
+  /* A dialog quotes fingerprints, keys and host names inside its prose, and a 50-character token
+     with no break opportunity in it pushed the whole dialog sideways on a phone. anywhere breaks
+     only when there is no other way, unlike break-all, so ordinary sentences are unaffected. */
+  .modal-body p { overflow-wrap:anywhere; }
+  .modal-foot { display:flex; justify-content:flex-end; gap:var(--s4); flex-wrap:wrap; }
+  .fld { display:grid; gap:var(--s3); font-weight:500; }
+  .fld input { width:100%; }
+  .fld .hint { font-weight:400; font-size:var(--fs2); color:var(--mut); }
+  #pw-form, #ctl-name-form { display:grid; grid-template-columns:minmax(0,1fr); gap:var(--gap); }
+  #pw-msg:empty { display:none; }
+
+  /* Import and add-account panels, both inside the Add a Claude account dialog */
+  .import { padding:var(--pad-box); border:var(--bw) solid var(--line); border-radius:var(--r); display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s5); background:var(--sunk); }
+  .import .lead { font-weight:600; color:var(--fg); }
+  .import form { display:flex; gap:var(--s4); flex-wrap:wrap; }
+  .import select, .import input { flex:1 1 var(--fb-field); min-width:0; }
+  [hidden] { display:none !important; }
+  .add-flow { display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s5); }
+  .add-flow form { display:flex; gap:var(--s4); flex-wrap:wrap; }
+  .add-flow input { flex:1 1 220px; min-width:0; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  /* The sign-in link is an <a> styled as a button; only it needs the colour reset, or it would
+     take the danger colour off the Cancel button beside it. */
+  .add-flow a.btn { display:inline-flex; align-items:center; justify-content:center; text-decoration:none; width:fit-content; color:inherit; }
+  .add-flow a.btn.primary { color:var(--bg); }
+  .add-flow .actions { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center; }
+
+  /* Login */
+  .login { max-width:var(--w-login); margin:12vh auto 0; background:var(--surface); border:var(--bw) solid var(--line); border-radius:var(--r); padding:var(--s8); display:grid; gap:var(--gap); }
+  .login form { display:grid; gap:var(--gap); }
+  .login label { display:grid; gap:var(--s3); font-weight:500; }
+  .login input { width:100%; }
+
+  @media (max-width:560px) {
+    .canvas { padding:var(--s6) var(--s6) var(--s10); }
+    /* The wordmark takes the first line; the enrolment button and the account menu share the
+       second, so the header costs two rows rather than three and the tabs sit higher. */
+    .top { align-items:center; position:relative; padding-bottom:var(--s6); }
+    .mark { flex:1 1 100%; margin-right:0; }
+    .enrol { flex:0 1 auto; margin-right:auto; }
+    .fp { font-size:var(--fs7); }
+    /* On a phone the menu spans the header instead of the button, or its labels wrap. */
+    #acct { position:static; }
+    .menuwrap { position:static; }
+    .menu { left:0; right:0; min-width:0; }
+    .modal-foot .btn { flex:1 1 auto; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .spin { animation:spin .7s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .bar > i { transition:width .3s ease; }
+    .btn, .seg button, .mi, .tabs [role="tab"] { transition:border-color .15s, color .15s, background-color .15s; }
+    .chev { transition:transform .15s ease; }
+    .modal[open] { animation:rise .14s ease-out; }
+    @keyframes rise { from { opacity:0; transform:translateY(8px); } }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; scroll-behavior:auto !important; } }
+</style>
+</head>
+<body>
+<div class="canvas">
+{{if not .LoggedIn}}
+<main class="login">
+  <div class="mark">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect class="t" width="32" height="32" rx="7"/><path class="s" d="M5.5 11.5h15.8M26.5 20.5H10.7"/><path class="h" d="M26.5 11.5 20.8 7.5v8zM5.5 20.5 11.2 16.5v8z"/></svg>
+    <h1>claude-swap</h1>
+  </div>
+  <form method="post" action="/login">
+    <label>Admin password <input type="password" name="password" autocomplete="current-password" required autofocus></label>
+    <button type="submit" class="btn primary">Sign in</button>
+    {{if .Error}}<p class="err" role="alert">{{.Error}}</p>{{end}}
+  </form>
+</main>
+{{else}}
+<a class="skip" href="#main">Skip to accounts and hosts</a>
+<header class="top">
+  <div class="mark">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect class="t" width="32" height="32" rx="7"/><path class="s" d="M5.5 11.5h15.8M26.5 20.5H10.7"/><path class="h" d="M26.5 11.5 20.8 7.5v8zM5.5 20.5 11.2 16.5v8z"/></svg>
+    <div><h1>claude-swap</h1><div class="scope">Claude Code logins on this network</div></div>
+  </div>
+  <div class="enrol">
+    <button type="button" class="btn" id="enrol">New enrolment code</button>
+    <span id="enrol-out" class="mut" role="status"></span>
+  </div>
+  <div class="acct" id="acct">
+    <span role="status" aria-live="polite"><button type="button" class="btn sm" id="add-busy" hidden><span class="dot" aria-hidden="true"></span><span class="txt">Sign-in running</span></button></span>
+    <div class="menuwrap">
+      <button type="button" class="btn" id="acct-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="acct-menu">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.6 14c.6-2.8 2.7-4.2 5.4-4.2s4.8 1.4 5.4 4.2"/></svg>
+        Account<span class="chev dn" aria-hidden="true"></span>
+      </button>
+      <div class="menu" id="acct-menu" role="menu" aria-labelledby="acct-btn" hidden>
+        <button type="button" role="menuitem" tabindex="-1" class="mi" id="mi-pw">Change password</button>
+        <button type="button" role="menuitem" tabindex="-1" class="mi" id="mi-add">Add Claude account<span class="note" id="mi-add-note" hidden></span></button>
+        <div class="mi-rule" role="separator"></div>
+        <button type="button" role="menuitem" tabindex="-1" class="mi out" id="mi-out">Log out</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="notice">
+  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="10" cy="10" r="8"/><path d="M10 9v5M10 6v.01"/></svg>
+  <span>MCP logins may belong to another account: swapping replaces only the Claude login, never the MCP server logins stored beside it.</span>
+</div>
+<p id="status" class="err" role="status"></p>
+
+<div class="shell">
+<!-- The main column comes first in the markup. On a phone that puts the tabs and the cards on the
+     first screen instead of behind a screenful of sidebar; at 1000px and up the grid places the
+     sidebar back in the left column. -->
+<main class="main" id="main" tabindex="-1">
+<section id="pending-panel" aria-labelledby="pending-h">
+  <div class="head"><h2 id="pending-h">Pending connections</h2></div>
+  <div id="pending-list">
+  {{if .Pending}}
+    <p>Match this code with the one the agent printed before you click Allow</p>
+    {{range .Pending}}
+    <div class="pend" data-fp="{{.Fingerprint}}">
+      <div class="fp">{{.Fingerprint}}</div>
+      <div>{{.HostName}} &middot; {{.OS}} &middot; {{.SourceIP}}</div>
+      <div class="mut">since {{.Since}} &middot; expires {{.Expires}}</div>
+      <div class="actions"><button type="button" class="btn primary" data-act="allow">Allow</button> <button type="button" class="btn danger" data-act="deny">Deny</button></div>
+    </div>
+    {{end}}
+  {{else}}
+    <p class="none">No pending connections.</p>
+  {{end}}
+  </div>
+</section>
+
+<!-- Two tabs, so neither list pushes the other off the screen. Each tab is labelled by the panel it
+     opens and by that panel's live count; the tablist keeps a roving tabindex. -->
+<div class="tabwrap">
+<div class="tabs" id="tabs" role="tablist" aria-label="Accounts and hosts">
+  <button type="button" id="tab-accounts" role="tab" aria-selected="true" aria-controls="panel-accounts" tabindex="0">Accounts<span class="n num" id="tab-accounts-n">-</span></button>
+  <button type="button" id="tab-hosts" role="tab" aria-selected="false" aria-controls="panel-hosts" tabindex="-1">Hosts<span class="n num" id="tab-hosts-n">-</span></button>
+  {{if .Tunnels}}<button type="button" id="tab-tunnels" role="tab" aria-selected="false" aria-controls="panel-tunnels" tabindex="-1">Tunnels<span class="n num" id="tab-tunnels-n">-</span></button>{{end}}
+</div>
+
+<section id="panel-accounts" role="tabpanel" aria-labelledby="tab-accounts" tabindex="0">
+  <!-- Cards start closed, so this row carries the two ways to see more: open them, or ask the
+       usage endpoint for fresher numbers. The poll is rate limited on the server; a refused
+       account says so on its own card. -->
+  <!-- The tab names this panel on screen; the heading is for the outline, so the ten cards' own
+       headings hang off a section heading rather than straight off the page title. -->
+  <h2 class="sr" id="acc-panel-h">Accounts</h2>
+  <div class="acc-tools">
+    <button type="button" class="btn sm" id="acc-expand-all">Expand all</button>
+    <button type="button" class="btn sm" id="acc-collapse-all">Collapse all</button>
+    <button type="button" class="btn sm" id="acc-refresh-all"><span class="txt">Refresh all</span><span class="spin" aria-hidden="true" hidden></span></button>
+    <span class="say" id="acc-refresh-status" role="status" aria-atomic="true"></span>
+  </div>
+  <p class="panel-meta count" id="acc-count"></p>
+  <div id="accounts" class="grid"><p class="empty">Loading accounts...</p></div>
+</section>
+
+<section id="panel-hosts" role="tabpanel" aria-labelledby="tab-hosts" tabindex="0" hidden>
+  <!-- The estate-wide repair. It appears only while a swap has left sessions on an old login,
+       which is when an operator wants it, and it never hides what the ask can and cannot do. -->
+  <!-- A div, not a section: web_test.go reads #panel-hosts up to the first </section>, and a
+       nested one would cut that short. The h2 still names it in the heading outline. -->
+  <div class="callout" id="ctl-repair" role="group" aria-labelledby="ctl-repair-h" tabindex="-1" hidden>
+    <h2 id="ctl-repair-h">Sessions are still on an old login</h2>
+    <p class="sub" id="ctl-repair-sub"></p>
+    <div class="row wrap">
+      <button type="button" class="btn primary" id="ctl-repair-go">Apply to all needs-reload sessions</button>
+      <button type="button" class="btn" id="ctl-restart-all">Restart sessions</button>
+      <span class="sub">Apply asks each one to reload its plugins and reports the restart it still
+        needs; Restart names the sessions and hands over the commands. Neither kills anything.</span>
+    </div>
+  </div>
+  <p class="panel-meta count" id="host-count"></p>
+  <p class="panel-meta sub" id="ctl-summary" role="status" aria-live="polite"></p>
+  <div id="hosts" class="grid"><p class="empty">Loading hosts...</p></div>
+</section>
+
+{{if .Tunnels}}
+<!-- The third destination. It is a tab rather than a dialog off the Account menu because the
+     tablist already does all of this: a roving tabindex, a live count in the label and the
+     remembered selection. A dialog would need its own scrolling for a per-host command table.
+     The per-host tunnel state also appears on the Hosts tab, beside the agent's own state. -->
+<section id="panel-tunnels" role="tabpanel" aria-labelledby="tab-tunnels" tabindex="0" hidden>
+  <h2 class="sr" id="tun-panel-h">Tunnels</h2>
+  <div class="tun-tools">
+    <button type="button" class="btn primary" id="tun-add-open">Add a tunnel</button>
+    <button type="button" class="btn sm" id="tun-import">Import the interim host list</button>
+    <span class="gap"></span>
+    <span class="say" id="tun-status" role="status" aria-atomic="true"></span>
+  </div>
+  <p class="panel-meta count" id="tun-count"></p>
+  <div id="tunnels" class="grid tungrid"><p class="empty">Loading tunnels...</p></div>
+</section>
+{{end}}
+</div>
+
+</main>
+
+<!-- The sidebar carries what neither tab shows: the estate's state, and the filter for whichever
+     tab is open. The account and host lists themselves live in the tabs, never twice. -->
+<aside class="side" aria-label="Overview and filters">
+  <section class="panel" aria-labelledby="sum-h">
+    <h2 id="sum-h">Overview</h2>
+    <dl class="stats" id="stats">
+      <div class="stat"><dt>Hosts online</dt><dd id="st-host">-</dd></div>
+      <div class="stat"><dt>Sessions</dt><dd id="st-sess">-</dd></div>
+      <div class="stat"><dt>Low or out</dt><dd id="st-low">-</dd></div>
+      <div class="stat" id="st-attn-box"><dt>Need attention</dt><dd id="st-attn">-</dd></div>
+    </dl>
+    <button type="button" class="btn" id="st-attn-go" hidden>Show sessions needing reload</button>
+  </section>
+
+  <section class="panel" id="flt-acc" aria-labelledby="flt-h">
+    <h2 id="flt-h">Filter accounts</h2>
+    <div class="filters">
+      <input type="search" id="acc-q" placeholder="Search label or identity" aria-label="Search accounts by label or identity" autocomplete="off" maxlength="64">
+      <div class="seg" id="acc-filter" role="group" aria-label="Show accounts"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="flt-host" aria-labelledby="fhost-h" hidden>
+    <h2 id="fhost-h">Filter hosts</h2>
+    <div class="filters">
+      <input type="search" id="host-q" placeholder="Search host or system" aria-label="Search hosts by name or operating system" autocomplete="off" maxlength="64">
+      <div class="seg" id="host-filter" role="group" aria-label="Show hosts"></div>
+    </div>
+  </section>
+</aside>
+</div>
+
+<dialog class="modal" id="add-dialog" aria-labelledby="add-sec-h">
+  <div class="modal-head">
+    <h2 id="add-sec-h">Add a Claude account</h2>
+    <button type="button" class="btn sm ghost x" data-close="add-dialog" aria-label="Close without cancelling a running sign-in">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <div class="import" id="import-panel">
+      <p class="lead">Add account: import from a logged-in host</p>
+      <form id="import-form">
+        <select name="host" id="import-host" aria-label="Host"></select>
+        <input name="label" placeholder="Label" maxlength="64" required aria-label="Label" autocomplete="off">
+        <button type="submit" class="btn primary">Import</button>
+      </form>
+      <p class="sub">The host must be online and signed in to Claude Code. Its login is copied into the vault.</p>
+    </div>
+    <div class="import" id="add-panel" aria-labelledby="add-h">
+      <p class="lead" id="add-h">Add account: sign in with Anthropic</p>
+      <form id="add-form">
+        <select name="host" id="add-host" aria-label="Host that runs the sign-in"></select>
+        <input name="label" placeholder="Label" maxlength="64" required aria-label="Label for the new account" autocomplete="off">
+        <button type="submit" class="btn primary" id="add-start">Start sign-in</button>
+      </form>
+      <div class="add-flow" id="add-flow" hidden>
+        <p id="add-msg" role="status" aria-live="polite"></p>
+        <p id="add-warn" class="warn-note" role="status" hidden></p>
+        <a class="btn primary" id="add-link" target="_blank" rel="noopener noreferrer" hidden>Open Anthropic sign-in</a>
+        <form id="add-code-form" hidden>
+          <input name="code" id="add-code" autocomplete="off" spellcheck="false" maxlength="2048" required aria-label="Code from Anthropic's page">
+          <button type="submit" class="btn" id="add-send">Submit code</button>
+        </form>
+        <div class="actions"><button type="button" class="btn danger" id="add-cancel">Cancel sign-in</button></div>
+      </div>
+      <p class="sub" id="add-sub">The sign-in is completed on Anthropic's own page. claude-swap never sees your password; it only passes the link and the one-time code. Closing this dialog leaves a started sign-in running; it stays in the Account menu.</p>
+    </div>
+  </div>
+</dialog>
+
+<dialog class="modal" id="pw-dialog" aria-labelledby="pw-h">
+  <div class="modal-head">
+    <h2 id="pw-h">Admin password</h2>
+    <button type="button" class="btn sm ghost x" data-close="pw-dialog" aria-label="Close">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p class="mut">The new password is stored on the server as a hash and replaces the bootstrap environment variable. Every signed-in session ends, this one included.</p>
+    <form id="pw-form" autocomplete="off">
+      <label class="fld">Current password
+        <input type="password" name="current" id="pw-current" autocomplete="current-password" required>
+      </label>
+      <label class="fld">New password
+        <input type="password" name="new" id="pw-new" minlength="12" maxlength="1024" autocomplete="new-password" required aria-describedby="pw-hint">
+        <span class="hint" id="pw-hint">12 characters or more.</span>
+      </label>
+      <p id="pw-msg" role="status" aria-live="polite"></p>
+      <div class="modal-foot">
+        <button type="button" class="btn" data-close="pw-dialog">Cancel</button>
+        <button type="submit" class="btn primary" id="pw-save">Change password</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<!-- Removing a stored account. A native <dialog> like the others: Esc closes it, Tab stays inside
+     and focus returns to the Remove button that opened it. It names the account and says what the
+     removal does and does not do; nothing happens until Remove is clicked here.
+
+     There is deliberately no "Remove anyway". When an online host is signed in as the account the
+     server answers 409 and this dialog says which host and what to do first. Forcing past it would
+     delete the only stored copy of a login that host is still running, and this server cannot
+     reach into that host to put it back - so the UI has no way to show the operator what they
+     would be accepting. The wire keeps force for a recovery case where the hub's view of the host
+     is wrong; docs/runbooks/claude-swap-e2e.md says how to use it. -->
+<dialog class="modal" id="acct-rm-dialog" aria-labelledby="acct-rm-h" aria-describedby="acct-rm-body">
+  <div class="modal-head">
+    <h2 id="acct-rm-h">Remove account</h2>
+    <button type="button" class="btn sm ghost x" data-close="acct-rm-dialog" aria-label="Close without removing anything">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p id="acct-rm-body"></p>
+    <p class="mut" id="acct-rm-note"></p>
+    <p class="msg" id="acct-rm-msg" role="alert"></p>
+    <div class="modal-foot">
+      <button type="button" class="btn" id="acct-rm-cancel" data-close="acct-rm-dialog">Cancel</button>
+      <button type="button" class="btn danger" id="acct-rm-go"><span class="txt">Remove account</span><span class="spin" aria-hidden="true" hidden></span></button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Session control's two dialogs. Both are native <dialog>, so Esc closes them, Tab stays inside
+     and focus returns to the control that opened them. -->
+<dialog class="modal" id="ctl-confirm" aria-labelledby="ctl-confirm-h" aria-describedby="ctl-confirm-body">
+  <div class="modal-head">
+    <h2 id="ctl-confirm-h">Confirm</h2>
+    <button type="button" class="btn sm ghost x" data-close="ctl-confirm" aria-label="Close without asking">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p id="ctl-confirm-body"></p>
+    <p class="mut" id="ctl-confirm-note"></p>
+    <p class="msg" id="ctl-confirm-msg" role="alert"></p>
+    <div class="modal-foot">
+      <button type="button" class="btn" data-close="ctl-confirm">Cancel</button>
+      <button type="button" class="btn primary" id="ctl-confirm-go">Ask the sessions</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- The restart confirm. Its whole job is to NAME the sessions before anything is asked of them,
+     because a restart is the one ask whose subject is a session's life. claude-swap stops nothing:
+     the decision is copy-only (docs/runbooks/session-control.md), so the dialog hands over the
+     exact commands and says in the body that nothing here is killed. The counts line is a live
+     region, the list is a real <ul>, and "Mark as restarted" is labelled as a local note so it
+     cannot be read as having restarted anything. -->
+<dialog class="modal" id="ctl-restart" aria-labelledby="ctl-restart-h" aria-describedby="ctl-restart-sub">
+  <div class="modal-head">
+    <h2 id="ctl-restart-h">Restart sessions</h2>
+    <button type="button" class="btn sm ghost x" data-close="ctl-restart" aria-label="Close without asking">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p id="ctl-restart-sub" role="status" aria-atomic="true"></p>
+    <p class="mut">Nothing is stopped, killed or restarted by claude-swap. A session holds whatever
+      somebody is doing in it, so the restart is yours to run: copy a command below and run it in
+      that session's own terminal. Asking records the request and brings back each session's exact
+      command.</p>
+    <ul class="slist" id="ctl-restart-list"></ul>
+    <p class="msg" id="ctl-restart-msg" role="alert"></p>
+    <div class="modal-foot">
+      <button type="button" class="btn" data-close="ctl-restart">Cancel</button>
+      <button type="button" class="btn" id="ctl-restart-mark">Mark as restarted</button>
+      <button type="button" class="btn primary" id="ctl-restart-go">Ask and show the commands</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog class="modal" id="ctl-name" aria-labelledby="ctl-name-h">
+  <div class="modal-head">
+    <h2 id="ctl-name-h">Fix the remote name</h2>
+    <button type="button" class="btn sm ghost x" data-close="ctl-name" aria-label="Close without asking">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p class="mut" id="ctl-name-for"></p>
+    <form id="ctl-name-form">
+      <label class="fld">Remote name
+        <input id="ctl-name-input" name="name" maxlength="256" required autocomplete="off" spellcheck="false" aria-describedby="ctl-name-hint">
+        <span class="hint" id="ctl-name-hint">256 characters or fewer, and anything past 200 is shortened to 200 when it is applied. A session with remote control bound can take a new name where it stands; one without gets the restart command that would set it. Either way the answer says the ask reached the session, not that the name on claude.ai changed.</span>
+      </label>
+      <p class="msg" id="ctl-name-msg" role="alert"></p>
+      <div class="modal-foot">
+        <button type="button" class="btn" data-close="ctl-name">Cancel</button>
+        <button type="submit" class="btn primary" id="ctl-name-go">Ask for this name</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+{{if .Tunnels}}
+<!-- The Tunnels dialogs. Native <dialog>, like the others: Esc closes, Tab stays inside and
+     focus returns to the control that opened them. -->
+<dialog class="modal" id="tun-add-dialog" aria-labelledby="tun-add-h">
+  <div class="modal-head">
+    <h2 id="tun-add-h">Add a tunnel</h2>
+    <button type="button" class="btn sm ghost x" data-close="tun-add-dialog" aria-label="Close">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p class="mut">The server dials out to the host, so the host opens no inbound port. It holds no
+      password for the host: adding a tunnel generates a key here and gives you one line to paste on
+      the host yourself.</p>
+    <form id="tun-add-form" class="tun-add" autocomplete="off">
+      <label class="fld">Label
+        <input name="label" id="tun-label" maxlength="32" required aria-describedby="tun-label-hint" spellcheck="false">
+        <span class="hint" id="tun-label-hint">1-32 characters of A-Z a-z 0-9 . _ - . It names the host in the log and in the authorized_keys comment, and it cannot be changed later.</span>
+      </label>
+      <div class="pair">
+        <label class="fld">Address
+          <input name="address" id="tun-address" maxlength="253" required spellcheck="false" aria-describedby="tun-address-hint">
+          <span class="hint" id="tun-address-hint">A DNS name or an IP literal.</span>
+        </label>
+        <label class="fld">User
+          <input name="user" id="tun-user" maxlength="32" required spellcheck="false" aria-describedby="tun-user-hint">
+          <span class="hint" id="tun-user-hint">The login on the host.</span>
+        </label>
+      </div>
+      <label class="fld">Port
+        <input name="port" id="tun-port" type="number" min="1" max="65535" value="8443" required class="num" aria-describedby="tun-port-hint">
+        <span class="hint" id="tun-port-hint">Forwarded on both ends, and it must match the host's permitlisten option.</span>
+      </label>
+      <p class="msg" id="tun-add-msg" role="alert"></p>
+      <div class="modal-foot">
+        <button type="button" class="btn" data-close="tun-add-dialog">Cancel</button>
+        <button type="submit" class="btn primary" id="tun-add-go">Add and generate a key</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<dialog class="modal" id="tun-key-dialog" aria-labelledby="tun-key-h">
+  <div class="modal-head">
+    <h2 id="tun-key-h">Paste the host's own key</h2>
+    <button type="button" class="btn sm ghost x" data-close="tun-key-dialog" aria-label="Close">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p class="mut" id="tun-key-for"></p>
+    <p class="mut">The tunnel refuses an unknown host key rather than asking, so the host's own public
+      key has to be recorded here first. Take it from the host itself, not from the network.</p>
+    <form id="tun-key-form" autocomplete="off">
+      <label class="fld">The host's public key
+        <input name="hostKey" id="tun-key-input" maxlength="4096" required spellcheck="false" aria-describedby="tun-key-hint">
+        <span class="hint" id="tun-key-hint">One authorized_keys line from the host, such as the contents of /etc/ssh/ssh_host_ed25519_key.pub. A trailing comment is fine.</span>
+      </label>
+      <p class="msg" id="tun-key-msg" role="alert"></p>
+      <div class="modal-foot">
+        <button type="button" class="btn" data-close="tun-key-dialog">Cancel</button>
+        <button type="submit" class="btn primary" id="tun-key-go">Record this key</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<!-- One confirmation for every action that cannot be taken back here. It names the host and says
+     what will still be true on that host afterwards, because this server cannot change it. -->
+<dialog class="modal" id="tun-confirm" aria-labelledby="tun-confirm-h" aria-describedby="tun-confirm-body">
+  <div class="modal-head">
+    <h2 id="tun-confirm-h">Confirm</h2>
+    <button type="button" class="btn sm ghost x" data-close="tun-confirm" aria-label="Close without doing it">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p id="tun-confirm-body"></p>
+    <p class="mut" id="tun-confirm-note"></p>
+    <p class="msg" id="tun-confirm-msg" role="alert"></p>
+    <div class="modal-foot">
+      <button type="button" class="btn" data-close="tun-confirm">Cancel</button>
+      <button type="button" class="btn danger" id="tun-confirm-go">Confirm</button>
+    </div>
+  </div>
+</dialog>
+{{end}}
+
+<!-- The two announcers. They live in the shell, not on a host card, because renderHosts replaces
+     the whole card subtree: a live region created in the same pass as its text is not reliably
+     announced, while writing into a region that was already there is. The toast stack beside them
+     is aria-hidden so each verdict is spoken exactly once. -->
+<p id="swap-live" class="sr" role="status" aria-live="polite"></p>
+<p id="swap-alert" class="sr" role="alert" aria-live="assertive"></p>
+<div class="toasts" id="toasts" aria-hidden="true"></div>
+
+<script nonce="{{.Nonce}}">
+(function () {
+  var csrf = document.querySelector('meta[name="csrf-token"]').content;
+  var $ = function (s) { return document.querySelector(s); };
+  // titled puts the full string in the title attribute of a node that truncates, so a clipped
+  // name, identity or path is still readable by pointer, by keyboard and to a screen reader.
+  function titled(e, full) { if (full) e.title = String(full); return e; }
+  function el(tag, text, cls) { var e = document.createElement(tag); if (text !== undefined && text !== null) e.textContent = text; if (cls) e.className = cls; return e; }
+  function say(msg) { $('#status').textContent = msg || ''; }
+  function call(method, path, body) {
+    var o = { method: method, headers: { 'X-CSRF-Token': csrf }, credentials: 'same-origin' };
+    if (body !== undefined) { o.headers['Content-Type'] = 'application/json'; o.body = JSON.stringify(body); }
+    return fetch(path, o).then(function (r) {
+      return r.text().then(function (t) {
+        var j = null; try { j = t ? JSON.parse(t) : null; } catch (e) {}
+        if (r.status === 401) { location.reload(); }
+        if (!r.ok) {
+          // The status and the parsed body ride along: a refusal that carries a fact the caller
+          // has to show (which host holds an account) would otherwise be flattened to a sentence.
+          var err = new Error((j && j.error) || ('request failed (' + r.status + ')'));
+          err.status = r.status; err.data = j;
+          throw err;
+        }
+        return j;
+      });
+    });
+  }
+
+  // Layout preferences only (the selected tab, the two filters, which hosts show their sessions).
+  // Never a URL, code or token.
+  var PREF_KEY = 'cs.ui.v1', prefs = {};
+  try { prefs = JSON.parse(localStorage.getItem(PREF_KEY) || '{}') || {}; } catch (e) { prefs = {}; }
+  function savePrefs() { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (e) {} }
+  function pref(k, dflt) { return Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : dflt; }
+
+  // Tabs. Both panels are already in the page, so there is nothing to wait for: an arrow key moves
+  // focus and selects in one step, and Enter or Space selects the focused tab as well. The tablist
+  // keeps a roving tabindex, so Tab reaches the tabs once and then moves into the open panel. The
+  // sidebar's filter follows the tab, since each filter drives only its own list.
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('#tabs [role="tab"]'));
+  function selectTab(tab, focus) {
+    tabs.forEach(function (t) {
+      var on = t === tab;
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+      t.tabIndex = on ? 0 : -1;
+      var p = document.getElementById(t.getAttribute('aria-controls')); if (p) p.hidden = !on;
+    });
+    $('#flt-acc').hidden = tab.id !== 'tab-accounts';
+    $('#flt-host').hidden = tab.id !== 'tab-hosts';
+    if (prefs.tab !== tab.id) { prefs.tab = tab.id; savePrefs(); }
+    if (focus) tab.focus();
+  }
+  function moveTab(step) {
+    var at = tabs.indexOf(document.activeElement); if (at < 0) at = 0;
+    selectTab(tabs[(at + step + tabs.length) % tabs.length], true);
+  }
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () { selectTab(t, false); });
+    t.addEventListener('keydown', function (ev) {
+      if (ev.key === 'ArrowRight') { ev.preventDefault(); moveTab(1); }
+      else if (ev.key === 'ArrowLeft') { ev.preventDefault(); moveTab(-1); }
+      else if (ev.key === 'Home') { ev.preventDefault(); selectTab(tabs[0], true); }
+      else if (ev.key === 'End') { ev.preventDefault(); selectTab(tabs[tabs.length - 1], true); }
+      else if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); selectTab(t, true); }
+    });
+  });
+  // Apply the remembered tab before the first data arrives, so a reload never flashes the other panel.
+  (function () {
+    var want = pref('tab', 'tab-accounts');
+    selectTab(tabs.filter(function (t) { return t.id === want; })[0] || tabs[0], false);
+  })();
+
+  // Account menu. The button owns aria-expanded; the items hold a roving tabindex, so the arrows
+  // move inside the menu and Tab leaves it. Nothing here is a link: every item acts in place.
+  var mBtn = $('#acct-btn'), mBox = $('#acct-menu');
+  var mItems = Array.prototype.slice.call(mBox.querySelectorAll('.mi'));
+  function menuShown() { return mBtn.getAttribute('aria-expanded') === 'true'; }
+  function closeMenu(refocus) {
+    mBtn.setAttribute('aria-expanded', 'false'); mBox.hidden = true;
+    if (refocus) mBtn.focus();
+  }
+  function openMenu(i) {
+    mBtn.setAttribute('aria-expanded', 'true'); mBox.hidden = false; mItems[i].focus();
+  }
+  function moveItem(step) {
+    var at = mItems.indexOf(document.activeElement);
+    mItems[(at + step + mItems.length) % mItems.length].focus();
+  }
+  mBtn.addEventListener('click', function () { if (menuShown()) closeMenu(true); else openMenu(0); });
+  mBtn.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+    ev.preventDefault(); openMenu(ev.key === 'ArrowUp' ? mItems.length - 1 : 0);
+  });
+  mBox.addEventListener('keydown', function (ev) {
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); moveItem(1); }
+    else if (ev.key === 'ArrowUp') { ev.preventDefault(); moveItem(-1); }
+    else if (ev.key === 'Home') { ev.preventDefault(); mItems[0].focus(); }
+    else if (ev.key === 'End') { ev.preventDefault(); mItems[mItems.length - 1].focus(); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); closeMenu(true); }
+    else if (ev.key === 'Tab') { closeMenu(false); }
+  });
+  document.addEventListener('pointerdown', function (ev) {
+    if (menuShown() && !$('#acct').contains(ev.target)) closeMenu(false);
+  });
+
+  // Modal dialogs. showModal() keeps Tab inside the dialog and closes it on Escape; the menu
+  // button is focused first, so the browser returns focus there, and the close handler sends it
+  // back as well for the browsers that do not. Closing a dialog never touches a running job:
+  // only "Cancel sign-in" posts /cancel.
+  var opener = null;
+  function openModal(sel) {
+    var d = $(sel), from = document.activeElement;
+    if (!from || mBox.contains(from)) from = mBtn; // a menu item is hidden once the menu shuts
+    closeMenu(false);
+    opener = from; from.focus(); // focus the opener before showModal, so the browser returns here
+    if (d.showModal) d.showModal(); else d.setAttribute('open', 'open');
+    return d;
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('[data-close]'), function (b) {
+    b.addEventListener('click', function () { $('#' + b.dataset.close).close(); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('.modal'), function (d) {
+    d.addEventListener('close', function () { (opener && opener.isConnected ? opener : mBtn).focus(); });
+  });
+
+  var SVG = 'http://www.w3.org/2000/svg';
+  function glyph(d) {
+    var s = document.createElementNS(SVG, 'svg'); s.setAttribute('viewBox', '0 0 12 12'); s.setAttribute('aria-hidden', 'true');
+    s.setAttribute('fill', 'none'); s.setAttribute('stroke', 'currentColor'); s.setAttribute('stroke-width', '1.8'); s.setAttribute('stroke-linecap', 'round'); s.setAttribute('stroke-linejoin', 'round');
+    var p = document.createElementNS(SVG, 'path'); p.setAttribute('d', d); s.appendChild(p); return s;
+  }
+  var G = { ok: 'M2 6.5l2.5 2.5L10 3', bad: 'M3 3l6 6M9 3l-6 6', warn: 'M6 2v5M6 10v.01', info: 'M6 5v4M6 2.5v.01' };
+  function chip(text, kind, g) { var c = el('span', undefined, 'chip' + (kind ? ' ' + kind : '')); if (g) c.appendChild(glyph(G[g])); c.appendChild(document.createTextNode(text)); return c; }
+  // A command the operator has to run by hand, with a copy button. Several of these sit on one
+  // page, so each Copy carries its own accessible name. See docs/runbooks/session-reload.md and
+  // docs/runbooks/session-control.md - no mechanism reloads a running session's login, and none
+  // can bind Remote Control on one either, so the command is what the operator is left with.
+  // The lead and the Copy button share the top line and the command runs full width under it:
+  // a command long enough to wrap would otherwise push Copy onto a line of its own, where a
+  // borderless button reads as a stray word.
+  function copyLine(lead, cmd, aria) {
+    var box = el('div', undefined, 'copyline');
+    var row = el('div', undefined, 'row between');
+    row.appendChild(el('span', lead, 'mut'));
+    var b = el('button', 'Copy', 'btn sm ghost');
+    b.type = 'button';
+    b.setAttribute('aria-label', aria || 'Copy the command');
+    b.addEventListener('click', function () {
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1500); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(cmd).then(done, function () { say('Copy failed; select the command instead.'); });
+        return;
+      }
+      say('Copy is unavailable here; select the command instead.');
+    });
+    row.appendChild(b);
+    box.appendChild(row);
+    box.appendChild(el('code', cmd, 'code'));
+    return box;
+  }
+  function restartLine(cmd) { return copyLine('Restart with', cmd, 'Copy the restart command'); }
+
+  // Why a host names no account, in plain words with the one line that fixes it. A connected host
+  // used to show "Active account -" and nothing else, so a Linux host nobody had signed in on
+  // looked exactly like one whose state file the agent cannot read.
+  //
+  // The key is a fixed code from the hub (never text from the host, which validates it against
+  // the set it knows), so this map is the whole vocabulary; an unrecognised code still gets the
+  // general line rather than silence.
+  var LOGIN_CMD = 'claude auth login';
+  var SIGN_IN_FIX = 'Sign in as the user the agent runs as; the agent picks it up within a minute.';
+  var IDENTITY_WHY = {
+    no_claude_json: { why: 'No Claude Code account is signed in on this host.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
+    no_oauth_account: { why: 'Claude Code has run on this host, but no account is signed in.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
+    no_home: { why: 'The agent has no home directory, so it cannot read the signed-in account.', fix: 'A system service needs Environment=HOME=<the user\'s home> in its unit (install-agent.sh sets it), then a restart. See docs/runbooks/linux-agent-install.md.' },
+    no_credentials: { why: 'This host holds no Claude Code login for the agent to read.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
+    parse_error: { why: "This host's Claude Code state file is not readable as JSON, so it names no account.", fix: 'Sign in again as the user the agent runs as to rewrite it.', cmd: LOGIN_CMD },
+    home_mismatch: { why: 'The user the agent runs as has no account signed in; another user on this host does.', fix: 'Run the agent as that user, or sign in as the user the agent runs as.', cmd: LOGIN_CMD },
+    unreadable: { why: "The agent cannot read this host's Claude Code state file." , fix: 'Run the agent as the user who owns that file, or let that user read it. The agent retries every 30 seconds, so no restart is needed.' },
+    config_dir_elsewhere: { why: 'CLAUDE_CONFIG_DIR points the agent at another config directory, and no account is signed in there.', fix: 'Either sign in inside that directory, or clear CLAUDE_CONFIG_DIR for the agent and restart it. Keep it identical at enrol and run.' }
+  };
+  function identityWhy(code) {
+    return IDENTITY_WHY[code] || { why: 'This host reports no signed-in Claude Code account.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD };
+  }
+  // identityNote is the card's explanation. Its id is what the Swap button names as the reason it
+  // is disabled, so the reason is read out, not only shown.
+  function identityNoteID(h) { return 'whyid-' + h.hostId; }
+  function identityNote(h) {
+    var w = identityWhy(h.identityReason);
+    var box = el('div', undefined, 'whyid');
+    box.id = identityNoteID(h);
+    box.appendChild(el('p', w.why));
+    // The fix is a sentence of its own, and the command keeps the short lead copyLine is built
+    // for: a whole sentence as the lead leaves Copy floating beside three wrapped lines.
+    box.appendChild(el('div', w.fix, 'fix'));
+    if (w.cmd) box.appendChild(copyLine('Run', w.cmd, 'Copy the sign-in command for ' + h.name));
+    return box;
+  }
+  function fmtDate(iso) {
+    var d = new Date(iso); if (isNaN(d)) return '-';
+    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+  function ago(s) { if (s == null) return ''; if (s < 90) return s + 's ago'; if (s < 5400) return Math.round(s / 60) + 'm ago'; return Math.round(s / 3600) + 'h ago'; }
+
+  // Re-render a region only when its data changed and the user is not mid-interaction in it.
+  var sig = {};
+  function changed(key, data) { var s = JSON.stringify(data); if (sig[key] === s) return false; sig[key] = s; return true; }
+
+  var accountsCache = [], hostsCache = [], pendingCount = 0, editing = null, confirming = null;
+  // The account whose Remove dialog is open, so the 30s poll does not rebuild the card under it.
+  var removing = null;
+  // Which account cards are mid-refresh, and the one line each card has to say about the last one.
+  var refreshing = {}, refreshAll = false, notes = {};
+  var filter = { mode: pref('filter', 'all'), q: '' };
+  var hostFilter = { mode: pref('hostFilter', 'all'), q: '' };
+
+  function pct(w) { return w ? Math.max(0, Math.min(100, Math.round(w.leftPct))) : null; }
+  // A failed poll that left good numbers behind (rate limited, endpoint down) is stale, not broken:
+  // the card keeps its numbers and says since when. Only a login the endpoint refuses, or an
+  // account that has never been read, is a problem.
+  function isStale(a) { return !!(a.error && a.fetchedAt && a.error !== 'unauthorized'); }
+  function clock(iso) { var d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+  function mins(s) { var m = Math.max(1, Math.round(s / 60)); return m < 90 ? m + ' min' : Math.round(m / 60) + ' h'; }
+  function retryLine(a) { // the chip already says since when; this says why and when the next look is
+    var why = a.error === 'rate limited' ? 'Rate limited' : a.error.charAt(0).toUpperCase() + a.error.slice(1);
+    return why + (a.retryInSec != null ? ', retry in ' + mins(a.retryInSec) : '');
+  }
+  function level(a) { // worst state across both windows, for the card's top edge and the filters
+    if (a.error && !isStale(a)) return 'err';
+    var p5 = pct(a.fiveHour), p7 = pct(a.sevenDay), worst = null;
+    [p5, p7].forEach(function (p) { if (p !== null && (worst === null || p < worst)) worst = p; });
+    if (worst === null) return 'none';
+    return worst === 0 ? 'out' : worst <= 15 ? 'low' : 'ok';
+  }
+
+  function meter(name, w) {
+    var m = el('div', undefined, 'meter' + (w ? '' : ' none'));
+    m.appendChild(el('span', name, 'lbl'));
+    var bar = el('div', undefined, 'bar'), fill = el('i'), val = el('span', '-', 'val num');
+    bar.appendChild(fill);
+    if (w) {
+      var p = pct(w);
+      bar.setAttribute('role', 'meter'); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', '100'); bar.setAttribute('aria-valuenow', String(p));
+      bar.setAttribute('aria-label', name + ' usage left: ' + p + ' percent');
+      fill.style.setProperty('width', p + '%');
+      if (p === 0) bar.classList.add('out'); else if (p <= 15) bar.classList.add('low');
+      val.textContent = p + '% left' + (p === 0 ? ' (out)' : p <= 15 ? ' (low)' : '');
+    } else { bar.setAttribute('aria-label', name + ' usage: not available'); }
+    m.appendChild(val); m.appendChild(bar);
+    m.appendChild(el('span', !w ? 'No data' : w.resetsAt ? 'Resets ' + fmtDate(w.resetsAt) : 'Reset time unknown', 'reset'));
+    return m;
+  }
+
+  // The identity and the rename control. Both sit in the card's detail, not in its header: the
+  // header is one disclosure button, and nothing interactive may live inside a button.
+  function nameRow(card, a) {
+    var row = el('div', undefined, 'row between');
+    function show() {
+      editing = null; row.textContent = '';
+      var t = el('div', undefined, 'col');
+      // An identity is an email or a uuid, so it is long and it is not compared by eye: one line
+      // with an ellipsis, and the whole string in the title, which is also what a screen reader
+      // reads back when the text is clipped.
+      t.appendChild(titled(el('div', a.identity, 'sub trunc'), a.identity));
+      row.appendChild(t);
+      var r = row.appendChild(el('button', 'Rename', 'btn sm ghost')); r.type = 'button';
+      r.setAttribute('aria-label', 'Rename ' + a.label);
+      r.addEventListener('click', edit);
+    }
+    function edit() {
+      editing = a.id; row.textContent = '';
+      var f = el('form', undefined, 'rename');
+      var inp = el('input'); inp.value = a.label; inp.maxLength = 64; inp.required = true; inp.autocomplete = 'off';
+      inp.setAttribute('aria-label', 'New label for ' + a.label);
+      var ok = el('button', 'Save', 'btn sm primary'); ok.type = 'submit';
+      var no = el('button', 'Cancel', 'btn sm'); no.type = 'button';
+      var msg = el('div', '', 'msg'); msg.setAttribute('role', 'alert');
+      no.addEventListener('click', function () { show(); r2().focus(); });
+      function r2() { return row.querySelector('button'); }
+      inp.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') { ev.preventDefault(); no.click(); } });
+      f.addEventListener('submit', function (ev) {
+        ev.preventDefault(); msg.textContent = ''; ok.disabled = true;
+        call('POST', '/api/accounts/' + encodeURIComponent(a.id) + '/label', { label: inp.value })
+          .then(function () { editing = null; return refresh(); })
+          .catch(function (e) { msg.textContent = e.message; ok.disabled = false; inp.focus(); });
+      });
+      f.appendChild(inp); f.appendChild(ok); f.appendChild(no); f.appendChild(msg);
+      row.appendChild(f); inp.focus(); inp.select();
+    }
+    if (editing === a.id) edit(); else show();
+    return row;
+  }
+
+  // The card's state, in one chip: the error when there is one, otherwise how old the numbers are.
+  // It sits in the header, so it is read whether the card is open or closed.
+  function statusChip(a) {
+    if (isStale(a)) return chip('Stale since ' + clock(a.fetchedAt), 'warn', 'warn');
+    if (a.error) return chip(a.error, 'bad', 'bad');
+    if (a.ageSeconds == null) return chip('Not polled', '', 'info');
+    if (a.ageSeconds > 900) return chip('Stale, ' + ago(a.ageSeconds), 'warn', 'warn');
+    return chip('Updated ' + ago(a.ageSeconds), 'ok', 'ok');
+  }
+
+  // Which cards are open is a layout preference, like the selected tab. Only the open ones are
+  // stored, so a new account, a cleared browser and a first visit all start closed.
+  function openKey(id) { return 'acc.' + id; }
+  function isOpen(id) { return editing === id || pref(openKey(id), false) === true; }
+  function setOpen(card, open) {
+    var dis = card.querySelector('.acct-dis'), body = card.querySelector('.acct-body');
+    if (!dis || !body) return;
+    dis.setAttribute('aria-expanded', open ? 'true' : 'false');
+    body.hidden = !open;
+    card.classList.toggle('open', open);
+    var k = openKey(card.dataset.id);
+    if (open) prefs[k] = true; else delete prefs[k];
+    savePrefs();
+    if (open) watch(card.dataset.id);
+  }
+  // An open card is being looked at: tell the server so it checks that account more often. The
+  // server forgets after a few minutes, so the page renews while the tab is visible. Failures are
+  // ignored; the schedule only gets slower.
+  function watch(id) { call('POST', '/api/usage/watch', { account: id }).catch(function () {}); }
+  function watchOpen() {
+    if (document.hidden) return;
+    Array.prototype.forEach.call(document.querySelectorAll('#accounts .card.acct.open'), function (c) { watch(c.dataset.id); });
+  }
+  setInterval(watchOpen, 240000);
+  function setAllOpen(open) {
+    var cards = document.querySelectorAll('#accounts .card.acct');
+    Array.prototype.forEach.call(cards, function (c) { setOpen(c, open); });
+    sayAcc(cards.length ? (open ? 'All accounts expanded.' : 'All accounts collapsed.') : '');
+  }
+
+  function spinner() { var s = el('span', undefined, 'spin'); s.setAttribute('aria-hidden', 'true'); s.hidden = true; return s; }
+  // One account's Refresh. It carries the account on itself, so markBusy can flip every card's
+  // button without a re-render and the pressed button keeps its focus.
+  function refreshBtn(a) {
+    var b = el('button', undefined, 'btn sm acct-refresh'); b.type = 'button';
+    b.id = 'acct-refresh-' + a.id; b.dataset.id = a.id; b.dataset.label = a.label;
+    b.appendChild(el('span', 'Refresh', 'txt'));
+    b.appendChild(spinner());
+    b.addEventListener('click', function () { refreshUsage(a.id); });
+    return b;
+  }
+
+  // One account's Remove. It lives in the card's BODY, so it is reachable only from an expanded
+  // card: the collapsed face is what an operator scans ten of, and a destructive control does not
+  // belong on a face you scan. A ghost button, not a filled one - the red fill belongs to the one
+  // confirm inside the dialog, and this card has no other action worth shouting over.
+  function removeBtn(a) {
+    var b = el('button', 'Remove', 'btn sm ghost danger acct-rm'); b.type = 'button';
+    b.id = 'acct-rm-' + a.id;
+    b.setAttribute('aria-label', 'Remove the account ' + a.label);
+    b.addEventListener('click', function () { askRemove(a); });
+    return b;
+  }
+
+  // The confirm. It names the account, says plainly that nothing is sent to any host, and removes
+  // nothing until the dialog's own button is clicked. No window.confirm: it cannot say this much,
+  // and it cannot be read by the page's own live region afterwards.
+  function askRemove(a) {
+    removing = a.id;
+    $('#acct-rm-body').textContent = 'Remove the stored account "' + a.label + '" from claude-swap?';
+    $('#acct-rm-note').textContent = 'Nothing is sent to any host. A host already signed in as this ' +
+      'account keeps running that login, with no stored copy left to swap it back. The vault file it ' +
+      'was in is kept beside the new one as vault.bin.bak.';
+    $('#acct-rm-msg').textContent = '';
+    openModal('#acct-rm-dialog');
+    var go = $('#acct-rm-go');
+    setBusy(go, false, 'Remove account', 'Removing...', null);
+    go.focus();
+  }
+
+  function doRemove() {
+    var id = removing, go = $('#acct-rm-go'), msg = $('#acct-rm-msg');
+    if (!id) return;
+    var a = accountsCache.filter(function (x) { return x.id === id; })[0];
+    var label = a ? a.label : id;
+    msg.textContent = '';
+    setBusy(go, true, 'Remove account', 'Removing...', null);
+    call('POST', '/api/accounts/remove', { account: id, force: false })
+      .then(function () {
+        removing = null;
+        delete notes[id];
+        $('#acct-rm-dialog').close();
+        // The panel's own live region, which was already in the page: a region created in the same
+        // pass as its text is not reliably announced, and this card is about to be removed anyway.
+        sayAcc('Removed the account ' + label + '.');
+        return loadAccounts().catch(function () {}).then(function () {
+          // The dialog returns focus to the button that opened it, and that button was on the card
+          // that has just gone - so focus would land on the body. Put it on the panel's first
+          // control instead, which is where the list the operator was working in starts.
+          $('#acc-expand-all').focus();
+        });
+      })
+      .catch(function (e) {
+        setBusy(go, false, 'Remove account', 'Removing...', null);
+        // 409 is the one refusal with a fact behind it: an online host is signed in as this
+        // account. Say which host and what to do first, and offer nothing else - see the dialog's
+        // comment on why there is no "Remove anyway" here.
+        if (e.status === 409 && e.data && e.data.heldBy) {
+          msg.textContent = 'Held by ' + e.data.heldBy + ', swap that host to another account first.';
+          // There is nothing left to do here, so the confirm is spent and the focus moves to the
+          // one control that still works: a disabled button holding the focus drops it to the body.
+          go.disabled = true;
+          $('#acct-rm-cancel').focus();
+          return;
+        }
+        msg.textContent = e.message;
+      });
+  }
+
+  function accountCard(a) {
+    var open = isOpen(a.id), bodyID = 'acct-body-' + a.id;
+    var c = el('article', undefined, 'card acct s-' + level(a) + (open ? ' open' : ''));
+    c.dataset.id = a.id;
+
+    var top = el('div', undefined, 'acct-top');
+    var h = el('h3', undefined, 'acct-h');
+    var dis = el('button', undefined, 'acct-dis'); dis.type = 'button';
+    dis.id = 'acct-dis-' + a.id;
+    dis.setAttribute('aria-expanded', open ? 'true' : 'false');
+    dis.setAttribute('aria-controls', bodyID);
+    dis.appendChild(titled(el('span', a.label, 'title trunc'), a.label));
+    var cv = el('span', undefined, 'chev dn'); cv.setAttribute('aria-hidden', 'true');
+    dis.appendChild(cv);
+    dis.addEventListener('click', function () { setOpen(c, dis.getAttribute('aria-expanded') !== 'true'); });
+    h.appendChild(dis); top.appendChild(h);
+    top.appendChild(statusChip(a));
+    c.appendChild(top);
+
+    // Closed, this is the whole card: the 7-day window is the one that decides whether an account
+    // can carry a host for the rest of the week.
+    var brief = el('div', undefined, 'acct-brief meters');
+    brief.appendChild(meter('7-day window', a.sevenDay));
+    c.appendChild(brief);
+
+    // A refused login cannot recover by waiting: say so in words and offer the one fix, on the face.
+    if (a.error === 'unauthorized') {
+      var rs = el('div', undefined, 'acct-resign');
+      rs.appendChild(el('p', 'Anthropic refused the stored login. Sign in again to replace it.'));
+      var rb = el('button', 'Sign in again', 'btn primary acct-resign-btn'); rb.type = 'button';
+      rb.id = 'acct-resign-' + a.id;
+      rb.setAttribute('aria-label', 'Sign in again as ' + a.label);
+      rb.addEventListener('click', function () { openResign(a); });
+      rs.appendChild(rb); c.appendChild(rs);
+    }
+
+    // The note is read, not announced: ten refused cards would otherwise insert ten live regions
+    // at once, against the one in the panel that already says what the round did.
+    var n = notes[a.id];
+    if (n) c.appendChild(el('p', n.text, 'acct-note' + (n.bad ? ' bad' : '')));
+    else if (isStale(a)) c.appendChild(el('p', retryLine(a), 'acct-note'));
+
+    var body = el('div', undefined, 'acct-body'); body.id = bodyID; body.hidden = !open;
+    body.appendChild(nameRow(c, a));
+    var ms = el('div', undefined, 'meters');
+    ms.appendChild(meter('5-hour window', a.fiveHour));
+    body.appendChild(ms);
+    var held = el('div', undefined, 'holder');
+    held.appendChild(el('span', 'Held by'));
+    if (a.owner) { held.appendChild(el('span', undefined, 'dot')); held.appendChild(titled(el('strong', a.owner, 'trunc'), a.owner)); }
+    else held.appendChild(chip('Free', '', 'info'));
+    body.appendChild(held);
+    var foot = el('div', undefined, 'acct-foot');
+    var when = a.ageSeconds == null ? 'Never polled' : 'Polled ' + ago(a.ageSeconds);
+    if (a.tier === 'backoff') when += a.retryInSec != null ? '. Next check in ' + mins(a.retryInSec) : '';
+    else if (a.checkEverySec) when += '. Checks every ' + mins(a.checkEverySec);
+    foot.appendChild(el('span', when));
+    var acts = el('div', undefined, 'acct-acts');
+    acts.appendChild(refreshBtn(a));
+    acts.appendChild(removeBtn(a));
+    foot.appendChild(acts);
+    body.appendChild(foot);
+    c.appendChild(body);
+    return c;
+  }
+
+  // --- Usage refresh -------------------------------------------------------------------
+  // POST /api/usage/refresh asks the server to poll the usage endpoint now. The server refuses
+  // asks that come too fast, per account and in total, so nothing here retries by itself: it
+  // reports what came back and leaves the next move to the operator.
+  function refreshBusy() { return refreshAll || Object.keys(refreshing).length > 0; }
+  function sayAcc(text, bad) {
+    var s = $('#acc-refresh-status');
+    s.textContent = text || '';
+    s.className = 'say' + (bad ? ' bad' : '');
+  }
+  // Flip one control between its idle and its busy face in place, so focus is never lost.
+  function setBusy(b, busy, idle, busyWord, aria) {
+    if (!b) return;
+    b.disabled = busy;
+    var t = b.querySelector('.txt'); if (t) t.textContent = busy ? busyWord : idle;
+    var sp = b.querySelector('.spin'); if (sp) sp.hidden = !busy;
+    if (busy) b.setAttribute('aria-busy', 'true'); else b.removeAttribute('aria-busy');
+    if (aria) b.setAttribute('aria-label', aria);
+  }
+  function markBusy() {
+    setBusy($('#acc-refresh-all'), refreshAll, 'Refresh all', 'Refreshing all...', null);
+    Array.prototype.forEach.call(document.querySelectorAll('#accounts .acct-refresh'), function (b) {
+      var busy = refreshAll || !!refreshing[b.dataset.id];
+      setBusy(b, busy, 'Refresh', 'Refreshing...',
+        (busy ? 'Refreshing usage for ' : 'Refresh usage for ') + b.dataset.label);
+    });
+  }
+  // One sentence for the live region, and one line on the cards that have something to say. A
+  // refused poll is the only outcome a card's own data cannot show, so it says so on the card.
+  // The note carries no countdown: it outlives the wait it would name - the card is re-rendered
+  // every 30s and nothing resets the figure - and a frozen "try again in 14s" is worse than no
+  // figure at all. An unknown id gets no note, because it has no card to put one on.
+  function report(rows) {
+    var n = {};
+    rows.forEach(function (r) {
+      n[r.status] = (n[r.status] || 0) + 1;
+      if (r.status === 'rate_limited') notes[r.id] = { text: 'Not polled: ' + (r.retryAfterSec > 60 ? 'backing off, next allowed in ' + mins(r.retryAfterSec) : 'polled too recently, try again shortly') + '.' };
+      else if (r.status === 'error') notes[r.id] = { text: 'The poll failed: ' + (r.error || 'unavailable') + '.', bad: true };
+      else delete notes[r.id];
+    });
+    var parts = [];
+    [['refreshed', 'refreshed'], ['rate_limited', 'polled too recently'], ['error', 'failed'],
+      ['unknown_id', 'no longer stored']].forEach(function (k) {
+      if (n[k[0]]) parts.push(n[k[0]] + ' ' + k[1]);
+    });
+    sayAcc(parts.length ? 'Usage: ' + parts.join(', ') + '.' : 'No accounts to refresh.');
+  }
+  function refreshUsage(id) {
+    if (id) {
+      if (refreshAll || refreshing[id]) return;
+      refreshing[id] = true; delete notes[id];
+    } else {
+      if (refreshBusy()) return;
+      refreshAll = true; notes = {};
+    }
+    markBusy(); say('');
+    sayAcc(id ? 'Asking for a fresh poll...' : 'Asking for a fresh poll of every account...');
+    return call('POST', '/api/usage/refresh', { account: id || '' })
+      .then(function (r) { report((r && r.results) || []); })
+      .catch(function (e) {
+        // The request itself failed - a 429 from the route's own limit, or no answer at all - so
+        // no account has a result to report. One sentence, and nothing is retried from here.
+        if (id) notes[id] = { text: e.message, bad: true };
+        sayAcc(e.message, true);
+      })
+      .then(function () {
+        if (id) delete refreshing[id]; else refreshAll = false;
+        // Clear the busy face here, not in the render: renderAccounts returns early when nothing
+        // changed, and after a refused round nothing has, which would leave the button disabled
+        // and saying "Refreshing..." until the next poll. The numbers, the chip and the 'Polled'
+        // line all come from /api/accounts, so the reload after it updates every one of them.
+        markBusy();
+        return loadAccounts().catch(function () {});
+      });
+  }
+
+  var MODES = [['all', 'All'], ['used', 'In use'], ['free', 'Free'], ['low', 'Low or out'], ['err', 'Problems']];
+  function matches(a) {
+    var m = filter.mode, lv = level(a);
+    if (m === 'used' && !a.owner) return false;
+    if (m === 'free' && a.owner) return false;
+    if (m === 'low' && lv !== 'low' && lv !== 'out') return false;
+    if (m === 'err' && lv !== 'err') return false;
+    if (filter.q) {
+      var hay = (a.label + ' ' + a.identity).toLowerCase();
+      if (hay.indexOf(filter.q.toLowerCase()) < 0) return false;
+    }
+    return true;
+  }
+  function counts() {
+    var n = { all: accountsCache.length, used: 0, free: 0, low: 0, err: 0 };
+    accountsCache.forEach(function (a) {
+      var lv = level(a);
+      if (a.owner) n.used++; else n.free++;
+      if (lv === 'low' || lv === 'out') n.low++;
+      if (lv === 'err') n.err++;
+    });
+    return n;
+  }
+  // Hosts have their own filter, because the sidebar's panel follows the open tab and a single
+  // filter could not mean both things.
+  var HMODES = [['all', 'All'], ['online', 'Online'], ['reload', 'Needs reload'], ['blocked', 'Swaps blocked']];
+  function hostMatches(h) {
+    var m = hostFilter.mode;
+    if (m === 'online' && !h.online) return false;
+    if (m === 'reload' && !h.needsReload) return false;
+    if (m === 'blocked' && !h.swapBlocked) return false;
+    if (hostFilter.q) {
+      var hay = (h.name + ' ' + h.os + ' ' + (h.runAs || '')).toLowerCase();
+      if (hay.indexOf(hostFilter.q.toLowerCase()) < 0) return false;
+    }
+    return true;
+  }
+  function hostCounts() {
+    var n = { all: hostsCache.length, online: 0, reload: 0, blocked: 0 };
+    hostsCache.forEach(function (h) {
+      if (h.online) n.online++;
+      if (h.needsReload) n.reload++;
+      if (h.swapBlocked) n.blocked++;
+    });
+    return n;
+  }
+
+  // One segmented filter for both tabs. Each button carries aria-pressed and its own count, and
+  // focus returns to the button that was pressed so the keyboard keeps its place.
+  function renderSeg(sel, modes, n, state, after) {
+    var box = $(sel), had = document.activeElement && box.contains(document.activeElement) ? document.activeElement.dataset.mode : null;
+    box.textContent = '';
+    modes.forEach(function (m) {
+      var b = el('button', m[1]); b.type = 'button'; b.dataset.mode = m[0];
+      b.setAttribute('aria-pressed', state.mode === m[0] ? 'true' : 'false');
+      b.appendChild(el('span', String(n[m[0]]), 'n'));
+      b.addEventListener('click', function () {
+        state.mode = m[0]; after(m[0]);
+        var again = box.querySelector('[data-mode="' + m[0] + '"]'); if (again) again.focus();
+      });
+      box.appendChild(b);
+    });
+    if (had) { var f = box.querySelector('[data-mode="' + had + '"]'); if (f) f.focus(); }
+  }
+  function renderFilters() {
+    renderSeg('#acc-filter', MODES, counts(), filter, function (m) {
+      prefs.filter = m; savePrefs(); renderFilters(); renderAccounts(true);
+    });
+  }
+  function renderHostFilters() {
+    renderSeg('#host-filter', HMODES, hostCounts(), hostFilter, function (m) {
+      prefs.hostFilter = m; savePrefs(); renderHostFilters(); renderHosts(true);
+    });
+  }
+
+  function renderStats() {
+    var online = hostsCache.filter(function (h) { return h.online; }).length;
+    var sess = 0, reload = 0;
+    hostsCache.forEach(function (h) { sess += h.sessions.length; if (h.needsReload) reload++; });
+    var n = counts(), attn = n.low + n.err + reload + (h0() ? 1 : 0) + pendingCount;
+    function h0() { return hostsCache.some(function (h) { return h.swapBlocked; }); }
+    // The tab labels carry the two totals, so the Overview panel stays about state.
+    $('#tab-accounts-n').textContent = String(accountsCache.length);
+    $('#tab-hosts-n').textContent = String(hostsCache.length);
+    var hs = $('#st-host'); hs.textContent = String(online); hs.appendChild(el('small', ' / ' + hostsCache.length));
+    $('#st-sess').textContent = String(sess);
+    $('#st-low').textContent = String(n.low);
+    $('#st-attn').textContent = String(attn);
+    $('#st-attn-box').className = 'stat' + (attn ? (n.err ? ' hot' : ' alert') : '');
+  }
+
+  function renderAccounts(force) {
+    var list = accountsCache;
+    var narrowed = filter.mode !== 'all' || filter.q;
+    $('#acc-count').textContent = list.length && narrowed ? 'Showing ' + list.filter(matches).length + ' of ' + list.length : '';
+    if (editing && $('#accounts .rename')) return; // keep an open rename
+    // Keep an open Remove dialog too: rebuilding the cards would replace the button it has to
+    // return focus to, and the dialog names an account the operator is still deciding about.
+    if (removing && $('#acct-rm-dialog').open) return;
+    if (!force && !changed('acc', [list, filter, notes]) && !$('#accounts .empty')) return;
+    sig.acc = JSON.stringify([list, filter, notes]);
+    var box = $('#accounts');
+    // The cards are rebuilt from scratch, so remember which control held the focus (a disclosure
+    // button, a Refresh) and give it back: every one of them keeps its id across a render.
+    var had = document.activeElement && box.contains(document.activeElement) ? document.activeElement.id : null;
+    box.textContent = '';
+    if (!list.length) { box.appendChild(el('p', 'No accounts yet. Open the Account menu and choose Add Claude account.', 'empty')); return; }
+    var shown = list.filter(matches);
+    if (!shown.length) box.appendChild(el('p', 'No accounts match this filter.', 'empty'));
+    shown.forEach(function (a) { box.appendChild(accountCard(a)); });
+    // markBusy first: it disables the buttons of accounts mid-refresh, and focusing a disabled
+    // button drops the focus to the body. One mid-refresh falls back to its card's header.
+    markBusy();
+    if (had) {
+      var again = document.getElementById(had);
+      if (again && again.disabled) {
+        var card = again.closest ? again.closest('.card.acct') : null;
+        again = card ? card.querySelector('.acct-dis') : null;
+      }
+      if (again) again.focus();
+    }
+  }
+
+  function loadAccounts() {
+    return call('GET', '/api/accounts').then(function (list) {
+      accountsCache = list;
+      // Forget the open state of accounts that are gone, so the stored key cannot grow for ever.
+      var live = {};
+      list.forEach(function (a) { live[openKey(a.id)] = true; });
+      var stale = Object.keys(prefs).filter(function (k) { return k.indexOf('acc.') === 0 && !live[k]; });
+      if (stale.length) { stale.forEach(function (k) { delete prefs[k]; }); savePrefs(); }
+      renderFilters(); renderAccounts(false); renderStats();
+      return list;
+    });
+  }
+
+  function sessKey(h) { return 'sess.' + h.hostId; }
+
+  // shortCwd keeps the last two path segments, so a deep path reads as a place without
+  // filling the row. Both separators appear: hosts are Windows and Linux. The full path
+  // stays in the element's title.
+  function shortCwd(cwd) {
+    var parts = String(cwd).split(/[\\/]+/).filter(function (p) { return p !== ''; });
+    if (parts.length <= 2) return cwd;
+    return '…/' + parts.slice(-2).join('/');
+  }
+  // STATUS_CAP bounds the status word: it is agent-supplied, and a chip is not a place for
+  // a paragraph. The name is not capped here - it truncates by CSS and keeps its full title.
+  var STATUS_CAP = 24;
+
+  // --- Session control -----------------------------------------------------------------
+  // POST /api/sessions/command asks a running session to do something. The verdicts arrive on
+  // the next /api/hosts poll, inside each session's commands[]; there is no status endpoint.
+  // The wording is the honest one from docs/runbooks/session-control.md: "delivered" means the
+  // instruction reached the session and never that it ran. Remote Control cannot be bound on a
+  // running session at all, so that comes back "restart required". A remote title CAN reach a
+  // running session that has a bridge bound, but whether the title on claude.ai followed is not
+  // observable from the host - so a rename stops at "delivered" and must never read as done.
+  var CMD_LABEL = {
+    reload_plugins: 'Reload plugins', remote_control_enable: 'Enable remote',
+    rename_remote: 'Fix name', repair: 'Repair', restart_sessions: 'Restart sessions'
+  };
+  var ST = {
+    queued: { word: 'Queued', count: 'queued', kind: '', g: 'info',
+      say: 'Queued: nothing has reached the session yet.' },
+    delivered: { word: 'Delivered', count: 'delivered', kind: 'ok', g: 'ok',
+      // True of both mechanisms that reach "delivered", and of neither more than it should be: a
+      // hook puts the instruction in front of the model at the next prompt, and a rename reaches
+      // the session at once but its effect on claude.ai cannot be seen from here.
+      say: 'Delivered: the ask reached the session. It does not mean the session acted on it.' },
+    done: { word: 'Done', count: 'done', kind: 'ok', g: 'ok',
+      say: 'The session ran it.' },
+    failed: { word: 'Failed', count: 'failed', kind: 'bad', g: 'bad',
+      say: 'Failed: nothing was asked of the session.' },
+    unsupported: { word: 'Unsupported', count: 'unsupported', kind: 'warn', g: 'warn',
+      say: 'Unsupported: no proven mechanism can do this on a running session.' }
+  };
+  // "unsupported" covers two different answers and an operator has to act on them differently:
+  // one says a relaunch fixes it and carries the command, the other says nothing can. The reason
+  // code is what separates them, so the word comes off the code when there is one for it.
+  var ST_CODE = {
+    'unsupported-requires-restart': { word: 'Restart required', kind: 'warn', g: 'warn',
+      say: 'Restart required: cannot be done on a running session. Nothing was stopped.' },
+    // The rest are a mechanism declining in a way an operator can act on. They normally sit
+    // behind the relaunch answer, which wins; they surface when nothing is registered after them.
+    'unsupported-no-bridge': { word: 'Restart required', kind: 'warn', g: 'warn',
+      say: 'Restart required: this session has no remote control bound, so it cannot be given a remote name. Nothing was stopped.' },
+    'unsupported-no-inbox': { word: 'Unsupported', kind: 'warn', g: 'warn',
+      say: 'Unsupported: this session offers nothing to send to. Nothing was sent.' },
+    'unsupported-inbox-no-change': { word: 'Unsupported', kind: 'warn', g: 'warn',
+      say: 'Unsupported: the ask was sent and the session did not take the name. Nothing is claimed.' },
+    'inbox-send-failed': { word: 'Failed', kind: 'bad', g: 'bad',
+      say: 'Failed: the session would not take the ask. Nothing reached it.' }
+  };
+  // A status word is agent-reported, so an unknown one reads as itself rather than as nothing.
+  // The count word stays per-status: the summary line tallies by status, not by code.
+  function stOf(k, code) {
+    var base = ST[k] || { word: String(k || 'unknown').slice(0, STATUS_CAP), count: 'in an unknown state', kind: '', g: 'info', say: '' };
+    var over = code && ST_CODE[code];
+    if (!over) return base;
+    return { word: over.word, count: base.count, kind: over.kind, g: over.g, say: over.say };
+  }
+
+  var ctlBusy = {}, lastAsk = null, nameAsk = null, confirmAsk = null;
+  var fastTimer = null, fastUntil = 0;
+  function ctlWorking() { for (var k in ctlBusy) { if (ctlBusy[k]) return true; } return false; }
+  function ctlDialogOpen() { return !!($('#ctl-name').open || $('#ctl-confirm').open || $('#ctl-restart').open); }
+  // One idempotency key per button press. The server forgets it 15 minutes after the request
+  // finishes, so it is only ever reused by retrying that same press.
+  function reqId() { return 'ui-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
+  // Code points, not UTF-16 units: the wire limit is 256 runes (proto.MaxRemoteName).
+  function runeLen(s) {
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      n++;
+      var c = s.charCodeAt(i);
+      if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) i++;
+    }
+    return n;
+  }
+
+  // The chips keep moving after the 202, so the summary line is recomputed from the poll's own
+  // commands[] rather than from the counts in the response. The two can then never disagree.
+  function trackAsk(v) {
+    var ids = {}, sess = {};
+    (v.targets || []).forEach(function (t) { ids[t.id] = true; sess[t.sessionId] = true; });
+    lastAsk = { command: v.command, ids: ids, targets: (v.targets || []).length,
+      sessions: Object.keys(sess).length };
+    startFastPoll(); renderAskSummary();
+  }
+  function renderAskSummary() {
+    var box = $('#ctl-summary');
+    if (!box) return;
+    if (!lastAsk) { box.textContent = ''; return; }
+    var n = {};
+    hostsCache.forEach(function (h) {
+      (h.sessions || []).forEach(function (s) {
+        (s.commands || []).forEach(function (c) { if (lastAsk.ids[c.id]) n[c.status] = (n[c.status] || 0) + 1; });
+      });
+    });
+    var parts = [];
+    ['queued', 'delivered', 'done', 'failed', 'unsupported'].forEach(function (k) {
+      if (n[k]) parts.push(n[k] + ' ' + stOf(k).count);
+    });
+    var sess = lastAsk.sessions;
+    var txt = 'Last ask: ' + (CMD_LABEL[lastAsk.command] || lastAsk.command) + ' on ' + sess +
+      (sess === 1 ? ' session' : ' sessions');
+    if (lastAsk.targets > sess) txt += ', ' + lastAsk.targets + ' commands';
+    box.textContent = txt + '. ' + (parts.length ? parts.join(', ') + '.' : 'No verdict yet.');
+  }
+  // The verdicts land within seconds, so the 30s poll is too slow to watch one. The fast poll
+  // runs for a minute, defers to an open dialog or an in-flight request, then stops itself.
+  function startFastPoll() {
+    fastUntil = Date.now() + 60000;
+    if (fastTimer) return;
+    fastTimer = setInterval(function () {
+      if (Date.now() > fastUntil) { clearInterval(fastTimer); fastTimer = null; return; }
+      if (ctlWorking() || ctlDialogOpen() || editing || confirming) return;
+      loadHosts().catch(function () {});
+    }, 3000);
+  }
+
+  // ask posts one command. The buttons it was fired from go disabled for the round trip and come
+  // back on either answer: a 202 means queued, not done. An error lands in the caller's own
+  // message element, which carries role="alert", never in the page-wide status line.
+  function ask(body, key, msg, btns) {
+    ctlBusy[key] = true;
+    btns.forEach(function (b) { b.disabled = true; });
+    if (msg) msg.textContent = '';
+    body.requestId = reqId();
+    function release() {
+      delete ctlBusy[key];
+      btns.forEach(function (b) { if (b.isConnected) b.disabled = false; });
+    }
+    return call('POST', '/api/sessions/command', body).then(function (v) {
+      release(); trackAsk(v);
+      // After the caller's own then() has closed its dialog, so the reload is not skipped by the
+      // open-dialog guard in renderHosts.
+      setTimeout(function () { loadHosts().catch(function () {}); }, 0);
+      return v;
+    }, function (e) {
+      release();
+      if (msg) msg.textContent = e.message; else say(e.message);
+      throw e;
+    });
+  }
+
+  // The confirm step for an ask that reaches more than one session: it states the count and that
+  // nothing is killed. A native <dialog>, so Esc cancels, Tab stays inside and focus returns.
+  function askConfirm(title, body, note, go) {
+    $('#ctl-confirm-h').textContent = title;
+    $('#ctl-confirm-body').textContent = body;
+    $('#ctl-confirm-note').textContent = note;
+    $('#ctl-confirm-msg').textContent = '';
+    confirmAsk = go;
+    openModal('#ctl-confirm');
+    var b = $('#ctl-confirm-go'); b.disabled = false; b.focus();
+  }
+  $('#ctl-confirm-go').addEventListener('click', function () {
+    var go = confirmAsk, b = $('#ctl-confirm-go');
+    if (!go) return;
+    go($('#ctl-confirm-msg'), [b]).then(function () {
+      confirmAsk = null; $('#ctl-confirm').close();
+    }, function () {});
+  });
+
+  // --- Restart sessions: the ask that NAMES its targets, and kills nothing ------------------
+  // The decision recorded in docs/runbooks/session-control.md is copy-only: no code in this
+  // program, on the server or on a host, stops a session, so there is no confirm token and
+  // nothing for one to unlock. What this flow owes the operator instead is the full list of
+  // sessions the ask would reach, by name, with each one's exact relaunch command to copy. The
+  // hub refuses restart_sessions without confirm:true at EVERY scope, so this dialog is the
+  // confirm the wire insists on and not a courtesy.
+  var restartAsk = null;
+  // Sessions marked restarted in THIS BROWSER only. It is a note, never a claim: the hub forgets
+  // a session's needs-reload flag when the session ends, and nothing here may assert that for it.
+  var restartedLocal = {};
+  // NOT sessKey: that name is already taken by the per-host disclosure preference above, and a
+  // second declaration of it in this scope silently replaced it, so every host card threw.
+  // The pid is in the key as well as the id, because a session can report an empty id and two of
+  // those on one host would otherwise share a mark (the hub keys its own buckets the same way).
+  function restartKey(h, s) { return h.hostId + '|' + s.pid + ':' + (s.id || ''); }
+  function restartMarked(h, s) { return !!restartedLocal[restartKey(h, s)]; }
+
+  // restartTargets collects what one restart ask would reach, in the order the page shows them.
+  // stale:true is the estate-wide ask (every host, needs-reload only); a hostId is one host.
+  function restartTargets(opts) {
+    var out = [];
+    hostsCache.forEach(function (h) {
+      if (opts.hostId && h.hostId !== opts.hostId) return;
+      // An offline host is NOT skipped. Its stale sessions still count in the callout above, and
+      // a dialog that quietly listed fewer sessions than the callout counts would put two numbers
+      // on one screen that disagree. The row says the host is offline instead, and the ask itself
+      // comes back agent-offline for those targets, which is the honest answer.
+      (h.sessions || []).forEach(function (s) {
+        if (opts.stale && !s.needsReload) return;
+        if (opts.stale && restartMarked(h, s)) return;
+        out.push({ host: h, sess: s });
+      });
+    });
+    return out;
+  }
+
+  function openRestartDialog(title, opts) {
+    var targets = restartTargets(opts);
+    restartAsk = { opts: opts, targets: targets };
+    $('#ctl-restart-h').textContent = title;
+    var n = targets.length;
+    $('#ctl-restart-sub').textContent = n
+      ? 'These ' + (n === 1 ? 'session is' : n + ' sessions are') + ' named below. Run each command yourself to restart that session.'
+      : 'No session matches this ask, so there is nothing to restart.';
+    var list = $('#ctl-restart-list');
+    list.textContent = '';
+    if (!n) {
+      var none = el('li'); none.appendChild(el('span', 'Nothing to list.', 'sub'));
+      list.appendChild(none);
+    }
+    targets.forEach(function (t) {
+      var li = el('li'), named = !!t.sess.name;
+      li.appendChild(el('span', named ? t.sess.name : 'Unnamed session', 'who' + (named ? '' : ' nameless')));
+      li.appendChild(el('span', t.host.name + ' · pid ' + t.sess.pid +
+        (t.sess.needsReload ? ' · on the old login' : '') +
+        (t.host.online ? '' : ' · host offline, so the ask will not reach it'), 'sub'));
+      // The command is known up front only for a session a swap left stale and whose id can be
+      // resumed; otherwise the ask is what brings it back, which is what the row says.
+      if (t.sess.restartCommand) {
+        li.appendChild(copyLine('Restart with', t.sess.restartCommand,
+          'Copy the relaunch command for ' + (named ? t.sess.name : 'pid ' + t.sess.pid)));
+      } else {
+        li.appendChild(el('span', 'Ask to get this session’s exact command.', 'sub'));
+      }
+      if (restartMarked(t.host, t.sess)) li.appendChild(el('span', 'Marked as restarted in this browser.', 'marked'));
+      list.appendChild(li);
+    });
+    $('#ctl-restart-msg').textContent = '';
+    var go = $('#ctl-restart-go'), mark = $('#ctl-restart-mark');
+    go.disabled = !n; mark.disabled = !n;
+    openModal('#ctl-restart');
+    (n ? go : $('#ctl-restart-mark')).focus();
+  }
+
+  // markRestartedLocally records the operator's own note and nothing else: no request is sent,
+  // no server state changes, and the session keeps being listed until it really ends. Saying so
+  // on the control is the whole point - a silent dismissal would read as a restart.
+  function markRestartedLocally(targets) {
+    targets.forEach(function (t) { restartedLocal[restartKey(t.host, t.sess)] = true; });
+    renderRepair(); renderHosts();
+  }
+  $('#ctl-restart-mark').addEventListener('click', function () {
+    if (!restartAsk) return;
+    markRestartedLocally(restartAsk.targets);
+    restartAsk = null; $('#ctl-restart').close();
+    say('Marked as restarted in this browser only. Each session stays listed until it ends.');
+  });
+  $('#ctl-restart-go').addEventListener('click', function () {
+    var a = restartAsk, b = $('#ctl-restart-go');
+    if (!a) return;
+    var body = { command: 'restart_sessions', confirm: true };
+    if (a.opts.hostId) { body.scope = 'host'; body.host = a.opts.hostId; }
+    else { body.scope = 'all'; body.onlyNeedsReload = true; }
+    ask(body, 'restart/' + (a.opts.hostId || 'all'), $('#ctl-restart-msg'), [b])
+      .then(function () { restartAsk = null; $('#ctl-restart').close(); }, function () {});
+  });
+
+  // Fix name. The field is prefilled with the name the session carries now, and the limit is
+  // checked here as well as by maxlength, which counts UTF-16 units rather than runes. 256 is
+  // the field's cap; proto.CleanRemoteName shortens anything past 200 runes when it is applied,
+  // which the hint says rather than losing the tail silently.
+  var MAX_NAME = 256;
+  function openNameDialog(h, s) {
+    nameAsk = { host: h.hostId, session: s.id };
+    $('#ctl-name-for').textContent = 'Session ' + (s.name || ('pid ' + s.pid)) + ' on ' + h.name;
+    var inp = $('#ctl-name-input');
+    inp.value = s.remoteName || s.name || '';
+    $('#ctl-name-msg').textContent = '';
+    $('#ctl-name-go').disabled = false;
+    openModal('#ctl-name');
+    inp.focus(); inp.select();
+  }
+  $('#ctl-name-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var inp = $('#ctl-name-input'), msg = $('#ctl-name-msg'), go = $('#ctl-name-go');
+    var name = inp.value.trim(), n = runeLen(name);
+    if (!n) { msg.textContent = 'Type the name this session should carry.'; inp.focus(); return; }
+    if (n > MAX_NAME) {
+      msg.textContent = 'That name is ' + n + ' characters long; the limit is ' + MAX_NAME + '.';
+      inp.focus(); return;
+    }
+    if (!nameAsk) return;
+    ask({ command: 'rename_remote', scope: 'session', host: nameAsk.host, session: nameAsk.session, name: name },
+      'name/' + nameAsk.host + '/' + nameAsk.session, msg, [go])
+      .then(function () { nameAsk = null; $('#ctl-name').close(); }, function () {});
+  });
+
+  // commandList renders one session's verdicts: a chip whose word carries the state, so colour
+  // only repeats it; the honest sentence for that state; and the relaunch command with a Copy
+  // button when the hint is one. Code, mechanism and hint all arrive from the agent, so each
+  // goes in as text.
+  function commandList(cmds) {
+    var box = el('div', undefined, 'cmds');
+    cmds.forEach(function (c) {
+      var st = stOf(c.status, c.code), label = CMD_LABEL[c.command] || c.command;
+      var row = el('div', undefined, 'cmd');
+      row.appendChild(chip(label + ': ' + st.word, st.kind, st.g));
+      if (st.say) row.appendChild(el('span', st.say, 'say'));
+      box.appendChild(row);
+      if (c.hint) {
+        box.appendChild(/^claude /.test(c.hint)
+          ? copyLine('Relaunch with', c.hint, 'Copy the relaunch command for ' + label)
+          : el('div', c.hint, 'say'));
+      }
+    });
+    return box;
+  }
+
+  // The three per-session asks. Each button names its own session, because one page shows many.
+  function sessionControls(h, s) {
+    var box = el('div', undefined, 'sctl'), btns = [];
+    var msg = el('div', '', 'msg'); msg.setAttribute('role', 'alert');
+    var who = s.name || ('pid ' + s.pid), base = h.hostId + '/' + s.id + '/';
+    function mk(text, aria, go) {
+      var b = el('button', text, 'btn sm'); b.type = 'button';
+      b.setAttribute('aria-label', aria);
+      b.addEventListener('click', go);
+      btns.push(b); box.appendChild(b);
+    }
+    mk('Reload plugins', 'Reload plugins in session ' + who, function () {
+      ask({ command: 'reload_plugins', scope: 'session', host: h.hostId, session: s.id },
+        base + 'reload_plugins', msg, btns).catch(function () {});
+    });
+    mk('Enable remote', 'Enable remote control in session ' + who, function () {
+      ask({ command: 'remote_control_enable', scope: 'session', host: h.hostId, session: s.id },
+        base + 'remote_control_enable', msg, btns).catch(function () {});
+    });
+    mk('Fix name', 'Fix the remote name of session ' + who, function () { openNameDialog(h, s); });
+    if (!h.online) {
+      btns.forEach(function (b) { b.disabled = true; });
+      box.appendChild(el('span', 'The host is offline, so nothing can be asked of it.', 'why'));
+    }
+    box.appendChild(msg);
+    return box;
+  }
+
+  // Host-wide asks. Both need confirm:true on the wire, so the dialog is the confirm step the
+  // hub insists on and not a courtesy: it states the count and that no session is killed.
+  function hostControls(h) {
+    var box = el('div', undefined, 'ctl'), n = h.sessions.length, btns = [];
+    box.appendChild(el('div', 'Every session on this host', 'ctl-h'));
+    var msg = el('div', '', 'msg'); msg.setAttribute('role', 'alert');
+    function mk(text, title, question, caveat, cmd) {
+      var b = el('button', text, 'btn sm'); b.type = 'button';
+      b.disabled = !h.online || !n;
+      b.addEventListener('click', function () {
+        askConfirm(title + ' on ' + h.name, question,
+          'This asks ' + n + (n === 1 ? ' session' : ' sessions') + ' on ' + h.name + '. ' + caveat +
+          ' No session is stopped, killed or restarted.',
+          function (dmsg, dbtns) {
+            return ask({ command: cmd, scope: 'host', host: h.hostId, confirm: true },
+              h.hostId + '/host/' + cmd, dmsg, dbtns);
+          });
+      });
+      btns.push(b); box.appendChild(b);
+    }
+    mk('Reload all', 'Reload plugins',
+      'Ask every session on ' + h.name + ' to reload its plugins?',
+      'Each runs it at its next prompt, if it runs it at all.', 'reload_plugins');
+    mk('Enable remote on all', 'Enable remote control',
+      'Ask every session on ' + h.name + ' to bind remote control?',
+      'Remote control cannot be bound on a running session, so each answers with the restart that would.',
+      'remote_control_enable');
+    // Restart goes to its own dialog, not the shared confirm: this is the one ask that has to
+    // name the sessions, which a one-line count cannot do.
+    var rb = el('button', 'Restart sessions', 'btn sm'); rb.type = 'button';
+    rb.disabled = !h.online || !n;
+    rb.setAttribute('aria-label', 'Restart sessions on ' + h.name);
+    rb.addEventListener('click', function () {
+      openRestartDialog('Restart sessions on ' + h.name, { hostId: h.hostId });
+    });
+    btns.push(rb); box.appendChild(rb);
+    if (!h.online) box.appendChild(el('span', 'The host is offline.', 'why'));
+    else if (!n) box.appendChild(el('span', 'No sessions are reported here.', 'why'));
+    box.appendChild(msg);
+    return box;
+  }
+
+  // The estate-wide repair: repair with onlyNeedsReload, the ask that fits what a swap leaves
+  // behind. The bar shows only while there is something for it to do.
+  // A session the operator has marked restarted here is left out of the callout's count, which is
+  // what the note is for. It is still in the host card and still carries the hub's own Needs
+  // reload chip, so the local note hides a nag and never a fact.
+  function staleSessions() {
+    var sess = 0, hosts = 0;
+    hostsCache.forEach(function (h) {
+      var n = (h.sessions || []).filter(function (s) { return s.needsReload && !restartMarked(h, s); }).length;
+      if (n) { sess += n; hosts++; }
+    });
+    return { sessions: sess, hosts: hosts };
+  }
+  function renderRepair() {
+    var c = staleSessions();
+    $('#ctl-repair').hidden = !c.sessions;
+    $('#st-attn-go').hidden = !c.sessions;
+    if (!c.sessions) return;
+    $('#ctl-repair-sub').textContent = c.sessions + (c.sessions === 1 ? ' session on ' : ' sessions on ') +
+      c.hosts + (c.hosts === 1 ? ' host still ' : ' hosts still ') +
+      (c.sessions === 1 ? 'carries' : 'carry') + ' the login from before the swap.';
+  }
+  // The callout lives in the Hosts tab; this sidebar button is visible from either tab.
+  $('#st-attn-go').addEventListener('click', function () {
+    selectTab($('#tab-hosts'), false);
+    var c = $('#ctl-repair');
+    c.scrollIntoView({ block: 'center' });
+    c.focus();
+  });
+  $('#ctl-repair-go').addEventListener('click', function () {
+    var n = staleSessions().sessions;
+    askConfirm('Apply to all needs-reload sessions',
+      'Ask every session that is still on an old login to repair itself?',
+      'This reaches ' + n + (n === 1 ? ' session' : ' sessions') + ' across every connected host. Each is ' +
+      'asked to reload its plugins and to take back its own name, and answers with what it would ' +
+      'take to bind remote control. No session is stopped, killed or restarted.',
+      function (dmsg, dbtns) {
+        return ask({ command: 'repair', scope: 'all', onlyNeedsReload: true, confirm: true },
+          'all/repair', dmsg, dbtns);
+      });
+  });
+  $('#ctl-restart-all').addEventListener('click', function () {
+    openRestartDialog('Restart every session on an old login', { stale: true });
+  });
+
+  // The verdict of the last Swap press, per host, kept out of the DOM on purpose: renderHosts
+  // replaces the whole card, so anything appended to the row would be discarded, and a no-op swap
+  // leaves every field of /api/hosts identical, so changed() short-circuits the rebuild entirely.
+  // hostCard reads this map on every pass instead, and setSwap forces the one paint that needs it.
+  var swapState = {}, toastTimers = {};
+  // A host id comes from the hub, so it is matched by reading dataset.host rather than built into
+  // an attribute selector that an odd id could break.
+  function hostCardEl(hostId) {
+    var cards = document.querySelectorAll('#hosts article.card');
+    for (var i = 0; i < cards.length; i++) { if (cards[i].dataset.host === hostId) return cards[i]; }
+    return null;
+  }
+  // setSwap records the verdict and forces the one paint renderHosts would otherwise skip.
+  //
+  // The rebuild it asks for replaces the card, and with it the button the press came from: the
+  // "Confirm swap" button still holds focus here, so without putting focus back a keyboard user is
+  // dropped on <body> at the top of the page on every swap. renderHosts documents that invariant
+  // for the session controls; this honours it for the swap row.
+  //
+  // renderHosts still defers to an in-flight session ask, which no force overrides. That costs
+  // nothing: the verdict lives in swapState, so the next rebuild renders it, and the toast and the
+  // live region have already carried it.
+  function setSwap(hostId, st) {
+    swapState[hostId] = st;
+    var before = hostCardEl(hostId);
+    var held = !!(before && before.contains(document.activeElement));
+    renderHosts(true);
+    if (!held) return;
+    var card = hostCardEl(hostId);
+    if (!card) return;
+    var go = [].filter.call(card.querySelectorAll('.swap button'), function (b) { return b.textContent === 'Swap'; })[0];
+    if (go && !go.disabled) { go.focus(); } else { card.focus(); }
+  }
+  function acctLabel(id) {
+    var a = accountsCache.filter(function (x) { return x.id === id; })[0];
+    return a ? a.label : id;
+  }
+  // The hub prefixes its own errors with "hub: " so the server log says who wrote them. That is a
+  // name for us, not for the operator reading a card, so it comes off on the way to the screen.
+  // The reason itself is kept word for word; the hub has already redacted it.
+  function plainErr(m) { return String(m || '').replace(/^hub:\s*/, ''); }
+
+  // swapWhyNot returns why this host cannot be swapped right now, or '' when it can. The text is
+  // shown beside the disabled button and read out with it, so it says what to do next, not just
+  // that the button is off. other is the first account the host does not already hold.
+  function swapWhyNot(h, other) {
+    if (!accountsCache.length) return 'No accounts are stored yet. Add or import one first.';
+    if (!h.online) return 'This host is offline, so no login can be written to it.';
+    if (h.swapBlocked) return 'An unfinished earlier swap on this host blocks every new one.';
+    // activeAccount is empty both when the host reports no login and when its login matches no
+    // stored account. Import is the answer to both, and it is what the hub's own refusal says.
+    if (!h.activeAccount && h.identityReason) return identityWhy(h.identityReason).why;
+    if (!h.activeAccount) return 'This host has no stored account signed in, so there is no login to swap away. Import its live login first.';
+    if (!other) return 'The only stored account is the one this host already holds.';
+    return '';
+  }
+
+  // notify repeats a verdict as a toast and speaks it through the matching live region. Errors go
+  // to the assertive one, everything else to the polite one. A second verdict for the same host
+  // replaces the first rather than stacking, and the dismissal is a timer, not a transition event,
+  // so an interrupted animation can never leave a toast on screen for good.
+  function notify(hostName, st) {
+    (st.kind === 'bad' ? $('#swap-alert') : $('#swap-live')).textContent = hostName + ': ' + st.text;
+    var box = $('#toasts');
+    if (!box) return;
+    var key = 'h' + hostName;
+    if (toastTimers[key]) { clearTimeout(toastTimers[key].t); toastTimers[key].n.remove(); }
+    var n = el('div', undefined, 'toast' + (st.kind === 'bad' ? ' bad' : st.kind === 'ok' ? ' ok' : ''));
+    n.appendChild(el('div', hostName, 'who'));
+    n.appendChild(el('div', st.text));
+    box.appendChild(n);
+    toastTimers[key] = { n: n, t: setTimeout(function () { n.remove(); delete toastTimers[key]; }, st.kind === 'bad' ? 9000 : 5000) };
+  }
+
+  // sessionItem renders one session: its name heading first, then pid and cwd, then the
+  // restart command, then its command verdicts and the controls that ask for more. Every value
+  // goes in through el()/textContent, never innerHTML, because a name, a cwd and a status all
+  // arrive from the agent.
+  function sessionItem(h, s) {
+    var li = el('li');
+    var head = el('div', undefined, 'srow');
+    var named = !!s.name;
+    // A truncated name must still be readable in full, and the title is also what a
+    // screen-reader user hears when the text is clipped.
+    var heading = titled(el('span', named ? s.name : 'pid ' + s.pid, 'sname trunc' + (named ? '' : ' nameless')),
+      named ? s.name : '');
+    head.appendChild(heading);
+    if (s.status) {
+      var st = chip(String(s.status).slice(0, STATUS_CAP));
+      // "busy" on its own does not say what it describes, and the other chips do. The label
+      // is hidden text rather than aria-label: a span carries no role, and aria-label on a
+      // role-less element is not reliably exposed.
+      st.insertBefore(el('span', 'Status: ', 'sr'), st.firstChild);
+      head.appendChild(st);
+    }
+    if (s.remoteControl) head.appendChild(chip('Remote control', undefined, 'info'));
+    if (s.needsReload) head.appendChild(chip('Needs reload', 'warn', 'warn'));
+    li.appendChild(head);
+
+    // pid and cwd are secondary: the pid only repeats here when the name heads the row.
+    var meta = el('div', undefined, 'smeta');
+    if (named) meta.appendChild(el('span', 'pid ' + s.pid));
+    if (s.cwd) meta.appendChild(titled(el('span', shortCwd(s.cwd), 'scwd trunc'), s.cwd));
+    // A remote-control name is a separate field from the session's own name. Claude Code
+    // writes none today, so this line normally does not appear. It is a name, not a path, so
+    // it keeps the body font and only takes the shared truncation.
+    if (s.remoteName) meta.appendChild(titled(el('span', 'remote: ' + s.remoteName, 'trunc'), s.remoteName));
+    if (meta.childNodes.length) li.appendChild(meta);
+
+    // Nothing can reload a running session's login, so hand over the restart command.
+    if (s.restartCommand) li.appendChild(restartLine(s.restartCommand));
+    // The operator's own note, said plainly: it is local and it changed nothing on the host.
+    if (restartMarked(h, s)) {
+      li.appendChild(el('div', 'Marked as restarted in this browser only; it stays listed until the session ends.', 'marked'));
+    }
+    // commands is omitted, not empty, when a session has never been asked anything.
+    if (s.commands && s.commands.length) li.appendChild(commandList(s.commands));
+    li.appendChild(sessionControls(h, s));
+    return li;
+  }
+  function hostCard(h) {
+    var c = el('article', undefined, 'card'); c.dataset.host = h.hostId; c.tabIndex = -1;
+    var top = el('div', undefined, 'row between');
+    var t = el('div', undefined, 'col');
+    t.appendChild(titled(el('div', h.name, 'title trunc'), h.name));
+    // The run-as user belongs with the OS: both say what this host is, not what it is doing, so
+    // it goes on the same subtitle line rather than competing with the account and state row.
+    // Omitted when the agent has not reported one, so the line never reads 'runs as nothing'.
+    var os = h.runAs ? h.os + ' · agent runs as ' + h.runAs : h.os;
+    t.appendChild(titled(el('div', os, 'sub trunc'), os));
+    top.appendChild(t);
+    var state = el('span', undefined, 'row');
+    state.appendChild(el('span', undefined, 'dot' + (h.online ? '' : ' off')));
+    state.appendChild(el('span', h.online ? 'online' : 'offline', h.online ? 'ok' : 'mut'));
+    top.appendChild(state); c.appendChild(top);
+
+    // The tunnel is a SECOND indicator, never merged with the agent's. "Tunnel up, agent
+    // offline" is the diagnostic case: the tunnel being up means its ssh child is alive, not
+    // that the agent has dialled through it yet. A host with no tunnel shows nothing here.
+    if (h.tunnel) {
+      var tl = el('div', undefined, 'row wrap');
+      tl.appendChild(el('span', 'Tunnel', 'mut'));
+      tl.appendChild(tunChip(h.tunnel));
+      if (h.tunnel.since) tl.appendChild(el('span', since(h.tunnel.since), 'mut'));
+      if (h.tunnel.restarts1h) tl.appendChild(el('span', h.tunnel.restarts1h + ' restarts this hour', 'mut'));
+      if (h.tunnel.shortFingerprint) tl.appendChild(el('span', 'key ' + h.tunnel.shortFingerprint, 'mut'));
+      c.appendChild(tl);
+      if (h.tunnel.reason) {
+        c.appendChild(el('div', (h.tunnel.detail || h.tunnel.reason) + ' (' + h.tunnel.reason + ')',
+          'tun-why' + (h.tunnel.state === 'failed' ? ' bad' : '')));
+      }
+    }
+
+    var act = (accountsCache.filter(function (a) { return a.id === h.activeAccount; })[0] || {}).label;
+    var line = el('div', undefined, 'row wrap');
+    line.appendChild(el('span', 'Active account', 'mut'));
+    line.appendChild(el('strong', h.activeAccount ? (act || '?') : '-'));
+    if (h.needsReload) line.appendChild(chip('Needs reload', 'warn', 'warn'));
+    if (h.swapBlocked) line.appendChild(chip('Swaps blocked', 'bad', 'bad'));
+    c.appendChild(line);
+    // A dash on its own is not an answer: when the host names no account, say why and what fixes it.
+    if (!h.activeAccount && h.identityReason) c.appendChild(identityNote(h));
+
+    // Sessions collapse, but a restart command must never start out hidden: a host with a stale
+    // session opens by default, and the closed summary still says how many need one. With no
+    // sessions there is nothing to disclose, so the count is a plain line rather than a dead
+    // control.
+    var stale = h.sessions.filter(function (s) { return s.needsReload; }).length;
+    var label = h.sessions.length + (h.sessions.length === 1 ? ' session' : ' sessions');
+    // A command verdict is as much a reason to open the disclosure as a stale login is, and the
+    // closed summary still carries the tally, so a state is never hidden behind a shut control.
+    var cst = {}, cmdTotal = 0;
+    h.sessions.forEach(function (s) {
+      (s.commands || []).forEach(function (x) { cst[x.status] = (cst[x.status] || 0) + 1; cmdTotal++; });
+    });
+    if (!h.sessions.length) {
+      c.appendChild(el('div', label, 'mut sub'));
+    } else {
+      var d = el('details', undefined, 'sess'), dflt = stale > 0 || cmdTotal > 0;
+      d.open = !!pref(sessKey(h), dflt);
+      // An open session list is what makes a host card tall, so the card is lifted onto a row of
+      // its own while it is open. Without it one open card sized the whole grid row and left its
+      // collapsed neighbours stranded beside ~1200px of empty grid at 1440. The class is set here
+      // rather than left to :has(), so the span is decided by the same state the preference is.
+      c.classList.toggle('wide', d.open);
+      d.addEventListener('toggle', function () {
+        c.classList.toggle('wide', d.open);
+        if (d.open !== !!pref(sessKey(h), dflt)) { prefs[sessKey(h)] = d.open; savePrefs(); }
+      });
+      var sm = el('summary');
+      sm.appendChild(el('span', label));
+      if (stale) sm.appendChild(chip(stale === 1 ? '1 needs reload' : stale + ' need reload', 'warn', 'warn'));
+      // Only what the operator must act on gets a chip of its own; everything else collapses to
+      // one neutral tally, or a shut disclosure wears seven chips and says nothing.
+      if (cst.failed) sm.appendChild(chip(cst.failed + ' failed', 'bad', 'bad'));
+      if (cst.unsupported) sm.appendChild(chip(cst.unsupported + ' unsupported', 'warn', 'warn'));
+      var sent = (cst.queued || 0) + (cst.delivered || 0) + (cst.done || 0);
+      if (sent) sm.appendChild(chip(sent + (sent === 1 ? ' ask sent' : ' asks sent'), '', 'info'));
+      d.appendChild(sm);
+      var ul = el('ul');
+      h.sessions.forEach(function (s) { ul.appendChild(sessionItem(h, s)); });
+      d.appendChild(ul);
+      c.appendChild(d);
+    }
+    c.appendChild(hostControls(h));
+
+    c.appendChild(swapRow(h));
+    return c;
+  }
+
+  // swapRow is the select, the Swap and Revoke buttons, the reason the Swap button is off, and the
+  // verdict of the last press on this host. Every press leaves something visible here: before this
+  // row existed a successful swap and a no-op both painted nothing, because the success path only
+  // called refresh() and a no-op changes no host data, so the card was never even rebuilt.
+  function swapRow(h) {
+    var sw = el('div', undefined, 'swap');
+    var pick = el('select'); pick.setAttribute('aria-label', 'Account for ' + h.name);
+    // The account the host already holds is marked rather than hidden: the operator can still see
+    // where the host is. It is never the open selection, so the default press always changes
+    // something.
+    accountsCache.forEach(function (a) {
+      var o = el('option', a.id === h.activeAccount ? a.label + ' (current)' : a.label);
+      o.value = a.id; pick.appendChild(o);
+    });
+    var other = accountsCache.filter(function (a) { return a.id !== h.activeAccount; })[0];
+    if (other) pick.value = other.id;
+
+    var why = swapWhyNot(h, other);
+    var go = el('button', 'Swap', 'btn primary'); go.type = 'button'; go.disabled = !!why;
+    var rv = el('button', 'Revoke', 'btn danger'); rv.type = 'button';
+    var reason = el('div', why, 'why');
+    if (why) {
+      // The reason is readable text, and tied to the button so a screen reader hears it with the
+      // button's own name rather than only "Swap, dimmed".
+      reason.id = 'swapwhy-' + h.hostId;
+      go.setAttribute('aria-describedby', reason.id);
+      pick.disabled = !accountsCache.length;
+    }
+    var st = swapState[h.hostId];
+    var verdict = el('div', undefined, 'swapmsg' + (st ? ' ' + st.kind + (st.working ? ' work' : '') : ''));
+    if (st) { verdict.appendChild(el('span', undefined, 'dot')); verdict.appendChild(el('span', st.text)); }
+    // A swap already in flight owns this host until it answers: a second press would race the
+    // first for the same credential file.
+    if (st && st.working) { go.disabled = true; rv.disabled = true; pick.disabled = true; sw.setAttribute('aria-busy', 'true'); }
+
+    function idle() {
+      confirming = null; sw.textContent = '';
+      sw.appendChild(pick); sw.appendChild(go); sw.appendChild(rv);
+      if (why) sw.appendChild(reason);
+      sw.appendChild(verdict);
+    }
+    go.addEventListener('click', function () {
+      // The account's own label, not the option's text: the option carries a " (current)" suffix
+      // that must never end up inside a sentence about it.
+      var label = acctLabel(pick.value);
+      confirming = h.hostId; sw.textContent = '';
+      var box = el('div', undefined, 'confirm');
+      box.appendChild(el('div', 'Swap ' + h.name + ' to ' + label + '?', 'q'));
+      var yes = el('button', 'Confirm swap', 'btn primary'); yes.type = 'button';
+      var no = el('button', 'Cancel', 'btn'); no.type = 'button';
+      no.addEventListener('click', function () { idle(); go.focus(); });
+      box.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') { no.click(); } });
+      yes.addEventListener('click', function () {
+        yes.disabled = true; say('');
+        // confirming is dropped here, before the repaint: the question has been answered, and
+        // renderHosts refuses to rebuild while an open confirm is still on the card, which would
+        // swallow the in-flight state. The in-flight paint goes out before the request, and the
+        // card is rebuilt from swapState, so the operator never watches a dead button.
+        confirming = null;
+        setSwap(h.hostId, { kind: 'info', working: true, text: 'Swapping to ' + label + '...' });
+        call('POST', '/api/swap', { host: h.hostId, account: pick.value })
+          .then(function (j) {
+            confirming = null;
+            var done = (j && j.outcome) === 'already-active'
+              ? { kind: 'info', text: 'No change: ' + h.name + ' already holds ' + label + '.' }
+              : { kind: 'ok', text: 'Swapped ' + h.name + ' to ' + label + '.' };
+            // refresh() first, so the rebuild that follows carries both the new host data and the
+            // verdict; setSwap then forces the paint a no-op would otherwise never trigger.
+            return refresh().then(function () { setSwap(h.hostId, done); notify(h.name, done); });
+          })
+          .catch(function (e) {
+            var bad = { kind: 'bad', text: plainErr(e.message) };
+            confirming = null; setSwap(h.hostId, bad); notify(h.name, bad);
+          });
+      });
+      box.appendChild(yes); box.appendChild(no); sw.appendChild(box); yes.focus();
+    });
+    rv.addEventListener('click', function () {
+      if (!confirm('Revoke ' + h.name + '?')) return;
+      call('POST', '/api/hosts/' + encodeURIComponent(h.hostId) + '/revoke').then(refresh).catch(function (e) { say(e.message); });
+    });
+    idle();
+    return sw;
+  }
+
+  function renderHosts(force) {
+    var list = hostsCache;
+    var narrowed = hostFilter.mode !== 'all' || hostFilter.q;
+    $('#host-count').textContent = list.length && narrowed ? 'Showing ' + list.filter(hostMatches).length + ' of ' + list.length : '';
+    renderRepair(); renderAskSummary();
+    if (confirming && $('#hosts .confirm')) return; // keep an open confirm
+    // A rebuild would replace the button a request is in flight from, and orphan the opener an
+    // open dialog returns focus to. Both wait; the fast poll picks the verdicts up straight after.
+    if (ctlWorking() || ctlDialogOpen()) return;
+    if (!force && !changed('host', [list, accountsCache, hostFilter]) && !$('#hosts .empty')) return;
+    sig.host = JSON.stringify([list, accountsCache, hostFilter]);
+    var box = $('#hosts'); box.textContent = '';
+    if (!list.length) {
+      box.appendChild(el('p', 'No hosts enrolled. Generate an enrolment code and run the agent on a machine.', 'empty'));
+      return;
+    }
+    var shown = list.filter(hostMatches);
+    if (!shown.length) box.appendChild(el('p', 'No hosts match this filter.', 'empty'));
+    shown.forEach(function (h) { box.appendChild(hostCard(h)); });
+  }
+
+  function loadHosts() {
+    return call('GET', '/api/hosts').then(function (list) {
+      hostsCache = list;
+      ['#import-host', '#add-host'].forEach(function (id) {
+        var sel = $(id), keep = sel.value; sel.textContent = '';
+        list.forEach(function (h) { var o = el('option', h.name); o.value = h.hostId; sel.appendChild(o); });
+        if (keep) sel.value = keep;
+      });
+      renderStats(); renderHostFilters(); renderHosts(false);
+    });
+  }
+
+  function renderPending(list) {
+    pendingCount = list.length; renderStats();
+    if (!changed('pend', list)) return;
+    var box = $('#pending-list'); box.textContent = '';
+    if (!list.length) { box.appendChild(el('p', 'No pending connections.', 'none')); return; }
+    box.appendChild(el('p', 'Match this code with the one the agent printed before you click Allow'));
+    list.forEach(function (p) {
+      var d = el('div', undefined, 'pend'); d.dataset.fp = p.fingerprint;
+      d.appendChild(el('div', p.fingerprint, 'fp'));
+      d.appendChild(el('div', p.hostName + ' · ' + p.os + ' · ' + p.sourceIp));
+      d.appendChild(el('div', 'since ' + new Date(p.since).toLocaleString() + ' · expires ' + new Date(p.expires).toLocaleString(), 'mut'));
+      var acts = el('div', undefined, 'actions');
+      ['allow', 'deny'].forEach(function (act) {
+        var b = el('button', act === 'allow' ? 'Allow' : 'Deny', act === 'deny' ? 'btn danger' : 'btn primary'); b.type = 'button';
+        b.addEventListener('click', function () {
+          b.disabled = true; say('');
+          call('POST', '/api/pending/' + encodeURIComponent(p.fingerprint) + '/' + act).then(refresh).catch(function (e) { say(e.message); sig.pend = null; loadPending(); });
+        });
+        acts.appendChild(b);
+      });
+      d.appendChild(acts); box.appendChild(d);
+    });
+  }
+  function loadPending() { return call('GET', '/api/pending').then(renderPending).catch(function (e) { say(e.message); }); }
+
+  function refresh() {
+    return loadAccounts().then(loadHosts).then(loadPending).catch(function (e) { say(e.message); });
+  }
+
+  $('#acc-expand-all').addEventListener('click', function () { setAllOpen(true); });
+  $('#acc-collapse-all').addEventListener('click', function () { setAllOpen(false); });
+  // The Remove dialog's own button is the deliberate click; closing the dialog any other way
+  // (Cancel, the x, Esc, the backdrop) removes nothing and lets the poll resume.
+  $('#acct-rm-go').addEventListener('click', doRemove);
+  $('#acct-rm-dialog').addEventListener('close', function () { removing = null; });
+  $('#acc-refresh-all').addEventListener('click', function () { refreshUsage(''); });
+
+  $('#acc-q').addEventListener('input', function (ev) { filter.q = ev.target.value.trim(); renderAccounts(true); });
+  $('#host-q').addEventListener('input', function (ev) { hostFilter.q = ev.target.value.trim(); renderHosts(true); });
+
+  $('#import-form').addEventListener('submit', function (ev) {
+    ev.preventDefault(); say('');
+    call('POST', '/api/import', { host: $('#import-host').value, label: ev.target.label.value })
+      .then(function () { ev.target.label.value = ''; return refresh(); }).catch(function (e) { say(e.message); });
+  });
+  // Add account. The sign-in URL and the code live only in the DOM and in memory: never in
+  // storage, the address bar or the title. The link is shown only while the hub says awaiting_code.
+  // add.target is the account a "Sign in again" job replaces; null for a new account.
+  var add = { id: null, timer: null, state: '', target: null };
+  var A = { form: $('#add-form'), start: $('#add-start'), flow: $('#add-flow'), msg: $('#add-msg'), link: $('#add-link'), warn: $('#add-warn'),
+            codeForm: $('#add-code-form'), code: $('#add-code'), send: $('#add-send'), cancel: $('#add-cancel'),
+            busy: $('#add-busy'), note: $('#mi-add-note') };
+  var LINK_OK = /^https:\/\/claude\.(com|ai)\//;
+  var ADD_LIVE = ['starting', 'awaiting_code', 'finishing'];
+  function addMsg(text, bad) { A.msg.textContent = text; A.msg.className = bad ? 'err' : ''; }
+  // A started sign-in survives the dialog closing, so the header and the menu item say it is
+  // running and lead back to it. The poll keeps going either way.
+  function addBusy() {
+    var live = !!add.id && ADD_LIVE.indexOf(add.state) >= 0;
+    A.busy.hidden = !live; A.note.hidden = !live;
+    var waiting = add.state === 'awaiting_code';
+    A.busy.querySelector('.txt').textContent = waiting ? 'Sign-in needs the code' : 'Sign-in running';
+    A.note.textContent = waiting ? 'needs code' : 'running';
+  }
+  // Replace mode turns the sign-in panel into "Sign in again" for one account: the import panel is
+  // hidden, the label is the account's own and read-only, and the host picks where the sign-in runs.
+  var ADD_SUB = $('#add-sub').textContent;
+  function addMode(a) {
+    add.target = a || null;
+    $('#import-panel').hidden = !!a;
+    $('#add-sec-h').textContent = a ? 'Sign in again' : 'Add a Claude account';
+    $('#add-h').textContent = a ? 'Replace the login stored for ' + a.label : 'Add account: sign in with Anthropic';
+    A.form.label.readOnly = !!a;
+    A.form.label.value = a ? a.label : '';
+    A.form.label.setAttribute('aria-label', a ? 'Account being replaced' : 'Label for the new account');
+    $('#add-sub').textContent = a
+      ? 'Sign in as the same Anthropic account. The sign-in is completed on Anthropic\'s own page and claude-swap only passes the link and the one-time code. A different account is refused and nothing is stored. No host is signed out or changed; the vault file it replaces is kept as vault.bin.bak.'
+      : ADD_SUB;
+  }
+  function addIdle() { // back to the start form; drops the link and any code
+    clearTimeout(add.timer); add.id = null; add.state = '';
+    A.warn.hidden = true; A.warn.textContent = '';
+    A.flow.hidden = true; A.link.hidden = true; A.link.removeAttribute('href'); A.codeForm.hidden = true;
+    A.code.value = ''; A.start.disabled = false; A.cancel.textContent = 'Cancel sign-in';
+    addBusy();
+  }
+  function addRender(j) {
+    var prev = add.state; add.state = j.state;
+    A.link.hidden = true; A.link.removeAttribute('href'); A.codeForm.hidden = true;
+    if (j.state === 'starting') { addMsg('Starting the sign-in on the host...'); }
+    else if (j.state === 'awaiting_code') {
+      if (j.url && LINK_OK.test(j.url)) { A.link.href = j.url; A.link.hidden = false; }
+      A.codeForm.hidden = false;
+      addMsg("Open the link, sign in on Anthropic's own page, then paste the code it shows.");
+      if (prev !== 'awaiting_code' && $('#add-dialog').open) A.code.focus();
+    } else if (j.state === 'finishing') { addMsg('Finishing the sign-in...'); }
+    else if (j.state === 'done') {
+      if (j.replace) {
+        addMsg('Signed in again as ' + (j.account ? j.account.label : 'the account') + '. The stored login is replaced and its usage is being checked now.');
+        if (j.warning) { A.warn.textContent = j.warning; A.warn.hidden = false; }
+      } else addMsg('Added ' + (j.account ? j.account.label : 'the account') + '. It is stored free; swap it onto a host to use it.');
+      A.cancel.textContent = 'Close'; refresh();
+    } else if (j.state === 'failed') { addMsg(j.error || 'The sign-in failed.', true); A.cancel.textContent = 'Close'; }
+    else if (j.state === 'cancelled') { addIdle(); return; }
+    addBusy();
+  }
+  function addPoll() {
+    if (!add.id) return;
+    call('GET', '/api/accounts/add/' + encodeURIComponent(add.id)).then(function (j) {
+      if (!add.id) return;
+      addRender(j);
+      if (['starting', 'awaiting_code', 'finishing'].indexOf(j.state) >= 0) add.timer = setTimeout(addPoll, 2000);
+    }).catch(function (e) { addMsg(e.message, true); A.cancel.textContent = 'Close'; add.state = 'failed'; addBusy(); });
+  }
+  A.form.addEventListener('submit', function (ev) {
+    ev.preventDefault(); say(''); A.start.disabled = true;
+    var body = add.target ? { host: $('#add-host').value, account: add.target.id } : { host: $('#add-host').value, label: A.form.label.value };
+    call('POST', '/api/accounts/add', body).then(function (r) {
+      add.id = r.id; add.state = 'starting'; if (!add.target) A.form.label.value = ''; A.flow.hidden = false;
+      addMsg('Starting the sign-in on the host...'); addBusy(); addPoll();
+    }).catch(function (e) { say(e.message); A.start.disabled = false; });
+  });
+  A.codeForm.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var code = A.code.value; A.code.value = ''; A.send.disabled = true;
+    call('POST', '/api/accounts/add/' + encodeURIComponent(add.id) + '/code', { code: code })
+      .then(function () { addMsg('Finishing the sign-in...'); A.codeForm.hidden = true; A.link.hidden = true; clearTimeout(add.timer); addPoll(); })
+      .catch(function (e) { addMsg(e.message, true); })
+      .then(function () { A.send.disabled = false; });
+  });
+  A.cancel.addEventListener('click', function () {
+    var id = add.id, finished = add.state === 'done' || add.state === 'failed';
+    addIdle();
+    if (id && !finished) call('POST', '/api/accounts/add/' + encodeURIComponent(id) + '/cancel').catch(function (e) { say(e.message); });
+  });
+
+  // The menu's three items. Add account reopens a running sign-in where it left off.
+  function openAdd() {
+    if (!add.id) addMode(null); // nothing running: the menu always opens the plain "add" dialog
+    openModal('#add-dialog');
+    if (add.state === 'awaiting_code') A.code.focus(); else if (add.target) $('#add-host').focus(); else $('#import-host').focus();
+  }
+  // "Sign in again" on an expired card. One sign-in runs at a time: when one is already running, the
+  // dialog reopens where it stands and says why.
+  function openResign(a) {
+    say('');
+    if (add.id && ADD_LIVE.indexOf(add.state) >= 0) { say('A sign-in is already running. Finish or cancel it first.'); openAdd(); return; }
+    addIdle(); addMode(a);
+    openModal('#add-dialog');
+    $('#add-host').focus();
+  }
+  $('#mi-add').addEventListener('click', openAdd);
+  A.busy.addEventListener('click', openAdd);
+  $('#mi-pw').addEventListener('click', function () {
+    openModal('#pw-dialog');
+    var msg = $('#pw-msg'); msg.textContent = ''; msg.className = '';
+    $('#pw-save').disabled = false; $('#pw-current').focus();
+  });
+  // Log out drops the server-side session and clears the cookie, so the reload lands on sign-in.
+  $('#mi-out').addEventListener('click', function () {
+    var b = $('#mi-out');
+    closeMenu(true); say(''); b.disabled = true;
+    call('POST', '/api/logout').then(function () { location.reload(); })
+      .catch(function (e) { b.disabled = false; say(e.message); });
+  });
+
+  // Change the admin password. Both values live only in the form fields; on success the server
+  // has dropped every session, so reload to land on the sign-in page.
+  $('#pw-form').addEventListener('submit', function (ev) {
+    ev.preventDefault(); say('');
+    var msg = $('#pw-msg'), save = $('#pw-save');
+    msg.textContent = ''; msg.className = ''; save.disabled = true;
+    call('POST', '/api/password', { current: $('#pw-current').value, new: $('#pw-new').value })
+      .then(function () {
+        $('#pw-current').value = ''; $('#pw-new').value = '';
+        msg.textContent = 'Password changed. Signing you out...';
+        setTimeout(function () { location.reload(); }, 1500);
+      })
+      .catch(function (e) {
+        msg.textContent = e.message; msg.className = 'err';
+        save.disabled = false; $('#pw-current').focus(); $('#pw-current').select();
+      });
+  });
+
+  $('#enrol').addEventListener('click', function () {
+    call('POST', '/api/enrol-code').then(function (r) {
+      var out = $('#enrol-out'); out.textContent = '';
+      out.appendChild(el('span', r.code, 'code'));
+      out.appendChild(document.createTextNode(' single use, expires ' + new Date(r.expires).toLocaleTimeString()));
+    }).catch(function (e) { say(e.message); });
+  });
+
+  // --- Tunnels ------------------------------------------------------------------------------
+  //
+  // The reverse SSH tunnel to each Linux host. The whole block is inert unless the server runs
+  // with --tunnels, in which case the panel is not in the page at all.
+  //
+  // Two things here are deliberate and easy to undo by accident:
+  //
+  //   * The state word is always written out beside the tint. A tint alone is not a state.
+  //   * Nothing claims a revoke took effect on the host. This server can delete its own key and
+  //     nothing more, so a revoked tunnel keeps offering the line that removes it and keeps
+  //     saying that the line is probably still there.
+  var tunnelsOn = !!$('#panel-tunnels');
+  var tunnelsCache = [], tunBusy = false, tunConfirm = null;
+
+  // The vocabulary of the tunnel state machine. kind is the chip tint, word is what it says.
+  var TUN_STATE = {
+    up: { word: 'up', kind: 'ok', g: 'ok' },
+    connecting: { word: 'connecting', kind: '', g: 'info' },
+    down: { word: 'retrying', kind: 'warn', g: 'warn' },
+    failed: { word: 'failed', kind: 'bad', g: 'bad' },
+    disabled: { word: 'off', kind: '', g: 'info' },
+    revoke_pending: { word: 'key revoked', kind: 'warn', g: 'warn' }
+  };
+  function tunState(v) { return TUN_STATE[v.state] || { word: v.state || 'unknown', kind: '', g: 'info' }; }
+  function tunChip(v) { var s = tunState(v); return chip(s.word, s.kind, s.g); }
+
+  function tunSay(msg) { if (tunnelsOn) $('#tun-status').textContent = msg || ''; }
+
+  // since turns a timestamp into "for 3 h 12 m", which is what the operator reads the state by.
+  function since(ts) {
+    if (!ts) return '';
+    var secs = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 1000));
+    if (secs < 60) return 'for ' + secs + ' s';
+    var mins = Math.round(secs / 60);
+    if (mins < 60) return 'for ' + mins + ' m';
+    var hrs = Math.floor(mins / 60);
+    return 'for ' + hrs + ' h ' + (mins % 60) + ' m';
+  }
+
+  function tunRow(key, value, cls) {
+    var r = el('div', undefined, 'row');
+    r.appendChild(el('span', key, 'k'));
+    r.appendChild(el('span', value, 'v' + (cls ? ' ' + cls : '')));
+    return r;
+  }
+
+  // tunAct runs one action against one tunnel, with the card's own message line carrying the
+  // verdict: an error belongs where the operator is looking, not in the page-wide status line.
+  function tunAct(v, method, path, body, msgEl, buttons) {
+    tunBusy = true; tunSay('');
+    msgEl.textContent = ''; msgEl.className = 'tun-msg';
+    buttons.forEach(function (b) { b.disabled = true; });
+    return call(method, '/api/tunnels/' + encodeURIComponent(v.id) + path, body)
+      .then(function () { tunBusy = false; return loadTunnels(true); })
+      .catch(function (e) {
+        tunBusy = false;
+        buttons.forEach(function (b) { b.disabled = false; });
+        msgEl.textContent = e.message; msgEl.className = 'tun-msg bad';
+        throw e;
+      });
+  }
+
+  // A confirmation that names the host and says what stays true on it afterwards.
+  function tunAsk(title, body, note, verb, run) {
+    $('#tun-confirm-h').textContent = title;
+    $('#tun-confirm-body').textContent = body;
+    $('#tun-confirm-note').textContent = note || '';
+    $('#tun-confirm-msg').textContent = '';
+    $('#tun-confirm-go').textContent = verb;
+    tunConfirm = run;
+    openModal('#tun-confirm');
+    var b = $('#tun-confirm-go'); b.disabled = false; b.focus();
+  }
+
+  function tunnelCard(v) {
+    var c = el('article', undefined, 'card'); c.dataset.tunnel = v.id;
+    var top = el('div', undefined, 'row between');
+    var t = el('div');
+    t.appendChild(el('div', v.label, 'title'));
+    t.appendChild(el('div', v.user + '@' + v.address + ' · port ' + v.port, 'sub'));
+    top.appendChild(t);
+    top.appendChild(tunChip(v));
+    c.appendChild(top);
+
+    var meta = el('div', undefined, 'tun-meta');
+    // The chip in the header already says the state, so this row carries only how long it has
+    // held: the same word in two places reads as two facts and is one.
+    if (v.since) meta.appendChild(tunRow('In this state', since(v.since)));
+    // A real zero prints as a zero: "0 restarts" is an answer, an empty cell is not.
+    meta.appendChild(tunRow('Restarts in the last hour', String(v.restarts1h) +
+      (v.lastRestart ? ' · last at ' + new Date(v.lastRestart).toLocaleTimeString() : '')));
+    if (v.hasKey) {
+      var fp = el('div', undefined, 'row');
+      fp.appendChild(el('span', 'Key', 'k'));
+      fp.appendChild(el('span', v.fingerprint, 'tun-fp'));
+      meta.appendChild(fp);
+    } else {
+      meta.appendChild(tunRow('Key', 'none on this server'));
+    }
+    meta.appendChild(tunRow('Host key', v.hasHostKey ? v.hostKeyFingerprint : 'not recorded yet'));
+    c.appendChild(meta);
+
+    if (v.reason) {
+      var why = el('div', (v.detail || v.reason) + ' (' + v.reason + ')',
+        'tun-why' + (v.state === 'failed' ? ' bad' : ''));
+      c.appendChild(why);
+    }
+    if (v.revokePending) {
+      c.appendChild(el('div', 'The key is gone from this server. Its authorized_keys line is ' +
+        'almost certainly still on the host: run the remove command there, then confirm it.', 'tun-why'));
+    }
+    if (v.rotating) {
+      c.appendChild(el('div', 'Rotating. Both lines are valid until you finish it: paste the new ' +
+        'line, wait for the tunnel to settle, then finish the rotation.', 'tun-why'));
+    }
+
+    // The generated commands. Public key only; there is no endpoint that returns a private key.
+    var cmds = el('div', undefined, 'tun-cmds');
+    if (v.rotateInstall) cmds.appendChild(copyLine('Add the NEW line on ' + v.label, v.rotateInstall,
+      'Copy the install command for the new key on ' + v.label));
+    // Mid-rotation the old line is already on the host, so telling the operator to add it would
+    // send them to do something they did it months ago.
+    if (v.install) cmds.appendChild(copyLine(v.rotateInstall ? 'The line already on ' + v.label
+      : 'Add this line on ' + v.label, v.install, 'Copy the install command for ' + v.label));
+    // A revoked key's line survives a replacement key, so its remove command does too: it is the
+    // only way that line comes off the host, nothing here can do it, and the card above has just
+    // told the operator to run it - so it stays in the open. Folding away a command the card asks
+    // for in the same breath is how an instruction goes unread.
+    if (v.revokedRemove) {
+      cmds.appendChild(copyLine(v.remove && v.remove !== v.revokedRemove
+        ? 'Remove the REVOKED line on ' + v.label
+        : 'Remove this line on ' + v.label, v.revokedRemove,
+        'Copy the remove command for the revoked key on ' + v.label));
+    }
+
+    // Everyday work needs one line pasted on the host. Removing it again, and the tightened line
+    // nobody has verified, are wanted only when the operator goes looking for them, so they fold
+    // away instead of doubling the monospace on every card in the estate.
+    var body = el('div', undefined, 'body');
+    var folded = [];
+    if (v.remove && v.remove !== v.revokedRemove) {
+      folded.push('removing it again');
+      body.appendChild(copyLine('Remove it again with', v.remove,
+        'Copy the remove command for ' + v.label));
+    }
+    if (v.installTight) {
+      folded.push('a tighter line, not verified');
+      body.appendChild(el('p', 'port-forwarding re-enables -L as well as -R, and permitlisten ' +
+        'constrains only the -R listen address, so a stolen key could forward out of the host. ' +
+        'Adding permitopen="127.0.0.1:1" should close that. Whether it leaves the -R forward ' +
+        'working has NOT been tested on a real host, so it is not what we recommend yet.', 'sub'));
+      body.appendChild(copyLine('The tightened line', v.installTight,
+        'Copy the tightened install command for ' + v.label));
+    }
+    if (folded.length) {
+      var d = el('details', undefined, 'tun-opt');
+      var sum = el('summary');
+      sum.appendChild(el('span', undefined, 'chev'));
+      sum.appendChild(el('span', 'Also: ' + folded.join(', and ')));
+      d.appendChild(sum);
+      d.appendChild(body);
+      cmds.appendChild(d);
+    }
+    if (cmds.childNodes.length) c.appendChild(cmds);
+
+    var msg = el('p', undefined, 'tun-msg'); msg.setAttribute('role', 'alert');
+
+    // Everyday actions.
+    var acts = el('div', undefined, 'tun-acts');
+    var btns = [];
+    function act(text, cls, fn) {
+      var b = el('button', text, 'btn sm' + (cls ? ' ' + cls : '')); b.type = 'button';
+      b.addEventListener('click', fn); acts.appendChild(b); btns.push(b); return b;
+    }
+    if (!v.hasHostKey) {
+      act('Record the host key', 'primary', function () {
+        $('#tun-key-for').textContent = 'For ' + v.label + '.';
+        $('#tun-key-msg').textContent = '';
+        $('#tun-key-input').value = ''; $('#tun-key-input').dataset.tunnel = v.id;
+        openModal('#tun-key-dialog'); $('#tun-key-input').focus();
+      });
+    } else if (v.enabled) {
+      act('Stop', '', function () { tunAct(v, 'POST', '/disable', undefined, msg, btns).catch(function () {}); });
+    } else if (v.hasKey) {
+      act('Start', 'primary', function () { tunAct(v, 'POST', '/enable', undefined, msg, btns).catch(function () {}); });
+    }
+    if (v.enabled) act('Restart now', '', function () {
+      tunAct(v, 'POST', '/restart', undefined, msg, btns).catch(function () {});
+    });
+    if (v.hasHostKey) act('Replace the host key', '', function () {
+      $('#tun-key-for').textContent = 'For ' + v.label + '. The one recorded now is ' + v.hostKeyFingerprint + '.';
+      $('#tun-key-msg').textContent = '';
+      $('#tun-key-input').value = ''; $('#tun-key-input').dataset.tunnel = v.id;
+      openModal('#tun-key-dialog'); $('#tun-key-input').focus();
+    });
+    if (!v.hasKey) act('Generate a key', 'primary', function () {
+      tunAct(v, 'POST', '/key/generate', undefined, msg, btns).catch(function () {});
+    });
+    if (v.rotating) {
+      act('Finish the rotation', 'primary', function () {
+        tunAct(v, 'POST', '/key/rotate/commit', undefined, msg, btns).catch(function () {});
+      });
+      act('Cancel the rotation', '', function () {
+        tunAct(v, 'POST', '/key/rotate/cancel', undefined, msg, btns).catch(function () {});
+      });
+    }
+    if (v.revokePending) act('I have removed the line', '', function () {
+      tunAct(v, 'POST', '/key/revoked', undefined, msg, btns).catch(function () {});
+    });
+    acts.appendChild(msg);
+    c.appendChild(acts);
+
+    // Destructive actions last, in their own group, with the consequence written out.
+    var dang = el('div', undefined, 'tun-danger');
+    dang.appendChild(el('span', 'These cannot be undone here, and none of them changes anything ' +
+      'on the host: only the operator can edit its authorized_keys.', 'lead'));
+    function danger(text, fn) {
+      var b = el('button', text, 'btn sm danger'); b.type = 'button';
+      b.addEventListener('click', fn); dang.appendChild(b); btns.push(b); return b;
+    }
+    if (v.hasKey && !v.rotating) danger('Rotate the key', function () {
+      tunAsk('Rotate the key for ' + v.label + '?',
+        'A new key is generated for ' + v.label + ' and the tunnel restarts on it.',
+        'The old line keeps working until you finish the rotation, so nothing stops. You will ' +
+        'have to paste the new line on the host.', 'Rotate the key', function (msgEl, bs) {
+          return tunAct(v, 'POST', '/key/rotate', undefined, msgEl, bs);
+        });
+    });
+    if (v.hasKey) danger('Revoke the key', function () {
+      tunAsk('Revoke the key for ' + v.label + '?',
+        'The private key for ' + v.label + ' is deleted here and the tunnel stops.',
+        'The authorized_keys line stays on ' + v.label + ' until you run the remove command ' +
+        'there. This server cannot do that, and it will keep saying so.', 'Revoke the key',
+        function (msgEl, bs) { return tunAct(v, 'POST', '/key/revoke', undefined, msgEl, bs); });
+    });
+    danger('Forget this tunnel', function () {
+      tunAsk('Forget the tunnel for ' + v.label + '?',
+        'The configuration and the key for ' + v.label + ' are deleted here.',
+        'The authorized_keys line stays on ' + v.label + '. Copy the remove command from this ' +
+        'card before you forget it, or you will have to find the line by hand.', 'Forget it',
+        function (msgEl, bs) { return tunAct(v, 'DELETE', '', undefined, msgEl, bs); });
+    });
+    c.appendChild(dang);
+    return c;
+  }
+
+  function renderTunnels(force) {
+    if (!tunnelsOn) return;
+    var list = tunnelsCache;
+    $('#tab-tunnels-n').textContent = list.length;
+    $('#tun-count').textContent = list.length
+      ? list.filter(function (v) { return v.state === 'up'; }).length + ' of ' + list.length + ' up'
+      : '';
+    if (!force && !changed('tun', list) && !$('#tunnels .empty')) return;
+    sig.tun = JSON.stringify(list);
+    var box = $('#tunnels'); box.textContent = '';
+    if (!list.length) {
+      box.appendChild(el('p', 'No tunnels configured. Add one, paste the line it gives you on the ' +
+        'host, then record the host’s own key.', 'empty'));
+      return;
+    }
+    list.forEach(function (v) { box.appendChild(tunnelCard(v)); });
+  }
+
+  function loadTunnels(force) {
+    if (!tunnelsOn) return Promise.resolve();
+    return call('GET', '/api/tunnels').then(function (list) {
+      tunnelsCache = list || [];
+      renderTunnels(!!force);
+      renderHosts(true); // the Hosts tab shows each host's tunnel state beside its agent state
+    }).catch(function (e) { tunSay(e.message); });
+  }
+
+  if (tunnelsOn) {
+    $('#tun-add-open').addEventListener('click', function () {
+      $('#tun-add-msg').textContent = '';
+      openModal('#tun-add-dialog'); $('#tun-label').focus();
+    });
+    $('#tun-add-form').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var msg = $('#tun-add-msg'), go = $('#tun-add-go');
+      msg.textContent = ''; go.disabled = true;
+      call('POST', '/api/tunnels', {
+        label: $('#tun-label').value.trim(), address: $('#tun-address').value.trim(),
+        user: $('#tun-user').value.trim(), port: Number($('#tun-port').value)
+      }).then(function (v) {
+        go.disabled = false;
+        $('#tun-label').value = ''; $('#tun-address').value = ''; $('#tun-user').value = '';
+        $('#tun-add-dialog').close();
+        tunSay('Added ' + v.label + '. Paste its line on the host, then record the host’s key.');
+        return loadTunnels(true);
+      }).catch(function (e) { go.disabled = false; msg.textContent = e.message; });
+    });
+    $('#tun-key-form').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var msg = $('#tun-key-msg'), go = $('#tun-key-go'), id = $('#tun-key-input').dataset.tunnel;
+      msg.textContent = ''; go.disabled = true;
+      call('POST', '/api/tunnels/' + encodeURIComponent(id) + '/hostkey',
+        { hostKey: $('#tun-key-input').value })
+        .then(function () {
+          go.disabled = false; $('#tun-key-input').value = ''; $('#tun-key-dialog').close();
+          tunSay('Host key recorded.');
+          return loadTunnels(true);
+        }).catch(function (e) { go.disabled = false; msg.textContent = e.message; });
+    });
+    $('#tun-confirm-go').addEventListener('click', function () {
+      var run = tunConfirm, b = $('#tun-confirm-go');
+      if (!run) return;
+      run($('#tun-confirm-msg'), [b]).then(function () {
+        tunConfirm = null; $('#tun-confirm').close();
+      }, function () {});
+    });
+    // Importing the interim scheduled task's host list. The file is left where it is: it is the
+    // rollback path for that task, so the import must not consume it.
+    $('#tun-import').addEventListener('click', function () {
+      var b = $('#tun-import');
+      tunAsk('Import the interim host list?',
+        'Every host in %USERPROFILE%\\.claude-swap\\tunnels.json that is not configured here is ' +
+        'added, with a key, switched off.',
+        'The file is left where it is, because it is how you roll back to the scheduled task. ' +
+        'Do not enable an imported tunnel while that task is still running: two supervisors ' +
+        'dialling one host fight over its port.', 'Import them', function (msgEl, bs) {
+          bs.forEach(function (x) { x.disabled = true; });
+          return call('POST', '/api/tunnels/import').then(function (r) {
+            tunSay('Imported ' + r.added + ', skipped ' + r.skipped + '.');
+            return loadTunnels(true);
+          }).catch(function (e) {
+            bs.forEach(function (x) { x.disabled = false; });
+            msgEl.textContent = e.message; msgEl.className = 'msg';
+            throw e;
+          });
+        });
+      b.blur();
+    });
+    loadTunnels(true);
+    setInterval(function () { if (!tunBusy && !tunDialogOpen()) loadTunnels(false); }, 15000);
+  }
+
+  function tunDialogOpen() {
+    return ['#tun-add-dialog', '#tun-key-dialog', '#tun-confirm'].some(function (s) {
+      var d = $(s); return d && d.open;
+    });
+  }
+
+  refresh();
+  setTimeout(watchOpen, 1500);
+  setInterval(loadPending, 5000);
+  // Never discard an open rename, an open swap confirm, an in-flight ask or an open ask dialog,
+  // and never re-render the cards from under a refresh the operator is watching.
+  setInterval(function () {
+    if (!editing && !confirming && !removing && !ctlWorking() && !ctlDialogOpen() && !refreshBusy()) refresh();
+  }, 30000);
+})();
+</script>
+{{end}}
+</div>
+</body>
+</html>

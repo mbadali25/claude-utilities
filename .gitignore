@@ -1,3 +1,42 @@
+# crew:gitignore:managed - maintained by crew_gitignore.py; crew only ever adds here.
+# Put your own rules below this block; a rule below wins over one in it.
+# os/editor: macOS Finder metadata
+.DS_Store
+# os/editor: Windows thumbnail cache
+Thumbs.db
+# os/editor: Windows folder settings
+[Dd]esktop.ini
+# os/editor: vim swap files
+*.swp
+# os/editor: JetBrains IDE state
+.idea/
+# os/editor: VS Code state, except the shared settings
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+# secrets: local environment secrets, except the shared templates
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+!.env.dist
+!.env.defaults
+# secrets: certificates and private keys
+*.pem
+# secrets: private keys
+*.key
+# secrets: PKCS#12 key bundles
+*.p12
+# secrets: PKCS#12 key bundles
+*.pfx
+# secrets: an SSH private key
+id_rsa
+# secrets: an SSH private key
+id_ed25519
+# crew:gitignore:end
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -218,3 +257,29 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# crew state. `.crew/*`, NOT `.crew/`: a trailing slash makes git refuse to
+# descend into the directory, so every negation below would silently do nothing.
+.crew/*
+!.crew/codemap/
+!.crew/endpoints.json
+!.crew/verify.json
+!.crew/standards.md
+.crew/.approved-*
+.crew/*.lock
+.crew/*.local
+.crew/.hook-*
+.crew/transcripts/
+.work/
+
+# Playwright MCP scratch output
+.playwright-mcp/
+
+# claude-swap: local agent worktrees, build and backup artefacts
+.claude/worktrees/
+*.bak
+*.exe
+*.test
+/server
+/agent
+/claude-swap-data/

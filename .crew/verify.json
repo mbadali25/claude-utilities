@@ -1,0 +1,71 @@
+{
+  "_note": "version, anchor and why are notes for humans - nothing executes them. paths/run/always/default/unmapped drive the Stop gate; agents drives /crew:review; environments drives /crew:promote.",
+  "version": 1,
+  "anchor": "claude-utilities@0cef554",
+  "rules": [
+    { "id": "go-code",
+      "paths": ["**/*.go", "go.mod", "go.sum", ".golangci.yml", "internal/*/testdata/**", "internal/*/static/**"],
+      "run": ["bash _verify/cases/go-checks.sh"],
+      "seconds": 5,
+      "reach": "local",
+      "agents": ["security"],
+      "why": "Go build, vet, gofmt and every package's tests. The swap path handles live Claude credentials, so a security read rides along on source changes. reach: local - compiles and tests on disk; no network, no live credentials." },
+
+    { "id": "verify-harness",
+      "paths": ["_verify/**"],
+      "run": ["bash -n _verify/smoke.sh", "bash -n _verify/run-all.sh", "bash -n _verify/cases/go-checks.sh", "bash -n _verify/cases/ps-parse.sh"],
+      "seconds": 2,
+      "reach": "local",
+      "why": "a syntax error in a harness script makes every gate report a failure that is not in the code. reach: local - bash -n parses only." },
+
+    { "id": "install-agent-scripts",
+      "paths": ["scripts/install-agent.sh", "scripts/install-agent.ps1", "_verify/cases/install-agent-sh.sh"],
+      "run": ["bash -n scripts/install-agent.sh", "bash _verify/cases/install-agent-sh.sh"],
+      "seconds": 2,
+      "reach": "local",
+      "why": "bash -n parses install-agent.sh, then the stub case runs it against fake agent/systemctl binaries in a throwaway HOME (36 checks, exit 77 = skipped). install-agent.ps1 is parse-checked by rule powershell-scripts-parse; its Windows install behaviour is verified by hand per docs/runbooks. reach: local - no network, no live host, nothing outside a temp dir is touched." },
+
+    { "id": "powershell-scripts-parse",
+      "paths": ["scripts/*.ps1", "_verify/cases/ps-parse.ps1", "_verify/cases/ps-parse.sh"],
+      "run": ["bash _verify/cases/ps-parse.sh"],
+      "seconds": 2,
+      "reach": "local",
+      "why": "System.Management.Automation.Language.Parser.ParseFile over claude-swap-tunnels.ps1, install-tunnels-task.ps1 and install-agent.ps1; fails on any parse error (proved with a temporary unclosed block), exit 77 = no PowerShell. Parse-only: it does NOT run the scripts or check tunnel/scheduled-task behaviour, which stay hand-verified per docs/runbooks. reach: local - parses files on disk, executes nothing." },
+
+    { "id": "gitattributes-eol",
+      "paths": [".gitattributes", "_verify/cases/gitattributes-check.sh"],
+      "run": ["bash _verify/cases/gitattributes-check.sh"],
+      "seconds": 2,
+      "reach": "local",
+      "why": ".gitattributes pins *.go and *.sh to LF so CRLF checkouts do not break gofmt or bash. The script fails when git check-attr no longer reports eol=lf for them, or gofmt -l cmd internal prints anything. reach: local - reads git attributes and source on disk." },
+
+    { "id": "docs-and-config",
+      "paths": ["README.md", "SECURITY.md", ".editorconfig", ".github/**", "AGENTS.md", "CLAUDE.md", "docs/**", ".claude/**", ".crew/**", ".work/**", ".gitignore", ".graphifyignore", "graphify-out/**"],
+      "run": [],
+      "seconds": 1,
+      "reach": "local",
+      "why": "documentation, agent instructions, crew config and graph output. Listed so it does not trip unmapped:fail - deliberately unchecked, not forgotten. seconds/reach are declared only because the qa audit (G1) wants every rule to carry them; an empty run never executes." },
+
+    { "id": "agents-md-drift",
+      "paths": ["AGENTS.md", "CLAUDE.md", ".crew/verify.json", ".crew/codemap/**", "_verify/smoke.sh"],
+      "seconds": 1,
+      "reach": "local",
+      "why": "AGENTS.md is generated from these files; --check fails when it no longer matches them. Regenerate: python3 \"$CLAUDE_PLUGIN_ROOT/hooks/scripts/crew_instructions.py\" agents --root .",
+      "run": ["[ -n \"${CLAUDE_PLUGIN_ROOT:-}\" ] || exit 77; python3 \"$CLAUDE_PLUGIN_ROOT/hooks/scripts/crew_instructions.py\" agents --check --root ."] }
+  ],
+
+  "always": [],
+  "default": ["go build ./..."],
+  "unmapped": "fail",
+
+  "environments": {
+    "development": {
+      "dataProvenance": "seeded",
+      "deploy": ["go run ./cmd/server"],
+      "smoke": ["bash _verify/smoke.sh"],
+      "regression": ["bash _verify/run-all.sh"],
+      "rollback": "none",
+      "rollbackReason": "no rollback runbook exists yet (owner decision 2026-11-04); development is this LAN host running go run ./cmd/server from the checkout, so reverting means checking out the previous sha. Write docs/runbooks/rollback.md before declaring qa or production."
+    }
+  }
+}

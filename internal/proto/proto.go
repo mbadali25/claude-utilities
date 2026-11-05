@@ -1,0 +1,241 @@
+// Package proto defines the wire envelope and message bodies.
+package proto
+
+import (
+	"crypto/sha256"
+	"encoding/base32"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"claude-utilities/internal/logx"
+)
+
+const mask = "[redacted]"
+
+// Version is the only protocol version accepted by Decode.
+const Version = 1
+
+const (
+	TypeHello     = "hello"
+	TypePending   = "pending"
+	TypeApproved  = "approved"
+	TypeDenied    = "denied"
+	TypeHeartbeat = "heartbeat"
+	TypeReport    = "report"
+	TypeExportReq = "export_req"
+	TypeExportRes = "export_res"
+	TypeSwapReq   = "swap_req"
+	TypeSwapRes   = "swap_res"
+)
+
+// Envelope wraps every message.
+type Envelope struct {
+	V    int             `json:"v"`
+	Type string          `json:"type"`
+	ID   string          `json:"id,omitempty"`
+	Body json.RawMessage `json:"body,omitempty"`
+}
+
+// Hello is the first frame an agent sends. A set Token is a reconnect; a set Code is the
+// pre-approved enrolment path; neither means the agent waits in the pending queue.
+type Hello struct {
+	Token    string `json:"token"`
+	Code     string `json:"code,omitempty"`
+	HostName string `json:"hostName"`
+	OS       string `json:"os"`
+	// Nonce is a per-attempt random value that makes the fingerprint unique to one dial.
+	Nonce string `json:"nonce,omitempty"`
+	// RunAs is the local account the agent process runs as: a username only, never a home
+	// path or a domain secret. It is additive and omitempty, so an older agent that sends
+	// none of it still decodes, and it is deliberately NOT part of Fingerprint: the
+	// fingerprint must stay identical across agent versions for the owner to match it.
+	RunAs string `json:"runAs,omitempty"`
+}
+
+// Pending tells an agent it is queued for owner approval. It carries no account data.
+type Pending struct {
+	Fingerprint string    `json:"fingerprint"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+}
+
+// Approved is the one server-to-agent message that carries a token.
+type Approved struct {
+	Token string `json:"token"`
+}
+
+// Denied tells an agent its enrolment was refused.
+type Denied struct {
+	Reason     string        `json:"reason,omitempty"`
+	RetryAfter time.Duration `json:"retryAfter,omitempty"`
+}
+
+// Fingerprint is 8 lowercase base32 characters of SHA-256 over HostName|OS|Nonce, so the
+// agent and the server compute the same value for the owner to match.
+func Fingerprint(h Hello) string {
+	sum := sha256.Sum256([]byte(h.HostName + "|" + h.OS + "|" + h.Nonce))
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:])[:8])
+}
+
+// Session is one running Claude Code session on a host. Every field after StartedAt is
+// additive and omitempty, so an older agent that sends none of them still decodes.
+//
+// Name, Cwd and RemoteName are agent-supplied text that may name a person or a path: they
+// are UI-only and must never be logged (logx would drop the key anyway). Nothing here is a
+// credential, so Session needs no masking LogValue.
+type Session struct {
+	PID       int       `json:"pid"`
+	ID        string    `json:"id"`
+	Cwd       string    `json:"cwd"`
+	StartedAt time.Time `json:"startedAt"`
+	// Name is the session's own name, as `/rename` sets it (sessions file field "name").
+	Name string `json:"name,omitempty"`
+	// RemoteName is a remote-control name, kept separate from Name. Claude Code 2.1.318
+	// writes no such field, so this is normally empty; it exists so a future one surfaces
+	// without another protocol change.
+	RemoteName string `json:"remoteName,omitempty"`
+	// Status is the session's own activity word ("idle", "busy"); empty when unreported.
+	Status string `json:"status,omitempty"`
+	// RemoteControl is true when the session is bound to a remote-control bridge. It is
+	// derived from the sessions file's bridgeSessionId; the id itself never leaves the host.
+	RemoteControl bool `json:"remoteControl,omitempty"`
+}
+
+type Report struct {
+	HostID         string    `json:"hostId"`
+	ActiveIdentity string    `json:"activeIdentity"`
+	Sessions       []Session `json:"sessions"`
+	CredsPresent   bool      `json:"credsPresent"`
+	// IdentityReason says why ActiveIdentity is empty: one of the fixed identity reason codes
+	// (see identity.go), never a path, a user name, an email or a token. It is additive and
+	// omitted when the identity is known, so an older hub sees the report shape it expects.
+	IdentityReason string `json:"identityReason,omitempty"`
+	// SwapBlocked is true while an unfinished earlier swap cannot be settled, so every swap on
+	// this host is refused until an operator intervenes.
+	SwapBlocked bool `json:"swapBlocked,omitempty"`
+	// Commands carries the agent's later view of session commands it has already answered, so a
+	// delivery observed minutes after the reply reaches the hub without a new message type. It is
+	// additive and omitted when empty, so an older hub sees the report shape it expects. Bounded
+	// by MaxCommandsPerReport.
+	Commands []SessionCommandStatus `json:"commands,omitempty"`
+}
+
+type ExportRes struct {
+	Block    json.RawMessage `json:"block,omitempty"`
+	Identity string          `json:"identity,omitempty"`
+	// Err goes on the wire as-is: callers must logx.Redact it before setting.
+	Err string `json:"err,omitempty"`
+}
+
+type SwapReq struct {
+	Block   json.RawMessage `json:"block"`
+	Account string          `json:"account"`
+}
+
+// MarshalJSON emits an empty array, never null, for absent sessions.
+func (r Report) MarshalJSON() ([]byte, error) {
+	type plain Report
+	p := plain(r)
+	if p.Sessions == nil {
+		p.Sessions = []Session{}
+	}
+	return json.Marshal(p)
+}
+
+// Credential-bearing types never print their secrets via fmt or slog.
+
+// Identity-like strings (account, identity, host) may be email addresses, so they pass through logx.Redact.
+
+func (e Envelope) String() string {
+	return fmt.Sprintf("Envelope{V:%d Type:%s ID:%s Body:%s}", e.V, logx.Redact(e.Type), logx.Redact(e.ID), mask)
+}
+func (e Envelope) GoString() string { return e.String() }
+func (e Envelope) LogValue() slog.Value {
+	return slog.GroupValue(slog.Int("v", e.V), slog.String("type", logx.Redact(e.Type)),
+		slog.String("id", logx.Redact(e.ID)), slog.String("body", mask))
+}
+
+func (h Hello) String() string {
+	return fmt.Sprintf("Hello{HostName:%s OS:%s RunAs:%s Token:%s Code:%s}", logx.Redact(h.HostName), logx.Redact(h.OS), logx.Redact(h.RunAs), mask, mask)
+}
+func (h Hello) GoString() string { return h.String() }
+func (h Hello) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("hostName", logx.Redact(h.HostName)), slog.String("os", logx.Redact(h.OS)),
+		slog.String("runAs", logx.Redact(h.RunAs)), slog.String("token", mask), slog.String("code", mask))
+}
+
+func (a Approved) String() string   { return "Approved{Token:" + mask + "}" }
+func (a Approved) GoString() string { return a.String() }
+func (a Approved) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("token", mask))
+}
+
+func (r ExportRes) String() string {
+	return fmt.Sprintf("ExportRes{Identity:%s Block:%s Err:%s}", logx.Redact(r.Identity), mask, logx.Redact(r.Err))
+}
+func (r ExportRes) GoString() string { return r.String() }
+func (r ExportRes) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("identity", logx.Redact(r.Identity)), slog.String("block", mask), slog.String("err", logx.Redact(r.Err)))
+}
+
+func (r SwapReq) String() string {
+	return fmt.Sprintf("SwapReq{Account:%s Block:%s}", logx.Redact(r.Account), mask)
+}
+func (r SwapReq) GoString() string { return r.String() }
+func (r SwapReq) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("account", logx.Redact(r.Account)), slog.String("block", mask))
+}
+
+// SwapRes deliberately has no credential field: results never echo secrets.
+type SwapRes struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// Reason goes on the wire as-is; logging redacts it (callers should still logx.Redact before setting).
+func (r SwapRes) String() string {
+	return fmt.Sprintf("SwapRes{OK:%t Reason:%s}", r.OK, logx.Redact(r.Reason))
+}
+func (r SwapRes) GoString() string { return r.String() }
+func (r SwapRes) LogValue() slog.Value {
+	return slog.GroupValue(slog.Bool("ok", r.OK), slog.String("reason", logx.Redact(r.Reason)))
+}
+
+// Encode marshals body into an envelope of the current Version.
+func Encode(typ, id string, body any) ([]byte, error) {
+	env := Envelope{V: Version, Type: typ, ID: id}
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("encode body: %w", err)
+		}
+		env.Body = raw
+	}
+	return json.Marshal(env)
+}
+
+// MaxMessageSize bounds a decoded frame (bytes).
+const MaxMessageSize = 1 << 20
+
+// Decode parses an envelope and rejects oversize frames and any version other than Version.
+// It does not check ID presence: request/response dispatchers must reject an empty ID
+// on export_req, export_res, swap_req and swap_res.
+func Decode(b []byte) (Envelope, error) {
+	if len(b) > MaxMessageSize {
+		return Envelope{}, fmt.Errorf("message too large: %d bytes", len(b))
+	}
+	var env Envelope
+	if err := json.Unmarshal(b, &env); err != nil {
+		return Envelope{}, fmt.Errorf("decode envelope: %w", err)
+	}
+	if env.V != Version {
+		return Envelope{}, fmt.Errorf("unsupported protocol version %d", env.V)
+	}
+	if env.Type == "" {
+		return Envelope{}, errors.New("missing message type")
+	}
+	return env, nil
+}
