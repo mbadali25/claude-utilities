@@ -211,10 +211,15 @@ func TestRemoveAccountSendsNoFrameToAnyAgent(t *testing.T) {
 	f := newFixture(t)
 	f.seedAccount("acct-1", "work", "work@example.test")
 	f.seedAccount("acct-2", "spare", "spare@example.test")
+	f.seedAccount("acct-3", "other", "other@example.test")
 	a, _, hostID := f.enrol("oak")
 	f.reportIdentity(a, hostID, "work@example.test")
 	f.reg.SwapIn("acct-2", hostID)
-	before := a.types()
+	// A second host, signed in as an account neither removal touches, so the claim is "no agent
+	// was messaged" rather than "the holder was not messaged".
+	b, _, otherID := f.enrol("pine")
+	f.reportIdentity(b, otherID, "other@example.test")
+	beforeA, beforeB := a.types(), b.types()
 
 	// Both endings: the refused one and the forced one.
 	if err := f.h.RemoveAccount("acct-1", false); !errors.Is(err, ErrAccountHeldLive) {
@@ -227,11 +232,17 @@ func TestRemoveAccountSendsNoFrameToAnyAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := a.recvWithin(300 * time.Millisecond); err == nil {
-		t.Fatalf("the hub sent the agent a frame: %v", a.types())
-	}
-	if got := a.types(); len(got) != len(before) {
-		t.Fatalf("agent received %v, want nothing beyond %v", got, before)
+	for _, c := range []struct {
+		name   string
+		ag     *agent
+		before []string
+	}{{"the holder", a, beforeA}, {"a host holding neither", b, beforeB}} {
+		if _, err := c.ag.recvWithin(300 * time.Millisecond); err == nil {
+			t.Fatalf("the hub sent %s a frame: %v", c.name, c.ag.types())
+		}
+		if got := c.ag.types(); len(got) != len(c.before) {
+			t.Fatalf("%s received %v, want nothing beyond %v", c.name, got, c.before)
+		}
 	}
 	// Nothing swapped either: ownership is just dropped.
 	if _, ok := f.reg.HostsUsing("acct-2")[hostID]; ok {
