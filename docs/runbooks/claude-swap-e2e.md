@@ -82,6 +82,9 @@ D:\temp\claude-swap-e2e\server.exe --listen <LAN_IP>:<PORT> --data-dir D:\temp\c
 - Expect the `listening on https://...` line with the certificate sha256. Keep this window open; logs go to stderr.
 - Exit 2 means a missing flag or env var; exit 1 is a runtime failure.
 - Open `https://<LAN_IP>:<PORT>/` and log in with the admin password.
+- `CLAUDESWAP_ADMIN_PASSWORD` is only the bootstrap password: it works while no `admin-password.json` exists in the data dir. Once a password is set, the stored argon2id hash wins and the variable is ignored (the server also starts without it).
+- Change the password offline: `go run ./cmd/server set-password [--data-dir DIR]` (or `server.exe set-password`). It prompts twice with echo off on a terminal, or reads one line from stdin when piped; minimum 12 characters; never an argument. A running server reads the hash at startup, so restart it for the new password to apply.
+- Change it in the UI: the **Admin password** form (current password plus new password, 12+ characters). A successful change ends every signed-in session, this one included; sign in again with the new password. A wrong current password counts toward the login rate limit.
 
 ### 1.3 Enrol agent on Windows via Pending connections
 ```powershell
