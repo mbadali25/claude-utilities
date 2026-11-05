@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"claude-utilities/internal/adminpw"
 	"claude-utilities/internal/hub"
 	"claude-utilities/internal/logx"
 	"claude-utilities/internal/proto"
@@ -119,12 +120,44 @@ type fakeUsage map[string]usage.Usage
 
 func (u fakeUsage) Last(id string) (usage.Usage, bool) { x, ok := u[id]; return x, ok }
 
+// fakePW stands in for *adminpw.Store so the web tests do not pay for an argon2id derivation on
+// every login. adminpw's own tests cover hashing, persistence and the env bootstrap.
+type fakePW struct {
+	mu   sync.Mutex
+	pw   string
+	sets []string
+	err  error
+}
+
+func (f *fakePW) Verify(password string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return password != "" && password == f.pw
+}
+
+func (f *fakePW) Set(password string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	if len([]rune(password)) < adminpw.MinLength {
+		return adminpw.ErrTooShort
+	}
+	f.sets = append(f.sets, password)
+	f.pw = password
+	return nil
+}
+
+func (f *fakePW) setN() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.sets) }
+
 type rig struct {
 	t     *testing.T
 	h     http.Handler
 	fh    *fakeHub
 	v     *vault.Vault
 	usage fakeUsage
+	pw    *fakePW
 	now   time.Time
 }
 
@@ -135,7 +168,7 @@ func newRig(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &rig{t: t, fh: &fakeHub{}, v: v, usage: fakeUsage{}, now: fixedNow}
+	r := &rig{t: t, fh: &fakeHub{}, v: v, usage: fakeUsage{}, pw: &fakePW{pw: adminPW}, now: fixedNow}
 	r.fh.relabelFn = func(id, label string) error { // mirrors hub.Relabel over the real vault
 		err := v.Relabel(id, label)
 		if errors.Is(err, vault.ErrNotFound) {
@@ -143,7 +176,7 @@ func newRig(t *testing.T) *rig {
 		}
 		return err
 	}
-	r.h = newHandler(r.fh, v, r.usage, adminPW, func() time.Time { return r.now })
+	r.h = newHandler(r.fh, v, r.usage, r.pw, func() time.Time { return r.now })
 	return r
 }
 
@@ -719,13 +752,13 @@ func TestLoginLockoutIsPerSourceIP(t *testing.T) {
 	}
 }
 
-func TestHandlerRejectsEmptyPassword(t *testing.T) {
+func TestHandlerRejectsMissingPasswordStore(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Fatal("Handler accepted an empty admin password")
+			t.Fatal("Handler accepted a nil password store")
 		}
 	}()
-	Handler(nil, nil, nil, "")
+	Handler(nil, nil, nil, nil)
 }
 
 func TestWrongMethodOnAPIWithoutSessionIs401(t *testing.T) {

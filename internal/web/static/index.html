@@ -236,6 +236,19 @@
   <div id="hosts" class="grid"><p class="empty">Loading hosts...</p></div>
 </section>
 
+<section aria-labelledby="pw-h">
+  <div class="head"><h2 id="pw-h">Admin password</h2></div>
+  <div class="import">
+    <p class="mut">The new password is stored on the server as a hash and replaces the bootstrap environment variable. Every signed-in session ends, this one included.</p>
+    <form id="pw-form" autocomplete="off">
+      <input type="password" name="current" id="pw-current" placeholder="Current password" autocomplete="current-password" required aria-label="Current admin password">
+      <input type="password" name="new" id="pw-new" placeholder="New password (12 characters or more)" minlength="12" maxlength="1024" autocomplete="new-password" required aria-label="New admin password">
+      <button type="submit" class="btn primary" id="pw-save">Change password</button>
+    </form>
+    <p id="pw-msg" role="status" aria-live="polite"></p>
+  </div>
+</section>
+
 <script nonce="{{.Nonce}}">
 (function () {
   var csrf = document.querySelector('meta[name="csrf-token"]').content;
@@ -530,6 +543,24 @@
     var id = add.id, finished = add.state === 'done' || add.state === 'failed';
     addIdle();
     if (id && !finished) call('POST', '/api/accounts/add/' + encodeURIComponent(id) + '/cancel').catch(function (e) { say(e.message); });
+  });
+
+  // Change the admin password. Both values live only in the form fields; on success the server
+  // has dropped every session, so reload to land on the sign-in page.
+  $('#pw-form').addEventListener('submit', function (ev) {
+    ev.preventDefault(); say('');
+    var msg = $('#pw-msg'), save = $('#pw-save');
+    msg.textContent = ''; msg.className = ''; save.disabled = true;
+    call('POST', '/api/password', { current: $('#pw-current').value, new: $('#pw-new').value })
+      .then(function () {
+        $('#pw-current').value = ''; $('#pw-new').value = '';
+        msg.textContent = 'Password changed. Signing you out...';
+        setTimeout(function () { location.reload(); }, 1500);
+      })
+      .catch(function (e) {
+        msg.textContent = e.message; msg.className = 'err';
+        save.disabled = false; $('#pw-current').focus(); $('#pw-current').select();
+      });
   });
 
   $('#enrol').addEventListener('click', function () {
