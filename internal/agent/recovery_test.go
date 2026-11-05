@@ -36,12 +36,12 @@ func TestSwapAbortedByConcurrentRefreshDoesNotWedge(t *testing.T) {
 
 	// What Replace leaves behind when Claude Code rewrites the file mid-swap: new content,
 	// no backup, ErrChangedDuringSwap.
-	r.a.replace = func(string, json.RawMessage) (string, error) {
+	r.a.replace = func(string, json.RawMessage, func(json.RawMessage) error) (string, error) {
 		writeCreds(t, r.creds, refreshed)
 		return "", credfile.ErrChangedDuringSwap
 	}
 	res := r.a.applySwap(proto.SwapReq{Block: testBlock(newSecret, future()), Account: "b"})
-	r.a.replace = credfile.Replace
+	r.a.replace = credfile.ReplaceWith
 	if res.OK {
 		t.Fatal("swap succeeded over a concurrent refresh")
 	}
@@ -57,6 +57,31 @@ func TestSwapAbortedByConcurrentRefreshDoesNotWedge(t *testing.T) {
 	if res := r.a.applySwap(proto.SwapReq{Block: next}); !res.OK {
 		t.Fatalf("later swap refused: %s", res.Reason)
 	}
+}
+
+// Claude Code refreshes between the agent's own read and Replace taking the swap lock. The journal
+// must describe the block Replace actually backs up, so a failed swap (here a read-back failure,
+// standing in for a crash after the rename) rolls back to the refreshed block instead of wedging.
+func TestRefreshBetweenReadAndReplaceStillRecovers(t *testing.T) {
+	r := newRig(t, "https://x", strings.Repeat("0", 64))
+	writeCreds(t, r.creds, testBlock(origSecret, future()))
+	refreshed := testBlock(refreshedSecret, future())
+	r.a.replace = func(p string, b json.RawMessage, onPrev func(json.RawMessage) error) (string, error) {
+		writeCreds(t, r.creds, refreshed) // lands after the agent's read, before the lock
+		return credfile.ReplaceWith(p, b, onPrev)
+	}
+	r.a.readBack = func(string) (json.RawMessage, error) { return nil, errors.New("crash") }
+	res := r.a.applySwap(proto.SwapReq{Block: testBlock(newSecret, future()), Account: "b"})
+	if res.OK {
+		t.Fatal("swap reported success")
+	}
+	if r.a.blocked.Load() {
+		t.Fatalf("agent wedged: %s", res.Reason)
+	}
+	if live, _ := credfile.ReadBlock(r.creds); !sameJSON(t, live, refreshed) {
+		t.Fatal("rollback did not restore the refreshed block")
+	}
+	journalGone(t, r.dir)
 }
 
 // Crash between backup and rename, then Claude Code rotates the token before restart: the

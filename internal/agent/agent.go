@@ -212,7 +212,7 @@ type agent struct {
 	identity  func() string
 	scan      func(context.Context) ([]proto.Session, error)
 	readBack  func(path string) (json.RawMessage, error)
-	replace   func(path string, block json.RawMessage) (string, error)
+	replace   func(path string, block json.RawMessage, onPrev func(json.RawMessage) error) (string, error)
 }
 
 func newAgent(c Config, log *slog.Logger) *agent {
@@ -221,7 +221,7 @@ func newAgent(c Config, log *slog.Logger) *agent {
 		cfg: c, log: log.With("component", "agent"), hostName: name, heartbeat: HeartbeatInterval,
 		delay: NextDelay, identity: func() string { return readIdentity(claudeJSONPath()) },
 		scan: sessions.Scan, readBack: credfile.ReadBlock,
-		replace: credfile.Replace,
+		replace: credfile.ReplaceWith,
 	}
 }
 
@@ -429,20 +429,20 @@ func (a *agent) applySwap(req proto.SwapReq) proto.SwapRes {
 	}
 
 	path := a.cfg.CredsPath
-	var prev json.RawMessage
-	switch b, err := credfile.ReadBlock(path); {
+	switch _, err := credfile.ReadBlock(path); {
 	case err == nil:
-		prev = b
 	case errors.Is(err, credfile.ErrNoBlock), errors.Is(err, os.ErrNotExist):
 	default:
 		return fail("credentials unreadable", err)
 	}
-	j := journal{State: journalSwap, PrevHash: hashBlock(prev), NewHash: hashBlock(req.Block)}
-	if err := writeJournal(a.cfg.StateDir, j); err != nil {
-		return fail("cannot write journal", err)
-	}
-
-	backup, err := a.replace(path, req.Block)
+	// The journal is written from inside Replace's lock, with the digest of the block it is about
+	// to back up, so a Claude Code refresh between the read above and the lock cannot leave the
+	// journal pointing at a block no backup holds.
+	j := journal{State: journalSwap, NewHash: hashBlock(req.Block)}
+	backup, err := a.replace(path, req.Block, func(prev json.RawMessage) error {
+		j.PrevHash = hashBlock(prev)
+		return writeJournal(a.cfg.StateDir, j)
+	})
 	if err != nil {
 		// Replace may have failed after the backup (rename), so settle through the journal.
 		if rerr := a.recoverJournal(); rerr != nil {

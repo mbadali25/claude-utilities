@@ -347,10 +347,18 @@ func resolvePath(path string) (string, error) {
 // and the rename. ErrChangedDuringSwap narrows that window but cannot close it
 // without a cross-process lock Claude Code does not take.
 func Replace(path string, block json.RawMessage) (string, error) {
+	return ReplaceWith(path, block, nil)
+}
+
+// ReplaceWith is Replace plus a callback that receives the block being replaced (nil when there is
+// none) as read under the swap lock, before the backup is written. A caller that journals the
+// swap derives its pre-swap digest there, so a refresh between its own earlier read and the lock
+// cannot desynchronise the digest from the backup. A callback error aborts with nothing written.
+func ReplaceWith(path string, block json.RawMessage, onPrev func(prev json.RawMessage) error) (string, error) {
 	if !isObject(block) {
 		return "", errors.New("credfile: new block is not a JSON object")
 	}
-	return swap(path, block, true)
+	return swap(path, block, true, onPrev)
 }
 
 // Restore puts the block saved in backup back into the credentials file.
@@ -393,7 +401,7 @@ func Restore(path, backup string) error {
 		block = data
 	}
 	// The current block is backed up first, so a restore can itself be undone.
-	_, err = swap(path, block, true)
+	_, err = swap(path, block, true, nil)
 	return err
 }
 
@@ -426,7 +434,7 @@ func removeStaleTemps(dir string) {
 	}
 }
 
-func swap(path string, block json.RawMessage, withBackup bool) (backup string, err error) {
+func swap(path string, block json.RawMessage, withBackup bool, onPrev func(json.RawMessage) error) (backup string, err error) {
 	path, err = resolvePath(path)
 	if err != nil {
 		return "", err
@@ -450,6 +458,11 @@ func swap(path string, block json.RawMessage, withBackup bool) (backup string, e
 
 	if withBackup {
 		prev, _ := findOAuth(entries)
+		if onPrev != nil {
+			if err = onPrev(prev); err != nil {
+				return "", fmt.Errorf("credfile: pre-swap hook: %w", err)
+			}
+		}
 		if backup, err = writeBackup(filepath.Dir(path), prev); err != nil {
 			return "", err
 		}
