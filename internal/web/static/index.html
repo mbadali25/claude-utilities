@@ -40,7 +40,8 @@
   .scope { font-size:.85rem; color:var(--mut); }
   .enrol { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   #enrol-out { font-size:.9rem; min-height:1.5em; }
-  .acct { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  /* #acct only: the account cards carry a .acct class too, and a flex-centre here shrank their meters. */
+  #acct { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   #enrol-out .code { font:600 1.05rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:.06em; color:var(--fg); }
 
   /* Buttons: one primary per region, rest outlined. 36px+ hit height, 44px on touch. */
@@ -122,6 +123,7 @@
   .row { display:flex; align-items:center; gap:8px; min-width:0; }
   .row.between { justify-content:space-between; }
   .row.wrap { flex-wrap:wrap; }
+  .row.between > :first-child { flex:1 1 0; min-width:0; } /* long names wrap instead of pushing the state out of the card */
   .title { font-weight:650; font-size:1.05rem; overflow-wrap:anywhere; }
   .sub { color:var(--mut); font-size:.88rem; overflow-wrap:anywhere; }
   .empty { padding:16px; border:1px dashed var(--line-strong); border-radius:var(--r); color:var(--mut); grid-column:1 / -1; }
@@ -203,21 +205,21 @@
   .modal-head h2 { margin-right:auto; }
   .modal-head .x { min-height:32px; padding:0 9px; }
   .modal-head .x svg { width:13px; height:13px; display:block; }
-  .modal-body { padding:16px; overflow:auto; display:grid; gap:16px; align-content:start; }
+  .modal-body { padding:16px; overflow:auto; display:grid; grid-template-columns:minmax(0,1fr); gap:16px; align-content:start; }
   .modal-foot { display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
   .fld { display:grid; gap:6px; font-weight:500; }
   .fld input { width:100%; }
   .fld .hint { font-weight:400; font-size:.85rem; color:var(--mut); }
-  #pw-form { display:grid; gap:14px; }
+  #pw-form { display:grid; grid-template-columns:minmax(0,1fr); gap:14px; }
   #pw-msg:empty { display:none; }
 
   /* Import and add-account panels, both inside the Add a Claude account dialog */
-  .import { padding:14px 16px; border:1px solid var(--line); border-radius:var(--r); display:grid; gap:10px; background:var(--sunk); }
+  .import { padding:14px 16px; border:1px solid var(--line); border-radius:var(--r); display:grid; grid-template-columns:minmax(0,1fr); gap:10px; background:var(--sunk); }
   .import .lead { font-weight:600; color:var(--fg); }
   .import form { display:flex; gap:8px; flex-wrap:wrap; }
   .import select, .import input { flex:1 1 160px; min-width:0; }
   [hidden] { display:none !important; }
-  .add-flow { display:grid; gap:10px; }
+  .add-flow { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; }
   .add-flow form { display:flex; gap:8px; flex-wrap:wrap; }
   .add-flow input { flex:1 1 220px; min-width:0; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   /* The sign-in link is an <a> styled as a button; only it needs the colour reset, or it would
@@ -239,7 +241,7 @@
     .fp { font-size:1.5rem; }
     .stat dd { font-size:1.35rem; }
     /* On a phone the menu spans the header instead of the button, or its labels wrap. */
-    .acct { width:100%; position:relative; }
+    #acct { width:100%; position:relative; }
     .menuwrap { margin-left:auto; position:static; }
     .menu { left:0; right:0; min-width:0; }
     .modal-foot .btn { flex:1 1 auto; }
