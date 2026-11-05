@@ -196,6 +196,7 @@ type Hub struct {
 	expired    map[string]time.Time
 	ipHits     map[string][]time.Time
 	badHits    map[string][]time.Time // failed token or code hellos per source IP
+	adds       map[string]*addJob     // add-account jobs by id (addaccount.go)
 }
 
 // New returns a Hub that keeps enrolled hosts (token hashes only) in tokensPath.
@@ -213,7 +214,7 @@ func New(v *vault.Vault, r *ownership.Registry, tokensPath string, log *slog.Log
 		hosts: map[string]*host{}, byHash: map[string]string{}, codes: map[string]time.Time{},
 		pending: map[string]*pendEntry{}, suppressed: map[string]time.Time{},
 		expired: map[string]time.Time{}, ipHits: map[string][]time.Time{},
-		badHits: map[string][]time.Time{},
+		badHits: map[string][]time.Time{}, adds: map[string]*addJob{},
 	}
 	if err := h.load(); err != nil {
 		h.log.Error("load enrolled hosts failed", logx.Err(err))
@@ -238,6 +239,7 @@ func (h *Hub) Run(ctx context.Context) {
 		case <-t.C:
 			h.mu.Lock()
 			h.sweepLocked(h.now())
+			h.sweepAddsLocked(h.now())
 			h.mu.Unlock()
 		}
 	}
@@ -408,6 +410,13 @@ func (h *Hub) dispatch(c *conn, env proto.Envelope) bool {
 		}
 		h.touch(c, nil)
 		c.deliver(env)
+	case proto.TypeLoginURL, proto.TypeLoginDone:
+		// Unsolicited and long-lived: routed to the add-account job, not to a request waiter.
+		if env.ID == "" {
+			return false
+		}
+		h.touch(c, nil)
+		h.addFrame(c, env)
 	default:
 		return false
 	}
@@ -523,6 +532,7 @@ func (h *Hub) dropConn(c *conn) {
 			delete(h.pending, c.fp)
 		}
 	case stateEnrolled:
+		h.failAddsOnDropLocked(c)
 		if ho := h.hosts[c.hostID]; ho != nil && ho.c == c {
 			ho.c = nil
 			ho.report = proto.Report{}

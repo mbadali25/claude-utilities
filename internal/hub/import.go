@@ -61,15 +61,31 @@ func (h *Hub) Import(ctx context.Context, hostID, label string) (vault.Account, 
 	if exp.Err != "" {
 		return vault.Account{}, fmt.Errorf("hub: export failed: %s", logx.Redact(exp.Err))
 	}
-	if exp.Identity == "" {
+	acct, err := h.storeLogin(label, exp.Identity, exp.Block)
+	if err != nil {
+		return vault.Account{}, err
+	}
+	h.reg.SwapIn(acct.ID, hostID)
+	h.mu.Lock()
+	ho.identity = exp.Identity
+	h.mu.Unlock()
+	h.log.Info("login imported", "action", "import", "host_id", hostID, "account", acct.ID, "result", "ok")
+	return acct, nil
+}
+
+// storeLogin validates a login an agent produced and stores it as a new account: an identity is
+// required and must not already be stored, and only the claudeAiOauth block is kept. It claims no
+// ownership. The returned account has no Block.
+func (h *Hub) storeLogin(label, identity string, raw json.RawMessage) (vault.Account, error) {
+	if identity == "" {
 		return vault.Account{}, errors.New("hub: the host reports no signed-in account")
 	}
 	for _, a := range h.vault.List() {
-		if a.Identity == exp.Identity {
+		if a.Identity == identity {
 			return vault.Account{}, ErrAlreadyStored
 		}
 	}
-	block, err := oauthBlock(exp.Block)
+	block, err := oauthBlock(raw)
 	if err != nil {
 		return vault.Account{}, err
 	}
@@ -77,15 +93,10 @@ func (h *Hub) Import(ctx context.Context, hostID, label string) (vault.Account, 
 	if err != nil {
 		return vault.Account{}, err
 	}
-	acct := vault.Account{ID: id, Label: label, Identity: exp.Identity, Block: block, Updated: h.now()}
+	acct := vault.Account{ID: id, Label: label, Identity: identity, Block: block, Updated: h.now()}
 	if err := h.vault.Put(acct); err != nil {
-		return vault.Account{}, fmt.Errorf("hub: store imported login: %w", err)
+		return vault.Account{}, fmt.Errorf("hub: store login: %w", err)
 	}
-	h.reg.SwapIn(id, hostID)
-	h.mu.Lock()
-	ho.identity = exp.Identity
-	h.mu.Unlock()
-	h.log.Info("login imported", "action", "import", "host_id", hostID, "account", id, "result", "ok")
 	acct.Block = nil
 	return acct, nil
 }
