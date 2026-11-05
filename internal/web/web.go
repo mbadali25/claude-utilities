@@ -108,6 +108,7 @@ func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, now func()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
 	mux.HandleFunc("POST /login", s.login)
+	mux.HandleFunc("POST /api/logout", s.authPost(s.logout))
 	mux.HandleFunc("POST /api/password", s.authPost(s.setPassword))
 	mux.HandleFunc("GET /api/accounts", s.auth(s.accounts))
 	mux.HandleFunc("GET /api/hosts", s.auth(s.hosts))
@@ -160,6 +161,14 @@ func randToken(n int) string {
 }
 
 func eq(a, b string) bool { return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1 }
+
+// sessionCookie builds the session cookie: maxAge seconds for a fresh session, -1 to expire one
+// (Go writes that as "Max-Age=0"). Login and logout share this builder so no attribute can drift
+// apart - a cookie cleared under different attributes leaves the live one in the browser.
+func sessionCookie(value string, maxAge int) *http.Cookie {
+	return &http.Cookie{Name: cookieName, Value: value, Path: "/", HttpOnly: true, Secure: true,
+		SameSite: http.SameSiteStrictMode, MaxAge: maxAge}
+}
 
 // session returns the caller's live session and its id, or false.
 func (s *server) session(r *http.Request) (sess, bool) {
@@ -341,9 +350,26 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	id := randToken(32)
 	s.sessions[id] = sess{csrf: randToken(32), expires: s.now().Add(sessionTTL)}
 	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: id, Path: "/", HttpOnly: true, Secure: true,
-		SameSite: http.SameSiteStrictMode, MaxAge: int(sessionTTL.Seconds())})
+	http.SetCookie(w, sessionCookie(id, int(sessionTTL.Seconds())))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// --- logout ---
+
+// logout invalidates the caller's own session and expires the cookie. It needs a session and a
+// CSRF token (authPost), so a cross-site POST cannot sign the admin out, and a refused request
+// leaves the session alone. A logout without a session never reaches here: apiGate answers 401
+// with an empty body, like every other /api/ route, so a probe learns nothing. Other sessions
+// keep working - only setPassword drops them all. The session token is never logged.
+func (s *server) logout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(cookieName); err == nil {
+		s.mu.Lock()
+		delete(s.sessions, c.Value)
+		s.mu.Unlock()
+	}
+	http.SetCookie(w, sessionCookie("", -1))
+	logger.Info("logout", "action", "logout", "result", "ok", "source_ip", clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // --- admin password ---
