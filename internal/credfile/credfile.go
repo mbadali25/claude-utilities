@@ -5,7 +5,9 @@ package credfile
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,14 +20,18 @@ import (
 )
 
 const (
-	oauthKey    = "claudeAiOauth"
-	backupDir   = ".swap-backups"
-	backupKeep  = 5
-	lockSuffix  = ".swaplock"
-	credName    = ".credentials.json"
-	configEnv   = "CLAUDE_CONFIG_DIR"
-	backupExt   = ".json"
-	backupStamp = "20060102T150405.000000000Z"
+	oauthKey   = "claudeAiOauth"
+	backupDir  = ".swap-backups"
+	backupKeep = 5
+	lockSuffix = ".swaplock"
+	// reclaimSuffix names the guard that serialises stale-lock reclaim.
+	reclaimSuffix = ".reclaim"
+	credName      = ".credentials.json"
+	configEnv     = "CLAUDE_CONFIG_DIR"
+	backupExt     = ".json"
+	backupStamp   = "20060102T150405.000000000Z"
+	// maxBackupCollisions bounds the -NNNNNN suffix search for a free backup name.
+	maxBackupCollisions = 100000
 	// staleLockAge is how old a .swaplock must be before it is treated as left
 	// behind by a crashed process and reclaimed. A swap takes milliseconds.
 	staleLockAge = 2 * time.Minute
@@ -40,6 +46,9 @@ var (
 	ErrChangedDuringSwap = errors.New("credfile: credentials file changed during swap")
 	// ErrRefreshExpired means the block's refresh token is already expired.
 	ErrRefreshExpired = errors.New("credfile: refresh token expired")
+
+	// errMalformed is fixed text: encoding/json errors can quote file content.
+	errMalformed = errors.New("credfile: malformed credentials file")
 )
 
 // requiredKeys are the keys every claudeAiOauth block must carry.
@@ -53,6 +62,8 @@ var (
 	renameFn       = os.Rename
 	beforeRenameFn = func() {}
 	nowFn          = time.Now
+	// afterBackupFn runs right after the backup is written, before the temp file.
+	afterBackupFn = func(string) {}
 )
 
 // ResolvePath returns the credentials file path, honouring CLAUDE_CONFIG_DIR.
@@ -82,7 +93,7 @@ func parseTop(data []byte) ([]entry, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	tok, err := dec.Token()
 	if err != nil {
-		return nil, fmt.Errorf("credfile: malformed credentials file: %w", err)
+		return nil, errMalformed
 	}
 	if d, ok := tok.(json.Delim); !ok || d != '{' {
 		return nil, errors.New("credfile: credentials file is not a JSON object")
@@ -91,17 +102,17 @@ func parseTop(data []byte) ([]entry, error) {
 	for dec.More() {
 		kt, err := dec.Token()
 		if err != nil {
-			return nil, fmt.Errorf("credfile: malformed credentials file: %w", err)
+			return nil, errMalformed
 		}
 		key, _ := kt.(string)
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
-			return nil, fmt.Errorf("credfile: malformed credentials file: %w", err)
+			return nil, errMalformed
 		}
 		out = append(out, entry{key, append(json.RawMessage(nil), raw...)})
 	}
 	if _, err := dec.Token(); err != nil {
-		return nil, fmt.Errorf("credfile: malformed credentials file: %w", err)
+		return nil, errMalformed
 	}
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, errors.New("credfile: trailing data in credentials file")
@@ -116,11 +127,13 @@ func encodeTop(entries []entry) ([]byte, error) {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		k, err := json.Marshal(e.key)
-		if err != nil {
+		var kb bytes.Buffer
+		enc := json.NewEncoder(&kb)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(e.key); err != nil {
 			return nil, err
 		}
-		b.Write(k)
+		b.Write(bytes.TrimSuffix(kb.Bytes(), []byte("\n")))
 		b.WriteByte(':')
 		b.Write(e.val)
 	}
@@ -174,40 +187,74 @@ func ReadBlock(path string) (json.RawMessage, error) {
 	return b, nil
 }
 
-// ValidateBlock checks the block has all required keys and an unexpired refresh token.
-func ValidateBlock(b json.RawMessage) error {
+// checkShape verifies b is an object carrying every required key with a
+// non-null value, and returns its fields.
+func checkShape(b json.RawMessage) (map[string]json.RawMessage, error) {
 	var m map[string]json.RawMessage
-	if err := json.Unmarshal(b, &m); err != nil {
-		return fmt.Errorf("credfile: block is not a JSON object: %w", err)
+	if err := json.Unmarshal(b, &m); err != nil || m == nil {
+		return nil, errors.New("credfile: block is not a JSON object")
 	}
 	var missing []string
 	for _, k := range requiredKeys {
-		if _, ok := m[k]; !ok {
+		if v, ok := m[k]; !ok || string(bytes.TrimSpace(v)) == "null" {
 			missing = append(missing, k)
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("credfile: block missing keys: %s", strings.Join(missing, ", "))
+		return nil, fmt.Errorf("credfile: block missing keys: %s", strings.Join(missing, ", "))
 	}
-	var ms int64
+	return m, nil
+}
+
+// ValidateBlock checks the block has all required keys (non-null) and an
+// unexpired refresh token. refreshTokenExpiresAt may be any JSON number.
+func ValidateBlock(b json.RawMessage) error {
+	m, err := checkShape(b)
+	if err != nil {
+		return err
+	}
+	var ms float64
 	if err := json.Unmarshal(m["refreshTokenExpiresAt"], &ms); err != nil {
 		return errors.New("credfile: refreshTokenExpiresAt is not a number")
 	}
-	if !time.UnixMilli(ms).After(nowFn()) {
+	if !time.UnixMilli(int64(ms)).After(nowFn()) {
 		return ErrRefreshExpired
 	}
 	return nil
 }
 
-// acquire takes the swap lock. A lock older than staleLockAge is assumed to
-// belong to a crashed process and is reclaimed.
+// newToken returns a random owner token for a lock file.
+func newToken() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", nowFn().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// acquire takes the swap lock. The lock file holds a random owner token and
+// release only removes the file while it still carries that token. A lock older
+// than staleLockAge is assumed to belong to a crashed process and is reclaimed;
+// reclaimers are serialised by a second O_EXCL guard file and re-check the
+// lock's age under that guard, so one reclaimer cannot delete a lock another
+// reclaimer has just taken.
 func acquire(path string) (release func(), err error) {
 	lock := path + lockSuffix
+	token := newToken()
 	for attempt := 0; attempt < 3; attempt++ {
 		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
-			f.Close()
-			return func() { os.Remove(lock) }, nil
+			_, werr := f.WriteString(token)
+			cerr := f.Close()
+			if e := errors.Join(werr, cerr); e != nil {
+				os.Remove(lock)
+				return nil, fmt.Errorf("credfile: lock: %w", e)
+			}
+			return func() {
+				if data, rerr := os.ReadFile(lock); rerr == nil && string(data) == token {
+					os.Remove(lock)
+				}
+			}, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("credfile: lock: %w", err)
@@ -219,9 +266,32 @@ func acquire(path string) (release func(), err error) {
 		if time.Since(st.ModTime()) < staleLockAge {
 			return nil, ErrBusy
 		}
-		os.Remove(lock)
+		if !reclaimStale(lock) {
+			return nil, ErrBusy
+		}
 	}
 	return nil, ErrBusy
+}
+
+// reclaimStale removes a stale lock under an exclusive guard. It reports false
+// when another reclaimer holds the guard.
+func reclaimStale(lock string) bool {
+	guard := lock + reclaimSuffix
+	g, err := os.OpenFile(guard, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		// A guard left by a crashed reclaimer would block forever: age it out.
+		if st, serr := os.Stat(guard); serr == nil && time.Since(st.ModTime()) >= staleLockAge {
+			os.Remove(guard)
+		}
+		return false
+	}
+	g.Close()
+	defer os.Remove(guard)
+	// Re-check under the guard: the lock may have been replaced by a fresh one.
+	if st, serr := os.Stat(lock); serr == nil && time.Since(st.ModTime()) >= staleLockAge {
+		os.Remove(lock)
+	}
+	return true
 }
 
 func hashFile(path string) ([sha256.Size]byte, error) {
@@ -242,12 +312,18 @@ func isObject(b []byte) bool {
 }
 
 // resolvePath follows a symlinked credentials file so the swap replaces the
-// target, not the link. A path that does not exist yet is returned unchanged.
-func resolvePath(path string) string {
-	if r, err := filepath.EvalSymlinks(path); err == nil {
-		return r
+// target, not the link. A path that does not exist yet is returned unchanged;
+// a dangling symlink is an error.
+func resolvePath(path string) (string, error) {
+	r, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return r, nil
 	}
-	return path
+	// A dangling symlink must not be replaced by a regular file.
+	if st, lerr := os.Lstat(path); lerr == nil && st.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("credfile: credentials path is a dangling symlink")
+	}
+	return path, nil
 }
 
 // Replace swaps only the claudeAiOauth block, after backing up the previous
@@ -270,7 +346,10 @@ func Replace(path string, block json.RawMessage) (string, error) {
 // Restore puts the block saved in backup back into the credentials file.
 // backup must live inside the credentials file's .swap-backups directory.
 func Restore(path, backup string) error {
-	path = resolvePath(path)
+	path, rerr := resolvePath(path)
+	if rerr != nil {
+		return rerr
+	}
 	bd, err1 := filepath.Abs(filepath.Join(filepath.Dir(path), backupDir))
 	ba, err2 := filepath.Abs(backup)
 	if err1 != nil || err2 != nil {
@@ -279,6 +358,10 @@ func Restore(path, backup string) error {
 	rel, err := filepath.Rel(bd, ba)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return errors.New("credfile: backup is outside the backup directory")
+	}
+	// Reject symlinks and other non-regular files: confinement above is lexical.
+	if st, lerr := os.Lstat(ba); lerr != nil || !st.Mode().IsRegular() {
+		return errors.New("credfile: backup is not a regular file")
 	}
 	data, err := os.ReadFile(ba)
 	if err != nil {
@@ -290,6 +373,10 @@ func Restore(path, backup string) error {
 		if !isObject(data) {
 			return errors.New("credfile: backup is not a JSON object")
 		}
+		// Shape only: an old block may legitimately hold an expired refresh token.
+		if _, serr := checkShape(data); serr != nil {
+			return fmt.Errorf("credfile: backup rejected: %w", serr)
+		}
 		block = data
 	}
 	_, err = swap(path, block, false)
@@ -297,7 +384,10 @@ func Restore(path, backup string) error {
 }
 
 func swap(path string, block json.RawMessage, withBackup bool) (backup string, err error) {
-	path = resolvePath(path)
+	path, err = resolvePath(path)
+	if err != nil {
+		return "", err
+	}
 	release, err := acquire(path)
 	if err != nil {
 		return "", err
@@ -319,6 +409,7 @@ func swap(path string, block json.RawMessage, withBackup bool) (backup string, e
 		if backup, err = writeBackup(filepath.Dir(path), prev); err != nil {
 			return "", err
 		}
+		afterBackupFn(backup)
 	}
 
 	// A clean abort before the rename deletes the backup it just wrote so
@@ -389,12 +480,19 @@ func writeBackup(dir string, prev json.RawMessage) (string, error) {
 	if err := os.MkdirAll(bdir, 0o700); err != nil {
 		return "", fmt.Errorf("credfile: backup dir: %w", err)
 	}
+	// MkdirAll does not tighten a pre-existing directory; backups hold old refresh tokens.
+	if !isWindows {
+		if err := os.Chmod(bdir, 0o700); err != nil {
+			return "", fmt.Errorf("credfile: backup dir mode: %w", err)
+		}
+	}
 	data := []byte(prev)
 	if prev == nil {
 		data = []byte("null")
 	}
+	created := false
 	name := filepath.Join(bdir, nowFn().UTC().Format(backupStamp)+backupExt)
-	for i := 1; ; i++ {
+	for i := 1; i <= maxBackupCollisions; i++ {
 		f, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			_, werr := f.Write(data)
@@ -404,12 +502,16 @@ func writeBackup(dir string, prev json.RawMessage) (string, error) {
 				os.Remove(name)
 				return "", fmt.Errorf("credfile: write backup: %w", err)
 			}
+			created = true
 			break
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return "", fmt.Errorf("credfile: create backup: %w", err)
 		}
 		name = filepath.Join(bdir, fmt.Sprintf("%s-%06d%s", nowFn().UTC().Format(backupStamp), i, backupExt))
+	}
+	if !created {
+		return "", errors.New("credfile: too many backup name collisions")
 	}
 	pruneBackups(bdir, filepath.Base(name))
 	return name, nil

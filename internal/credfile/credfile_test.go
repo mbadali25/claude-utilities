@@ -53,7 +53,7 @@ func TestReplaceKeepsMcpOAuthByteIdentical(t *testing.T) {
 func TestReplaceCreatesBackupFirst(t *testing.T) {
 	p := write(t, t.TempDir(), fileWith(`{"old":true}`))
 	renameFn = func(a, b string) error { return errors.New("boom") }
-	defer func() { renameFn = os.Rename }()
+	t.Cleanup(func() { renameFn = os.Rename })
 	backup, err := Replace(p, json.RawMessage(oauth("n", 1)))
 	if err == nil || backup == "" {
 		t.Fatalf("want error with backup, got %q %v", backup, err)
@@ -86,7 +86,7 @@ func TestReplaceFailureLeavesOriginal(t *testing.T) {
 	orig := fileWith(`{"old":true}`)
 	p := write(t, dir, orig)
 	renameFn = func(a, b string) error { return errors.New("boom") }
-	defer func() { renameFn = os.Rename }()
+	t.Cleanup(func() { renameFn = os.Rename })
 	if _, err := Replace(p, json.RawMessage(`{"n":1}`)); err == nil {
 		t.Fatal("want error")
 	}
@@ -103,7 +103,8 @@ func TestReplaceFailureLeavesOriginal(t *testing.T) {
 }
 
 func TestRestoreRecoversPreviousBlock(t *testing.T) {
-	p := write(t, t.TempDir(), fileWith(`{"old":true}`))
+	old := oauth("old", 1)
+	p := write(t, t.TempDir(), fileWith(old))
 	backup, err := Replace(p, json.RawMessage(`{"n":1}`))
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +113,7 @@ func TestRestoreRecoversPreviousBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := ReadBlock(p)
-	if string(b) != `{"old":true}` {
+	if string(b) != old {
 		t.Fatalf("block = %s", b)
 	}
 	data, _ := os.ReadFile(p)
@@ -222,7 +223,7 @@ func TestReplaceAbortsIfFileChangedDuringSwap(t *testing.T) {
 	p := write(t, t.TempDir(), fileWith(`{"o":1}`))
 	other := fileWith(`{"claude":"refreshed"}`)
 	beforeRenameFn = func() { os.WriteFile(p, []byte(other), 0o600) }
-	defer func() { beforeRenameFn = func() {} }()
+	t.Cleanup(func() { beforeRenameFn = func() {} })
 	if _, err := Replace(p, json.RawMessage(`{"n":1}`)); !errors.Is(err, ErrChangedDuringSwap) {
 		t.Fatalf("err = %v", err)
 	}
@@ -250,7 +251,7 @@ func TestBackupNamesUniqueWithFrozenClock(t *testing.T) {
 	p := write(t, dir, fileWith(`{"o":1}`))
 	fixed := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	nowFn = func() time.Time { return fixed }
-	defer func() { nowFn = time.Now }()
+	t.Cleanup(func() { nowFn = time.Now })
 	a, err1 := Replace(p, json.RawMessage(`{"n":1}`))
 	b, err2 := Replace(p, json.RawMessage(`{"n":2}`))
 	if err1 != nil || err2 != nil || a == b {
@@ -280,7 +281,7 @@ func TestNewestBackupSurvivesPruneWithFrozenClock(t *testing.T) {
 	p := write(t, dir, fileWith(`{"o":1}`))
 	fixed := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	nowFn = func() time.Time { return fixed }
-	defer func() { nowFn = time.Now }()
+	t.Cleanup(func() { nowFn = time.Now })
 	for i := 0; i < 14; i++ {
 		b, err := Replace(p, json.RawMessage(`{"n":1}`))
 		if err != nil {
@@ -375,7 +376,7 @@ func TestChangedDuringSwapLeavesNoOrphanBackup(t *testing.T) {
 	dir := t.TempDir()
 	p := write(t, dir, fileWith(`{"o":1}`))
 	beforeRenameFn = func() { os.WriteFile(p, []byte(fileWith(`{"z":1}`)), 0o600) }
-	defer func() { beforeRenameFn = func() {} }()
+	t.Cleanup(func() { beforeRenameFn = func() {} })
 	b, err := Replace(p, json.RawMessage(`{"n":1}`))
 	if !errors.Is(err, ErrChangedDuringSwap) {
 		t.Fatalf("err = %v", err)
@@ -463,5 +464,191 @@ func TestResolvePath(t *testing.T) {
 	p, err = ResolvePath()
 	if err != nil || !strings.HasSuffix(p, filepath.Join(".claude", ".credentials.json")) {
 		t.Fatalf("%q %v", p, err)
+	}
+}
+
+func TestBackupWrittenBeforeTempFile(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, fileWith(`{"o":1}`))
+	called := false
+	afterBackupFn = func(string) {
+		called = true
+		tmps, _ := filepath.Glob(filepath.Join(dir, ".credentials-*.tmp"))
+		if len(tmps) != 0 {
+			t.Errorf("temp file exists before backup completed: %v", tmps)
+		}
+	}
+	t.Cleanup(func() { afterBackupFn = func(string) {} })
+	if _, err := Replace(p, json.RawMessage(`{"n":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("afterBackupFn not called")
+	}
+}
+
+func TestValidateBlockRejectsNullRequiredValue(t *testing.T) {
+	future := time.Now().Add(time.Hour).UnixMilli()
+	m := map[string]any{}
+	_ = json.Unmarshal([]byte(oauth("x", future)), &m)
+	m["accessToken"] = nil
+	b, _ := json.Marshal(m)
+	if err := ValidateBlock(b); err == nil {
+		t.Fatal("null accessToken accepted")
+	}
+}
+
+func TestValidateBlockAcceptsFloatExpiry(t *testing.T) {
+	future := float64(time.Now().Add(time.Hour).UnixMilli())
+	m := map[string]any{}
+	_ = json.Unmarshal([]byte(oauth("x", 1)), &m)
+	m["refreshTokenExpiresAt"] = future
+	b, _ := json.Marshal(m)
+	if err := ValidateBlock(b); err != nil {
+		t.Fatalf("float expiry rejected: %v", err)
+	}
+	exp := strings.Replace(oauth("x", 1), `"refreshTokenExpiresAt":1`, `"refreshTokenExpiresAt":4.1e12`, 1)
+	if err := ValidateBlock(json.RawMessage(exp)); err != nil {
+		t.Fatalf("4.1e12 rejected: %v", err)
+	}
+}
+
+func TestRestoreRejectsBadShapeBackup(t *testing.T) {
+	dir := t.TempDir()
+	orig := fileWith(oauth("live", 1))
+	p := write(t, dir, orig)
+	bdir := filepath.Join(dir, backupDir)
+	if err := os.MkdirAll(bdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []string{`{}`, `{"accessToken":"a"}`} {
+		b := filepath.Join(bdir, "bad.json")
+		os.WriteFile(b, []byte(c), 0o600)
+		if err := Restore(p, b); err == nil {
+			t.Fatalf("backup %s accepted", c)
+		}
+	}
+	if data, _ := os.ReadFile(p); string(data) != orig {
+		t.Fatal("file changed")
+	}
+}
+
+func TestRestoreRejectsSymlinkBackup(t *testing.T) {
+	dir := t.TempDir()
+	orig := fileWith(oauth("live", 1))
+	p := write(t, dir, orig)
+	bdir := filepath.Join(dir, backupDir)
+	if err := os.MkdirAll(bdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "target.json")
+	os.WriteFile(target, []byte(oauth("evil", 1)), 0o600)
+	link := filepath.Join(bdir, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := Restore(p, link); err == nil {
+		t.Fatal("symlink backup accepted")
+	}
+	if data, _ := os.ReadFile(p); string(data) != orig {
+		t.Fatal("file changed")
+	}
+}
+
+func TestBackupDirTightenedTo0700(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("modes not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	p := write(t, dir, fileWith(`{"o":1}`))
+	bdir := filepath.Join(dir, backupDir)
+	if err := os.MkdirAll(bdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(bdir, 0o755)
+	if _, err := Replace(p, json.RawMessage(`{"n":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(bdir)
+	if st.Mode().Perm() != 0o700 {
+		t.Fatalf("mode = %v", st.Mode().Perm())
+	}
+}
+
+func TestReplaceDanglingSymlinkErrors(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, ".credentials.json")
+	if err := os.Symlink(filepath.Join(dir, "missing.json"), p); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := Replace(p, json.RawMessage(`{"n":1}`)); err == nil {
+		t.Fatal("dangling symlink accepted")
+	}
+	if st, err := os.Lstat(p); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("symlink was replaced")
+	}
+}
+
+func TestMalformedErrorDoesNotEchoContent(t *testing.T) {
+	p := write(t, t.TempDir(), `{"claudeAiOauth": SECRETXYZ}`)
+	_, err := ReadBlock(p)
+	if err == nil || strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), "'S'") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestReplaceKeepsHTMLKeyBytes(t *testing.T) {
+	p := write(t, t.TempDir(), `{"a<b&c>":1,"claudeAiOauth":{"o":1}}`)
+	if _, err := Replace(p, json.RawMessage(`{"n":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(p)
+	if !strings.Contains(string(data), `"a<b&c>":1`) {
+		t.Fatalf("key rewritten: %s", data)
+	}
+}
+
+func TestReleaseKeepsForeignLock(t *testing.T) {
+	p := write(t, t.TempDir(), fileWith(`{"o":1}`))
+	release, err := acquire(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another process reclaimed the lock: content now carries a different owner.
+	if err := os.WriteFile(p+lockSuffix, []byte("other-owner"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if _, err := os.Stat(p + lockSuffix); err != nil {
+		t.Fatal("release removed a lock it does not own")
+	}
+}
+
+func TestStaleReclaimLeavesNoReclaimFile(t *testing.T) {
+	p := write(t, t.TempDir(), fileWith(`{"o":1}`))
+	os.WriteFile(p+lockSuffix, []byte("dead"), 0o600)
+	old := time.Now().Add(-2 * staleLockAge)
+	os.Chtimes(p+lockSuffix, old, old)
+	release, err := acquire(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p + lockSuffix + reclaimSuffix); err == nil {
+		t.Fatal("reclaim guard left behind")
+	}
+	release()
+	if _, err := os.Stat(p + lockSuffix); err == nil {
+		t.Fatal("own lock not released")
+	}
+}
+
+func TestReclaimGuardHeldReturnsBusy(t *testing.T) {
+	p := write(t, t.TempDir(), fileWith(`{"o":1}`))
+	os.WriteFile(p+lockSuffix, []byte("dead"), 0o600)
+	old := time.Now().Add(-2 * staleLockAge)
+	os.Chtimes(p+lockSuffix, old, old)
+	os.WriteFile(p+lockSuffix+reclaimSuffix, nil, 0o600) // another reclaimer is active
+	if _, err := acquire(p); !errors.Is(err, ErrBusy) {
+		t.Fatalf("err = %v", err)
 	}
 }
