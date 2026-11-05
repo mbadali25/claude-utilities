@@ -118,9 +118,16 @@ function Get-TunnelConfig {
 function Get-SshArgumentList {
     param([pscustomobject] $Entry)
 
+    # `-F NUL` ignores the user's ssh_config and the system-wide one, so no
+    # DynamicForward, LocalForward, ProxyCommand or ControlMaster can leak in.
+    # The -R below is the only forward this process may ever carry.
     @(
+        '-F', 'NUL'
         '-i', $KeyPath
         '-N'
+        '-o', 'ForwardAgent=no'
+        '-o', 'ForwardX11=no'
+        '-o', 'PermitLocalCommand=no'
         '-o', 'IdentitiesOnly=yes'
         '-o', 'BatchMode=yes'
         '-o', 'PubkeyAuthentication=yes'
