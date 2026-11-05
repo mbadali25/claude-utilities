@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"claude-utilities/internal/proto"
+	"claude-utilities/internal/vault"
 )
 
 func (f *fixture) vaultBlock(id string) string {
@@ -110,8 +111,11 @@ func TestSwapRejectsBadBlocks(t *testing.T) {
 func TestSwapNoOpRecordsHolderAndIdentity(t *testing.T) {
 	f := newFixture(t)
 	f.seedAccounts()
+	if err := f.v.Put(vault.Account{ID: "A", Label: "a", Identity: "id-a", Block: json.RawMessage(`{"refreshToken":"rt-a"}`)}); err != nil {
+		t.Fatal(err)
+	}
 	a, _, id := f.enrol("box")
-	f.newScript("id-a", `{"tok":"A-live"}`).serve(a)
+	f.newScript("id-a", `{"refreshToken":"rt-a"}`).serve(a)
 	if err := f.h.Swap(context.Background(), id, "A"); err != nil {
 		t.Fatal(err)
 	}
@@ -207,19 +211,60 @@ func TestAllowPersistFailureKeepsEntryForRetry(t *testing.T) {
 	}
 }
 
-func TestReconnectRestoresHolder(t *testing.T) {
+// A report is an agent-supplied claim; it must never make the reporter the owner of a server-owned account.
+func TestReportedIdentityDoesNotPromoteToOwner(t *testing.T) {
 	f := newFixture(t)
 	f.seedAccounts()
-	a, token, id := f.enrol("box")
-	rep := proto.Report{ActiveIdentity: "id-a", CredsPresent: true}
-	a.send(proto.TypeReport, "", rep)
-	eventually(t, func() bool { return f.reg.OwnerOf("A").HostID == id })
-	_ = a.ws.CloseNow()
-	eventually(t, func() bool { return f.reg.OwnerOf("A").Server })
-	b := f.dial("", proto.Hello{Token: token, HostName: "box", OS: "linux"})
-	eventually(t, func() bool { return f.h.Hosts()[0].Online })
-	b.send(proto.TypeReport, "", rep)
-	eventually(t, func() bool { return f.reg.OwnerOf("A").HostID == id })
+	a, _, id := f.enrol("box")
+	a.send(proto.TypeReport, "", proto.Report{ActiveIdentity: "id-a", CredsPresent: true})
+	eventually(t, func() bool { return f.h.Hosts()[0].ActiveAccount == "A" })
+	if o := f.reg.OwnerOf("A"); !o.Server {
+		t.Fatalf("owner %+v, a report must not take ownership for %s", o, id)
+	}
+}
+
+// Host B only claims alice's identity; its swap must leave alice's stored login intact.
+func TestClaimedIdentityCannotOverwriteVaultBlock(t *testing.T) {
+	f := newFixture(t)
+	f.seedAccounts()
+	b, _, id := f.enrol("boxB")
+	f.newScript("id-a", `{"tok":"B-forged"}`).serve(b)
+	b.send(proto.TypeReport, "", proto.Report{ActiveIdentity: "id-a", CredsPresent: true})
+	eventually(t, func() bool { return f.h.Hosts()[0].ActiveAccount == "A" })
+	if err := f.h.Swap(context.Background(), id, "B"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.vaultBlock("A"); got != `{"tok":"A-stored"}` {
+		t.Fatalf("vault A overwritten by a claimant: %s", got)
+	}
+}
+
+// A no-op swap records a holder only when the exported login shares the stored refresh-token lineage.
+func TestNoOpSwapRecordsHolderOnlyOnLineageMatch(t *testing.T) {
+	for name, tc := range map[string]struct {
+		block   string
+		wantOwn bool
+	}{
+		"same lineage":      {`{"refreshToken":"rt-a","accessToken":"new"}`, true},
+		"different lineage": {`{"refreshToken":"rt-forged"}`, false},
+		"no refresh token":  {`{"tok":"A-live"}`, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.seedAccounts()
+			if err := f.v.Put(vault.Account{ID: "A", Label: "a", Identity: "id-a", Block: json.RawMessage(`{"refreshToken":"rt-a"}`)}); err != nil {
+				t.Fatal(err)
+			}
+			a, _, id := f.enrol("box")
+			f.newScript("id-a", tc.block).serve(a)
+			if err := f.h.Swap(context.Background(), id, "A"); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.reg.OwnerOf("A").HostID == id; got != tc.wantOwn {
+				t.Fatalf("owner recorded = %v, want %v", got, tc.wantOwn)
+			}
+		})
+	}
 }
 
 func TestReportDoesNotStealAccountOwnedByAnotherHost(t *testing.T) {

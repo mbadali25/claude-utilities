@@ -424,26 +424,22 @@ func (h *Hub) touch(c *conn, rep *proto.Report) {
 			delete(ho.reloadIDs, k)
 		}
 	}
-	h.restoreHolderLocked(ho)
 }
 
-// restoreHolderLocked re-registers a host that (re)connected and reports using a stored account
-// the registry has no holder record for, e.g. after HostLost or a server restart. It never takes an
-// account another host owns. Callers hold h.mu.
-func (h *Hub) restoreHolderLocked(ho *host) {
-	if ho.identity == "" {
-		return
-	}
-	for _, a := range h.vault.List() {
-		if a.Identity != ho.identity {
-			continue
+// sameLineage reports whether two login blocks carry the same non-empty refresh token, i.e. the
+// exported login is demonstrably the stored account's. Identity in a report is only a claim.
+func sameLineage(a, b json.RawMessage) bool {
+	rt := func(raw json.RawMessage) string {
+		var v struct {
+			RefreshToken string `json:"refreshToken"`
 		}
-		if _, holds := h.reg.HostsUsing(a.ID)[ho.ID]; !holds && h.reg.OwnerOf(a.ID).Server {
-			h.reg.SwapIn(a.ID, ho.ID)
-			h.log.Info("holder restored", "action", "restore", "host_id", ho.ID, "account", a.ID, "result", "ok")
+		if json.Unmarshal(raw, &v) != nil {
+			return ""
 		}
-		return
+		return v.RefreshToken
 	}
+	x := rt(a)
+	return x != "" && x == rt(b)
 }
 
 // dropConn runs when a connection's handler exits.
@@ -634,8 +630,8 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 			"result", "host does not own the live login")
 	}
 	if live.ID == target.ID {
-		if !holds && owner.Server {
-			h.reg.SwapIn(live.ID, hostID) // record a holder the registry lost, e.g. after a restart
+		if !holds && owner.Server && sameLineage(block, live.Block) {
+			h.reg.SwapIn(live.ID, hostID) // exported login matches the stored one: record the holder
 		}
 		h.mu.Lock()
 		ho.identity = target.Identity
