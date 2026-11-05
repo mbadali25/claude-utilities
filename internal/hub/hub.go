@@ -222,6 +222,8 @@ type Hub struct {
 	onReject func(error)
 	// onSwap is told when an account lands on a host (SetOnSwap).
 	onSwap func(accountID string)
+	// onReplaced is told when an account's stored login was replaced (SetOnReplaced).
+	onReplaced func(accountID string)
 
 	mu         sync.Mutex
 	hosts      map[string]*host
@@ -272,6 +274,14 @@ func (h *Hub) SetOnSwap(fn func(accountID string)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.onSwap = fn
+}
+
+// SetOnReplaced registers a callback told which account just had its stored login replaced ("sign in
+// again"). The usage poller uses it to reset that account's backoff. Call before serving.
+func (h *Hub) SetOnReplaced(fn func(accountID string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onReplaced = fn
 }
 
 func (h *Hub) noteSwap(accountID string) {

@@ -205,6 +205,32 @@ func (v *Vault) Delete(id string) error {
 	return nil
 }
 
+// ReplaceBlock swaps one account's login block and nothing else: ID, label and identity stay. It is
+// the "sign in again" write, so like Delete it copies the previous vault bytes to vault.bin.bak
+// first, and a failed write puts the old block back. An unknown id is ErrNotFound and writes nothing.
+func (v *Vault) ReplaceBlock(id string, block json.RawMessage, at time.Time) error {
+	if len(block) == 0 {
+		return errors.New("vault: block required")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	prev, ok := v.accounts[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if err := v.file.backup(); err != nil {
+		return err
+	}
+	next := prev
+	next.Block, next.Updated = append(json.RawMessage(nil), block...), at
+	v.accounts[id] = next
+	if err := v.save(); err != nil {
+		v.accounts[id] = prev
+		return err
+	}
+	return nil
+}
+
 // save encrypts with a fresh nonce and replaces the file atomically (0600).
 // Caller holds v.mu.
 func (v *Vault) save() error {

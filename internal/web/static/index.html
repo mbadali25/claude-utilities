@@ -296,6 +296,13 @@
   .acct-note { font-size:var(--fs2); color:var(--mut); }
   .acct-note.bad { color:var(--bad); }
   .acct-note:empty { display:none; }
+  /* An account whose login the endpoint refuses. The sentence says it in words and the primary
+     button is the one way out, so it sits on the collapsed face where the card is scanned. */
+  .acct-resign { display:flex; align-items:center; justify-content:space-between; gap:var(--s4) var(--s5); flex-wrap:wrap; }
+  .acct-resign p { flex:1 1 200px; min-width:0; font-size:var(--fs2); color:var(--fg); }
+  @media (pointer:coarse) { .acct-resign .btn { min-height:44px; } }
+  .import input[readonly] { background:var(--sunk); color:var(--mut); cursor:default; }
+  .add-flow .warn-note { color:var(--fg); font-weight:600; }
   /* The Accounts toolbar: open/close every card, and ask for a poll. */
   .acc-tools { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap; margin:0 0 var(--s5); }
   .acc-tools .count, .acc-tools .say { font-size:var(--fs2); color:var(--mut); }
@@ -760,7 +767,7 @@
     </button>
   </div>
   <div class="modal-body">
-    <div class="import">
+    <div class="import" id="import-panel">
       <p class="lead">Add account: import from a logged-in host</p>
       <form id="import-form">
         <select name="host" id="import-host" aria-label="Host"></select>
@@ -778,6 +785,7 @@
       </form>
       <div class="add-flow" id="add-flow" hidden>
         <p id="add-msg" role="status" aria-live="polite"></p>
+        <p id="add-warn" class="warn-note" role="status" hidden></p>
         <a class="btn primary" id="add-link" target="_blank" rel="noopener noreferrer" hidden>Open Anthropic sign-in</a>
         <form id="add-code-form" hidden>
           <input name="code" id="add-code" autocomplete="off" spellcheck="false" maxlength="2048" required aria-label="Code from Anthropic's page">
@@ -785,7 +793,7 @@
         </form>
         <div class="actions"><button type="button" class="btn danger" id="add-cancel">Cancel sign-in</button></div>
       </div>
-      <p class="sub">The sign-in is completed on Anthropic's own page. claude-swap never sees your password; it only passes the link and the one-time code. Closing this dialog leaves a started sign-in running; it stays in the Account menu.</p>
+      <p class="sub" id="add-sub">The sign-in is completed on Anthropic's own page. claude-swap never sees your password; it only passes the link and the one-time code. Closing this dialog leaves a started sign-in running; it stays in the Account menu.</p>
     </div>
   </div>
 </dialog>
@@ -1448,6 +1456,17 @@
     var brief = el('div', undefined, 'acct-brief meters');
     brief.appendChild(meter('7-day window', a.sevenDay));
     c.appendChild(brief);
+
+    // A refused login cannot recover by waiting: say so in words and offer the one fix, on the face.
+    if (a.error === 'unauthorized') {
+      var rs = el('div', undefined, 'acct-resign');
+      rs.appendChild(el('p', 'Anthropic refused the stored login. Sign in again to replace it.'));
+      var rb = el('button', 'Sign in again', 'btn primary acct-resign-btn'); rb.type = 'button';
+      rb.id = 'acct-resign-' + a.id;
+      rb.setAttribute('aria-label', 'Sign in again as ' + a.label);
+      rb.addEventListener('click', function () { openResign(a); });
+      rs.appendChild(rb); c.appendChild(rs);
+    }
 
     // The note is read, not announced: ten refused cards would otherwise insert ten live regions
     // at once, against the one in the panel that already says what the round did.
@@ -2500,8 +2519,9 @@
   });
   // Add account. The sign-in URL and the code live only in the DOM and in memory: never in
   // storage, the address bar or the title. The link is shown only while the hub says awaiting_code.
-  var add = { id: null, timer: null, state: '' };
-  var A = { form: $('#add-form'), start: $('#add-start'), flow: $('#add-flow'), msg: $('#add-msg'), link: $('#add-link'),
+  // add.target is the account a "Sign in again" job replaces; null for a new account.
+  var add = { id: null, timer: null, state: '', target: null };
+  var A = { form: $('#add-form'), start: $('#add-start'), flow: $('#add-flow'), msg: $('#add-msg'), link: $('#add-link'), warn: $('#add-warn'),
             codeForm: $('#add-code-form'), code: $('#add-code'), send: $('#add-send'), cancel: $('#add-cancel'),
             busy: $('#add-busy'), note: $('#mi-add-note') };
   var LINK_OK = /^https:\/\/claude\.(com|ai)\//;
@@ -2516,8 +2536,24 @@
     A.busy.querySelector('.txt').textContent = waiting ? 'Sign-in needs the code' : 'Sign-in running';
     A.note.textContent = waiting ? 'needs code' : 'running';
   }
+  // Replace mode turns the sign-in panel into "Sign in again" for one account: the import panel is
+  // hidden, the label is the account's own and read-only, and the host picks where the sign-in runs.
+  var ADD_SUB = $('#add-sub').textContent;
+  function addMode(a) {
+    add.target = a || null;
+    $('#import-panel').hidden = !!a;
+    $('#add-sec-h').textContent = a ? 'Sign in again' : 'Add a Claude account';
+    $('#add-h').textContent = a ? 'Replace the login stored for ' + a.label : 'Add account: sign in with Anthropic';
+    A.form.label.readOnly = !!a;
+    A.form.label.value = a ? a.label : '';
+    A.form.label.setAttribute('aria-label', a ? 'Account being replaced' : 'Label for the new account');
+    $('#add-sub').textContent = a
+      ? 'Sign in as the same Anthropic account. The sign-in is completed on Anthropic\'s own page and claude-swap only passes the link and the one-time code. A different account is refused and nothing is stored. No host is signed out or changed; the vault file it replaces is kept as vault.bin.bak.'
+      : ADD_SUB;
+  }
   function addIdle() { // back to the start form; drops the link and any code
     clearTimeout(add.timer); add.id = null; add.state = '';
+    A.warn.hidden = true; A.warn.textContent = '';
     A.flow.hidden = true; A.link.hidden = true; A.link.removeAttribute('href'); A.codeForm.hidden = true;
     A.code.value = ''; A.start.disabled = false; A.cancel.textContent = 'Cancel sign-in';
     addBusy();
@@ -2533,7 +2569,10 @@
       if (prev !== 'awaiting_code' && $('#add-dialog').open) A.code.focus();
     } else if (j.state === 'finishing') { addMsg('Finishing the sign-in...'); }
     else if (j.state === 'done') {
-      addMsg('Added ' + (j.account ? j.account.label : 'the account') + '. It is stored free; swap it onto a host to use it.');
+      if (j.replace) {
+        addMsg('Signed in again as ' + (j.account ? j.account.label : 'the account') + '. The stored login is replaced and its usage is being checked now.');
+        if (j.warning) { A.warn.textContent = j.warning; A.warn.hidden = false; }
+      } else addMsg('Added ' + (j.account ? j.account.label : 'the account') + '. It is stored free; swap it onto a host to use it.');
       A.cancel.textContent = 'Close'; refresh();
     } else if (j.state === 'failed') { addMsg(j.error || 'The sign-in failed.', true); A.cancel.textContent = 'Close'; }
     else if (j.state === 'cancelled') { addIdle(); return; }
@@ -2549,8 +2588,9 @@
   }
   A.form.addEventListener('submit', function (ev) {
     ev.preventDefault(); say(''); A.start.disabled = true;
-    call('POST', '/api/accounts/add', { host: $('#add-host').value, label: A.form.label.value }).then(function (r) {
-      add.id = r.id; add.state = 'starting'; A.form.label.value = ''; A.flow.hidden = false;
+    var body = add.target ? { host: $('#add-host').value, account: add.target.id } : { host: $('#add-host').value, label: A.form.label.value };
+    call('POST', '/api/accounts/add', body).then(function (r) {
+      add.id = r.id; add.state = 'starting'; if (!add.target) A.form.label.value = ''; A.flow.hidden = false;
       addMsg('Starting the sign-in on the host...'); addBusy(); addPoll();
     }).catch(function (e) { say(e.message); A.start.disabled = false; });
   });
@@ -2570,8 +2610,18 @@
 
   // The menu's three items. Add account reopens a running sign-in where it left off.
   function openAdd() {
+    if (!add.id) addMode(null); // nothing running: the menu always opens the plain "add" dialog
     openModal('#add-dialog');
-    if (add.state === 'awaiting_code') A.code.focus(); else $('#import-host').focus();
+    if (add.state === 'awaiting_code') A.code.focus(); else if (add.target) $('#add-host').focus(); else $('#import-host').focus();
+  }
+  // "Sign in again" on an expired card. One sign-in runs at a time: when one is already running, the
+  // dialog reopens where it stands and says why.
+  function openResign(a) {
+    say('');
+    if (add.id && ADD_LIVE.indexOf(add.state) >= 0) { say('A sign-in is already running. Finish or cancel it first.'); openAdd(); return; }
+    addIdle(); addMode(a);
+    openModal('#add-dialog');
+    $('#add-host').focus();
   }
   $('#mi-add').addEventListener('click', openAdd);
   A.busy.addEventListener('click', openAdd);

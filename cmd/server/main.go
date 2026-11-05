@@ -228,6 +228,8 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 	// A host holding an account live, or a swap that just landed one, puts it on the short schedule.
 	poller.SetHeld(func(id string) bool { return !reg.OwnerOf(id).Server })
 	h.SetOnSwap(poller.NoteSwap)
+	// "Sign in again" stored a fresh login: the old one's 401 and backoff no longer apply.
+	h.SetOnReplaced(poller.Reset)
 	go poller.Run(ctx, nil)
 
 	mux := http.NewServeMux()

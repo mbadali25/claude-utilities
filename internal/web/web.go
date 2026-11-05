@@ -69,6 +69,8 @@ type hubAPI interface {
 	// RemoveAccount deletes a stored account. It contacts no agent: see internal/hub.
 	RemoveAccount(accountID string, force bool) error
 	AddAccount(ctx context.Context, hostID, label string) (string, error)
+	// ReplaceLogin is the add-account sign-in aimed at an existing account ("Sign in again").
+	ReplaceLogin(ctx context.Context, hostID, accountID string) (string, error)
 	AddStatus(id string) (hub.AddView, error)
 	AddCode(id, code string) error
 	AddCancel(id string) error
@@ -827,8 +829,23 @@ func jobID(w http.ResponseWriter, r *http.Request) (string, bool) {
 }
 
 func (s *server) addAccount(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Host, Label string }
+	// Account set means "sign in again": the same flow, aimed at that stored account. Its label is
+	// the account's own, so a Label sent along is ignored.
+	var in struct{ Host, Label, Account string }
 	if !readJSON(w, r, &in) {
+		return
+	}
+	if in.Account != "" {
+		if in.Host == "" || len(in.Account) > maxAccountID {
+			writeErr(w, http.StatusBadRequest, "a host and an account id are required")
+			return
+		}
+		id, err := s.hub.ReplaceLogin(r.Context(), in.Host, in.Account)
+		if err != nil {
+			hubError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"id": id})
 		return
 	}
 	in.Label = strings.TrimSpace(in.Label)
@@ -857,6 +874,10 @@ type addStatusJSON struct {
 	URL     string       `json:"url,omitempty"`
 	Account *accountView `json:"account,omitempty"`
 	Error   string       `json:"error,omitempty"`
+	// Replace marks a "sign in again" job; Warning is hub-authored text (no host name) shown when an
+	// online host still holds the previous login.
+	Replace bool   `json:"replace,omitempty"`
+	Warning string `json:"warning,omitempty"`
 }
 
 func (s *server) addStatus(w http.ResponseWriter, r *http.Request) {
@@ -869,7 +890,7 @@ func (s *server) addStatus(w http.ResponseWriter, r *http.Request) {
 		hubError(w, err)
 		return
 	}
-	out := addStatusJSON{State: string(v.State), Error: v.Error}
+	out := addStatusJSON{State: string(v.State), Error: v.Error, Replace: v.Replace, Warning: v.Warning}
 	if v.State == hub.AddAwaitingCode {
 		out.URL = v.URL
 	}
