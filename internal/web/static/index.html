@@ -1262,7 +1262,34 @@
   // leaves every field of /api/hosts identical, so changed() short-circuits the rebuild entirely.
   // hostCard reads this map on every pass instead, and setSwap forces the one paint that needs it.
   var swapState = {}, toastTimers = {};
-  function setSwap(hostId, st) { swapState[hostId] = st; renderHosts(true); }
+  // A host id comes from the hub, so it is matched by reading dataset.host rather than built into
+  // an attribute selector that an odd id could break.
+  function hostCardEl(hostId) {
+    var cards = document.querySelectorAll('#hosts article.card');
+    for (var i = 0; i < cards.length; i++) { if (cards[i].dataset.host === hostId) return cards[i]; }
+    return null;
+  }
+  // setSwap records the verdict and forces the one paint renderHosts would otherwise skip.
+  //
+  // The rebuild it asks for replaces the card, and with it the button the press came from: the
+  // "Confirm swap" button still holds focus here, so without putting focus back a keyboard user is
+  // dropped on <body> at the top of the page on every swap. renderHosts documents that invariant
+  // for the session controls; this honours it for the swap row.
+  //
+  // renderHosts still defers to an in-flight session ask, which no force overrides. That costs
+  // nothing: the verdict lives in swapState, so the next rebuild renders it, and the toast and the
+  // live region have already carried it.
+  function setSwap(hostId, st) {
+    swapState[hostId] = st;
+    var before = hostCardEl(hostId);
+    var held = !!(before && before.contains(document.activeElement));
+    renderHosts(true);
+    if (!held) return;
+    var card = hostCardEl(hostId);
+    if (!card) return;
+    var go = [].filter.call(card.querySelectorAll('.swap button'), function (b) { return b.textContent === 'Swap'; })[0];
+    if (go && !go.disabled) { go.focus(); } else { card.focus(); }
+  }
   function acctLabel(id) {
     var a = accountsCache.filter(function (x) { return x.id === id; })[0];
     return a ? a.label : id;

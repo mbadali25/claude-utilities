@@ -466,6 +466,9 @@ func TestPageCarriesSwapFeedbackSurface(t *testing.T) {
 		"' (current)'", "function acctLabel(", "acctLabel(pick.value)",
 		// The hub's "hub: " prefix is a name for the log, not for the operator's card.
 		"function plainErr(", "plainErr(e.message)",
+		// The rebuild replaces the button the press came from, so focus is put back on the card
+		// rather than left on <body> at the top of the page.
+		"function hostCardEl(", "contains(document.activeElement)", "go.focus()", "card.focus()",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("index.html lacks %q", want)
