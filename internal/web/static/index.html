@@ -1192,9 +1192,9 @@
   function isStale(a) { return !!(a.error && a.fetchedAt && a.error !== 'unauthorized'); }
   function clock(iso) { var d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
   function mins(s) { var m = Math.max(1, Math.round(s / 60)); return m < 90 ? m + ' min' : Math.round(m / 60) + ' h'; }
-  function retryLine(a) {
-    var why = a.error === 'rate limited' ? 'rate limited' : a.error;
-    return 'Stale since ' + clock(a.fetchedAt) + ' (' + why + (a.retryInSec != null ? ', retry in ' + mins(a.retryInSec) : '') + ')';
+  function retryLine(a) { // the chip already says since when; this says why and when the next look is
+    var why = a.error === 'rate limited' ? 'Rate limited' : a.error.charAt(0).toUpperCase() + a.error.slice(1);
+    return why + (a.retryInSec != null ? ', retry in ' + mins(a.retryInSec) : '');
   }
   function level(a) { // worst state across both windows, for the card's top edge and the filters
     if (a.error && !isStale(a)) return 'err';
