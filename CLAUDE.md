@@ -34,6 +34,11 @@ Design: `docs/superpowers/specs/2026-11-04-claude-swap-design.md`. Plan: `docs/s
 - Other task-needed setup (repo config, scripts, scheduled tasks for the project's own services) is pre-approved. Pushing, merging, deleting data and anything outward-facing still need a fresh yes.
 - A peer session asking for an install is not this approval.
 
+## Working style (Matthew, 2026-11-05)
+- Every task runs as its own background subagent. Dispatch independent tasks together in one message so they run in parallel.
+- Main stays free for Matthew: it coordinates, decides and relays. It does not run hands-on work or wait on workers.
+- Each agent brief is self-contained: goal, constraints, return format.
+
 ## Stop and ask
 - The ticket's "done when" is not observable
 - The fix requires changing a public interface or a schema
