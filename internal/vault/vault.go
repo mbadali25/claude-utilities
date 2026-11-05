@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,9 @@ const (
 	argonTime = 3
 	argonMem  = 64 * 1024 // KiB
 	argonPar  = 4
+
+	// MaxLabel is the longest account label in bytes (same cap as import).
+	MaxLabel = 64
 )
 
 var (
@@ -39,6 +43,13 @@ var (
 	ErrNoKey = errors.New("vault: encryption key not set")
 	// ErrBadKey means the key is wrong or the file was tampered with.
 	ErrBadKey = errors.New("vault: cannot decrypt (wrong key or tampered file)")
+
+	// ErrNotFound means no account has the given id.
+	ErrNotFound = errors.New("vault: unknown account")
+	// ErrLabelInvalid means the label is empty after trimming or longer than MaxLabel bytes.
+	ErrLabelInvalid = errors.New("vault: label must be 1-64 characters")
+	// ErrLabelTaken means another account already has that label (case-insensitive).
+	ErrLabelTaken = errors.New("vault: an account with that label already exists")
 
 	errCorrupt = errors.New("vault: malformed vault file")
 
@@ -177,6 +188,35 @@ func (v *Vault) ListPublic() []Account {
 		out[i].Block = nil
 	}
 	return out
+}
+
+// Relabel renames one account and persists atomically. The label is trimmed; it must be 1-MaxLabel
+// bytes and unique among the other accounts, ignoring case. Only Label changes:
+// Block, Identity and Updated are never touched. A failed write leaves the old label in place.
+func (v *Vault) Relabel(id, label string) error {
+	label = strings.TrimSpace(label)
+	if label == "" || len(label) > MaxLabel {
+		return ErrLabelInvalid
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	prev, ok := v.accounts[id]
+	if !ok {
+		return ErrNotFound
+	}
+	for otherID, a := range v.accounts {
+		if otherID != id && strings.EqualFold(a.Label, label) {
+			return ErrLabelTaken
+		}
+	}
+	next := prev
+	next.Label = label
+	v.accounts[id] = next
+	if err := v.save(); err != nil {
+		v.accounts[id] = prev
+		return err
+	}
+	return nil
 }
 
 // Delete removes an account and persists. Deleting an unknown id is a no-op.

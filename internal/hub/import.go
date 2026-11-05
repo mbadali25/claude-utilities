@@ -12,6 +12,19 @@ import (
 	"claude-utilities/internal/vault"
 )
 
+// Relabel renames a stored account. It maps an unknown id to ErrUnknownAccount and passes
+// vault.ErrLabelInvalid / vault.ErrLabelTaken through. Credentials are never touched.
+func (h *Hub) Relabel(accountID, label string) error {
+	if err := h.vault.Relabel(accountID, label); err != nil {
+		if errors.Is(err, vault.ErrNotFound) {
+			return ErrUnknownAccount
+		}
+		return err
+	}
+	h.log.Info("account relabelled", "action", "relabel", "account", accountID, "result", "ok")
+	return nil
+}
+
 // Import pulls the live login from a host and stores it as a new account named label. Only the
 // claudeAiOauth block is kept. A login whose identity is already stored is refused (Swap's
 // write-back is what refreshes an existing account). The importing host becomes the owner.

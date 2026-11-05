@@ -53,6 +53,7 @@ type hubAPI interface {
 	NewEnrolCode() (string, time.Time)
 	Revoke(hostID string) error
 	Import(ctx context.Context, hostID, label string) (vault.Account, error)
+	Relabel(accountID, label string) error
 	Allow(fingerprint string) (string, error)
 	Deny(fingerprint string) error
 }
@@ -102,6 +103,7 @@ func newHandler(h hubAPI, v *vault.Vault, u usageAPI, password string, now func(
 	mux.HandleFunc("POST /api/enrol-code", s.authPost(s.enrolCode))
 	mux.HandleFunc("POST /api/hosts/{id}/revoke", s.authPost(s.revoke))
 	mux.HandleFunc("POST /api/import", s.authPost(s.importLogin))
+	mux.HandleFunc("POST /api/accounts/{id}/label", s.authPost(s.relabel))
 	mux.HandleFunc("POST /api/pending/{fp}/allow", s.authPost(s.allow))
 	mux.HandleFunc("POST /api/pending/{fp}/deny", s.authPost(s.deny))
 	return headers(s.apiGate(mux))
@@ -499,6 +501,35 @@ func (s *server) importLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.view(a, s.owners()))
+}
+
+func (s *server) relabel(w http.ResponseWriter, r *http.Request) {
+	var in struct{ Label string }
+	if !readJSON(w, r, &in) {
+		return
+	}
+	id := r.PathValue("id")
+	label := strings.TrimSpace(in.Label)
+	if id == "" || label == "" || len(label) > maxLabel {
+		writeErr(w, http.StatusBadRequest, "a label of 1-64 characters is required")
+		return
+	}
+	switch err := s.hub.Relabel(id, label); {
+	case err == nil:
+		a, ok := s.vault.Get(id)
+		if !ok {
+			writeErr(w, http.StatusNotFound, hub.ErrUnknownAccount.Error())
+			return
+		}
+		a.Block = nil
+		writeJSON(w, http.StatusOK, s.view(a, s.owners()))
+	case errors.Is(err, vault.ErrLabelInvalid):
+		writeErr(w, http.StatusBadRequest, "a label of 1-64 characters is required")
+	case errors.Is(err, vault.ErrLabelTaken):
+		writeErr(w, http.StatusConflict, "an account with that label already exists")
+	default:
+		hubError(w, err)
+	}
 }
 
 type pendingJSON struct {

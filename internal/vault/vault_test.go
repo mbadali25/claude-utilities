@@ -294,3 +294,103 @@ func TestConcurrentPutSafe(t *testing.T) {
 		t.Fatalf("want 16 accounts, got %d", n)
 	}
 }
+
+func TestRelabelHappyPersistsAndKeepsBlock(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "v.bin")
+	v, _ := open(t, p, "pw")
+	a := acct("a")
+	_ = v.Put(a)
+	_ = v.Put(acct("b"))
+	if err := v.Relabel("a", "  Renamed ünï 日本  "); err != nil {
+		t.Fatal(err)
+	}
+	v2, err := open(t, p, "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := v2.Get("a")
+	if got.Label != "Renamed ünï 日本" || got.Identity != a.Identity || got.Updated != a.Updated || string(got.Block) != string(a.Block) {
+		t.Fatalf("after relabel: %+v", got)
+	}
+}
+
+func TestRelabelValidation(t *testing.T) {
+	v, _ := open(t, filepath.Join(t.TempDir(), "v.bin"), "pw")
+	_ = v.Put(acct("a"))
+	_ = v.Put(Account{ID: "b", Label: "Taken"})
+	cases := map[string]struct {
+		id, label string
+		want      error
+	}{
+		"empty":      {"a", "", ErrLabelInvalid},
+		"whitespace": {"a", " \t ", ErrLabelInvalid},
+		"too long":   {"a", strings.Repeat("x", MaxLabel+1), ErrLabelInvalid},
+		"duplicate":  {"a", "taken", ErrLabelTaken},
+		"dup padded": {"a", "  TAKEN ", ErrLabelTaken},
+		"unknown id": {"zz", "fresh", ErrNotFound},
+	}
+	for name, c := range cases {
+		if err := v.Relabel(c.id, c.label); !errors.Is(err, c.want) {
+			t.Errorf("%s: err %v, want %v", name, err, c.want)
+		}
+	}
+	if g, _ := v.Get("a"); g.Label != "La" {
+		t.Fatalf("label changed by a rejected rename: %q", g.Label)
+	}
+	if err := v.Relabel("a", strings.Repeat("x", MaxLabel)); err != nil {
+		t.Fatalf("64-byte label rejected: %v", err)
+	}
+}
+
+func TestRelabelSameAccountMayChangeCase(t *testing.T) {
+	v, _ := open(t, filepath.Join(t.TempDir(), "v.bin"), "pw")
+	_ = v.Put(Account{ID: "a", Label: "main"})
+	if err := v.Relabel("a", "MAIN"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFailedRelabelRollsBack(t *testing.T) {
+	v, _ := open(t, filepath.Join(t.TempDir(), "v.bin"), "pw")
+	_ = v.Put(acct("a"))
+	renameFn = func(a, b string) error { return errors.New("boom") }
+	t.Cleanup(func() { renameFn = os.Rename })
+	if err := v.Relabel("a", "new"); err == nil {
+		t.Fatal("expected write error")
+	}
+	if g, _ := v.Get("a"); g.Label != "La" {
+		t.Fatalf("failed relabel not rolled back: %q", g.Label)
+	}
+}
+
+func TestConcurrentRelabelToSameLabelHasOneWinner(t *testing.T) {
+	v, _ := open(t, filepath.Join(t.TempDir(), "v.bin"), "pw")
+	const n = 8
+	for i := 0; i < n; i++ {
+		_ = v.Put(Account{ID: fmt.Sprintf("a%d", i), Label: fmt.Sprintf("old%d", i)})
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins, taken := 0, 0
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			err := v.Relabel(fmt.Sprintf("a%d", i), "Same")
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				wins++
+			case errors.Is(err, ErrLabelTaken):
+				taken++
+			default:
+				t.Errorf("unexpected error: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if wins != 1 || taken != n-1 {
+		t.Fatalf("wins %d taken %d", wins, taken)
+	}
+}

@@ -3,9 +3,11 @@ package hub
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"claude-utilities/internal/ownership"
+	"claude-utilities/internal/vault"
 )
 
 func TestImportStoresLiveBlockAsNewAccountOwnedByHost(t *testing.T) {
@@ -61,5 +63,29 @@ func TestImportRefusesEmptyIdentityOrLabelAndOfflineHost(t *testing.T) {
 	}
 	if _, err := f.h.Import(context.Background(), "nope", "l"); !errors.Is(err, ErrUnknownHost) {
 		t.Fatalf("err %v", err)
+	}
+}
+
+func TestRelabelRenamesLogsIdAndMapsErrors(t *testing.T) {
+	f := newFixture(t)
+	f.seedAccounts()
+	if err := f.h.Relabel("A", "  Work  "); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := f.v.Get("A"); a.Label != "Work" || string(a.Block) != `{"tok":"A-stored"}` {
+		t.Fatalf("account after relabel: %+v", a)
+	}
+	out := f.logs.String()
+	if !strings.Contains(out, "account relabelled") || !strings.Contains(out, `"account":"A"`) || strings.Contains(out, "Work") || strings.Contains(out, "[dropped]") {
+		t.Fatalf("log: %s", out)
+	}
+	if err := f.h.Relabel("nope", "x"); !errors.Is(err, ErrUnknownAccount) {
+		t.Fatalf("unknown: %v", err)
+	}
+	if err := f.h.Relabel("B", "WORK"); !errors.Is(err, vault.ErrLabelTaken) {
+		t.Fatalf("duplicate: %v", err)
+	}
+	if err := f.h.Relabel("B", " "); !errors.Is(err, vault.ErrLabelInvalid) {
+		t.Fatalf("empty: %v", err)
 	}
 }

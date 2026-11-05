@@ -43,6 +43,7 @@ type fakeHub struct {
 	denyErr    error
 	revoked    []string
 	importFn   func(host, label string) (vault.Account, error)
+	relabelFn  func(id, label string) error
 }
 
 func (f *fakeHub) Hosts() []hub.HostView { f.mu.Lock(); defer f.mu.Unlock(); return f.hosts }
@@ -69,6 +70,7 @@ func (f *fakeHub) Revoke(id string) error {
 func (f *fakeHub) Import(_ context.Context, host, label string) (vault.Account, error) {
 	return f.importFn(host, label)
 }
+func (f *fakeHub) Relabel(id, label string) error { return f.relabelFn(id, label) }
 func (f *fakeHub) Allow(fp string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -122,6 +124,13 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	r := &rig{t: t, fh: &fakeHub{}, v: v, usage: fakeUsage{}, now: fixedNow}
+	r.fh.relabelFn = func(id, label string) error { // mirrors hub.Relabel over the real vault
+		err := v.Relabel(id, label)
+		if errors.Is(err, vault.ErrNotFound) {
+			return hub.ErrUnknownAccount
+		}
+		return err
+	}
 	r.h = newHandler(r.fh, v, r.usage, adminPW, func() time.Time { return r.now })
 	return r
 }
@@ -767,6 +776,113 @@ func TestImportLabelValidation(t *testing.T) {
 	w := r.do("POST", "/api/import", `{"host":"h1","label":"  work  "}`, s, s.csrf)
 	if w.Code != http.StatusCreated || strings.Contains(w.Body.String(), blockSecret) || strings.Contains(w.Body.String(), "Block") {
 		t.Fatalf("status %d body %s", w.Code, w.Body)
+	}
+}
+
+func TestRelabelRenamesAndResponseHasNoBlock(t *testing.T) {
+	r := newRig(t)
+	r.seed("bf326924b152796e", "Main (mbadali25)")
+	s := r.login()
+	w := r.do("POST", "/api/accounts/bf326924b152796e/label", `{"label":"  anewdevteam ✓  "}`, s, s.csrf)
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), blockSecret) {
+		t.Fatalf("status %d body %s", w.Code, w.Body)
+	}
+	var v accountView
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil || v.Label != "anewdevteam ✓" || v.ID != "bf326924b152796e" {
+		t.Fatalf("view %+v err %v", v, err)
+	}
+	list := r.do("GET", "/api/accounts", "", s, "").Body.String()
+	if !strings.Contains(list, "anewdevteam ✓") || strings.Contains(list, "mbadali25") {
+		t.Fatalf("list: %s", list)
+	}
+}
+
+func TestRelabelErrors(t *testing.T) {
+	r := newRig(t)
+	r.seed("a1", "Personal")
+	r.seed("a2", "Work")
+	s := r.login()
+	cases := map[string]struct {
+		path, body string
+		want       int
+	}{
+		"empty":      {"/api/accounts/a1/label", `{"label":""}`, 400},
+		"whitespace": {"/api/accounts/a1/label", `{"label":"   "}`, 400},
+		"too long":   {"/api/accounts/a1/label", `{"label":"` + strings.Repeat("x", maxLabel+1) + `"}`, 400},
+		"unknown":    {"/api/accounts/a1/label", `{"label":"x","extra":1}`, 400},
+		"duplicate":  {"/api/accounts/a1/label", `{"label":" WORK "}`, 409},
+		"unknown id": {"/api/accounts/nope/label", `{"label":"fresh"}`, 404},
+	}
+	for name, c := range cases {
+		w := r.do("POST", c.path, c.body, s, s.csrf)
+		if w.Code != c.want || !strings.Contains(w.Body.String(), `"error"`) {
+			t.Errorf("%s: status %d body %s, want %d with an error", name, w.Code, w.Body, c.want)
+		}
+	}
+	if a, _ := r.v.Get("a1"); a.Label != "Personal" {
+		t.Fatalf("label changed by rejected rename: %q", a.Label)
+	}
+}
+
+func TestRelabelRequiresSessionAndCSRF(t *testing.T) {
+	r := newRig(t)
+	r.seed("a1", "Personal")
+	s := r.login()
+	body := `{"label":"New"}`
+	if w := r.do("POST", "/api/accounts/a1/label", body, nil, ""); w.Code != http.StatusUnauthorized {
+		t.Errorf("no session: %d", w.Code)
+	}
+	if w := r.do("POST", "/api/accounts/a1/label", body, s, ""); w.Code != http.StatusForbidden {
+		t.Errorf("missing CSRF: %d", w.Code)
+	}
+	if w := r.do("POST", "/api/accounts/a1/label", body, s, "wrong"); w.Code != http.StatusForbidden {
+		t.Errorf("wrong CSRF: %d", w.Code)
+	}
+	if a, _ := r.v.Get("a1"); a.Label != "Personal" {
+		t.Fatalf("label changed without auth: %q", a.Label)
+	}
+}
+
+func TestConcurrentRelabelToSameLabelHasOneWinner(t *testing.T) {
+	r := newRig(t)
+	const n = 6
+	for i := 0; i < n; i++ {
+		r.seed(fmt.Sprintf("a%d", i), fmt.Sprintf("old%d", i))
+	}
+	s := r.login()
+	codes := make(chan int, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			codes <- r.do("POST", fmt.Sprintf("/api/accounts/a%d/label", i), `{"label":"Same"}`, s, s.csrf).Code
+		}(i)
+	}
+	wg.Wait()
+	close(codes)
+	ok, conflict := 0, 0
+	for c := range codes {
+		switch c {
+		case http.StatusOK:
+			ok++
+		case http.StatusConflict:
+			conflict++
+		default:
+			t.Errorf("status %d", c)
+		}
+	}
+	if ok != 1 || conflict != n-1 {
+		t.Fatalf("ok %d conflict %d", ok, conflict)
+	}
+}
+
+func TestUIHasRenameControl(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	p := page(r, s)
+	if !strings.Contains(p, "/label'") || !strings.Contains(p, "'Rename'") {
+		t.Fatal("index.html has no rename control")
 	}
 }
 
