@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"claude-utilities/internal/hub"
+	"claude-utilities/internal/logx"
 	"claude-utilities/internal/proto"
 	"claude-utilities/internal/usage"
 	"claude-utilities/internal/vault"
@@ -342,6 +344,40 @@ func TestHostsShowNeedsReloadBadge(t *testing.T) {
 	}
 	if !strings.Contains(page(r, s), "Needs reload") {
 		t.Fatal("page lacks the Needs reload badge label")
+	}
+}
+
+func TestLoginFailureUsesStructuredAllowlistedLogger(t *testing.T) {
+	var buf bytes.Buffer
+	old := logger
+	logger = logx.New(&buf)
+	defer func() { logger = old }()
+	r := newRig(t)
+	r.loginFrom("203.0.113.9:1234", "nope-"+adminPW)
+	out := buf.String()
+	if !strings.Contains(out, `"msg":"login failed"`) || !strings.Contains(out, "203.0.113.9") || strings.Contains(out, "[dropped]") {
+		t.Fatalf("log: %s", out)
+	}
+	if strings.Contains(out, adminPW) {
+		t.Fatal("password logged")
+	}
+}
+
+func TestHubErrorDoesNotEchoAgentSuppliedText(t *testing.T) {
+	for name, err := range map[string]error{
+		"plain": fmt.Errorf("%w: got %q for export_req", hub.ErrUnexpectedReply, "AGENT-CONTROLLED"),
+		"swap":  fmt.Errorf("%w: %w", hub.ErrSwapOutcomeUnknown, fmt.Errorf("%w: got %q for swap_req", hub.ErrUnexpectedReply, "AGENT-CONTROLLED")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			hubError(w, err)
+			if strings.Contains(w.Body.String(), "AGENT-CONTROLLED") {
+				t.Fatalf("echoed: %s", w.Body)
+			}
+			if w.Code != http.StatusBadGateway {
+				t.Fatalf("status %d", w.Code)
+			}
+		})
 	}
 }
 

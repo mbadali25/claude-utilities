@@ -211,6 +211,17 @@ func TestAllowPersistFailureKeepsEntryForRetry(t *testing.T) {
 	}
 }
 
+func TestUnexpectedReplyDoesNotEchoRawAgentType(t *testing.T) {
+	evil := "sk-ant-oat01-SECRETSECRETSECRET" + strings.Repeat("x", 500)
+	err := unexpectedReply(evil, proto.TypeExportReq)
+	if !errors.Is(err, ErrUnexpectedReply) {
+		t.Fatalf("not ErrUnexpectedReply: %v", err)
+	}
+	if strings.Contains(err.Error(), "SECRETSECRET") || len(err.Error()) > 200 {
+		t.Fatalf("raw agent type echoed: %v", err)
+	}
+}
+
 func TestHostViewSurfacesSwapBlocked(t *testing.T) {
 	f := newFixture(t)
 	a, _, _ := f.enrol("box")

@@ -527,7 +527,7 @@ func (h *Hub) request(ctx context.Context, c *conn, typ, want string, body any) 
 	select {
 	case env := <-ch:
 		if env.Type != want {
-			return nil, fmt.Errorf("hub: unexpected %s reply to %s", env.Type, typ)
+			return nil, unexpectedReply(env.Type, typ)
 		}
 		return env.Body, nil
 	case <-c.done:
@@ -535,6 +535,21 @@ func (h *Hub) request(ctx context.Context, c *conn, typ, want string, body any) 
 	case <-tctx.Done():
 		return nil, fmt.Errorf("hub: %s timed out: %w", typ, tctx.Err())
 	}
+}
+
+// ErrUnexpectedReply means the agent answered a request with the wrong message type.
+var ErrUnexpectedReply = errors.New("hub: unexpected reply from the agent")
+
+const maxTypeLog = 32
+
+// unexpectedReply builds the error for a wrong reply type. The type is agent-supplied, so it is
+// redacted and capped before it can reach an error string or a log line.
+func unexpectedReply(got, sent string) error {
+	g := logx.Redact(got)
+	if len(g) > maxTypeLog {
+		g = g[:maxTypeLog] + "..."
+	}
+	return fmt.Errorf("%w: got %q for %s", ErrUnexpectedReply, g, sent)
 }
 
 // oauthBlock validates an agent-supplied login block and returns only the claudeAiOauth object.

@@ -7,14 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 
+	"claude-utilities/internal/logx"
 	"claude-utilities/internal/vault"
 )
+
+// logger is the poller's structured, allowlist-filtered logger.
+var logger = logx.New(os.Stderr).With("component", "usage")
 
 const (
 	endpoint   = "https://api.anthropic.com/api/oauth/usage"
@@ -283,7 +287,7 @@ func (p *Poller) pollOnce(ctx context.Context, accounts func() []vault.Account, 
 			p.nextAt[a.ID] = p.now().Add(wait)
 			u = p.last[a.ID] // keep last-known windows and their FetchedAt
 			u.Err = category(err)
-			log.Printf("usage: poll failed account=%s reason=%q retry_in=%s", a.ID, u.Err, wait)
+			logger.Warn("poll failed", "action", "poll", "result", "failed", "account", a.ID, "reason", u.Err, "durationms", wait.Milliseconds())
 		}
 		p.last[a.ID] = u
 		p.mu.Unlock()

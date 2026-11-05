@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"claude-utilities/internal/logx"
 	"claude-utilities/internal/vault"
 )
 
@@ -286,8 +286,9 @@ func TestRefreshFailureSurfacesError(t *testing.T) {
 
 func TestPollerNeverLogsToken(t *testing.T) {
 	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	defer log.SetOutput(io.Discard)
+	old := logger
+	logger = logx.New(&buf)
+	defer func() { logger = old }()
 	for _, c := range []int{200, 401, 429, 500} {
 		p, _ := newTestPoller(staticDoer(c, okBody, nil))
 		p.SetRefresher(&fakeRefresher{err: errors.New("refresh failed r-tok-secret")}, nil)
@@ -304,6 +305,9 @@ func TestPollerNeverLogsToken(t *testing.T) {
 		func(_ string, u Usage) { got = u })
 	if strings.Contains(buf.String(), "tok-secret") || strings.Contains(got.Err, "tok-secret") {
 		t.Fatalf("token leaked: log=%q err=%q", buf.String(), got.Err)
+	}
+	if strings.Contains(buf.String(), "[dropped]") {
+		t.Fatalf("poll log used a non-allowlisted field: %s", buf.String())
 	}
 	if buf.Len() == 0 {
 		t.Fatal("expected some log output for failures")

@@ -15,9 +15,9 @@ import (
 	"errors"
 	"html/template"
 	"io"
-	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +63,9 @@ type usageAPI interface {
 }
 
 // Handler returns the admin UI and API. It panics if adminPassword is empty.
+// logger is the web layer's structured, allowlist-filtered logger.
+var logger = logx.New(os.Stderr).With("component", "web")
+
 func Handler(h *hub.Hub, v *vault.Vault, p *usage.Poller, adminPassword string) http.Handler {
 	if adminPassword == "" {
 		panic("web: adminPassword must be non-empty")
@@ -226,7 +229,7 @@ func (s *server) render(w http.ResponseWriter, code int, d pageData) {
 		"'; style-src 'nonce-"+d.Nonce+"'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	w.WriteHeader(code)
 	if err := pageTmpl.Execute(w, d); err != nil {
-		log.Printf("web: render failed err=%q", logx.Redact(err.Error()))
+		logger.Error("render failed", "action", "render", "result", "failed", logx.Err(err))
 	}
 }
 
@@ -279,7 +282,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	if s.recentFailuresLocked(ip) >= maxLoginFailures {
 		s.mu.Unlock()
-		log.Printf("web: login refused reason=%q source=%q", "too many failures", ip)
+		logger.Warn("login refused", "action", "login", "result", "refused", "reason", "too many failures", "source_ip", ip)
 		s.render(w, http.StatusTooManyRequests, pageData{Error: "Too many failed attempts. Wait a minute."})
 		return
 	}
@@ -288,7 +291,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 			s.failures[ip] = append(s.failures[ip], s.now())
 		}
 		s.mu.Unlock()
-		log.Printf("web: login failed reason=%q source=%q", "wrong password", ip)
+		logger.Warn("login failed", "action", "login", "result", "failed", "reason", "wrong password", "source_ip", ip)
 		s.render(w, http.StatusUnauthorized, pageData{Error: "Wrong password."})
 		return
 	}
@@ -426,9 +429,17 @@ func hubError(w http.ResponseWriter, err error) {
 	case errors.Is(err, hub.ErrUnknownLiveAccount), errors.Is(err, hub.ErrAgentOffline), errors.Is(err, hub.ErrAlreadyStored):
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, hub.ErrSwapOutcomeUnknown):
-		writeErr(w, http.StatusBadGateway, err.Error())
+		msg := err.Error()
+		if errors.Is(err, hub.ErrUnexpectedReply) { // never echo agent-supplied text
+			logger.Warn("hub error", "action", "hub", "result", "failed", logx.Err(err))
+			msg = hub.ErrSwapOutcomeUnknown.Error() + ": " + hub.ErrUnexpectedReply.Error()
+		}
+		writeErr(w, http.StatusBadGateway, msg)
+	case errors.Is(err, hub.ErrUnexpectedReply):
+		logger.Warn("hub error", "action", "hub", "result", "failed", logx.Err(err))
+		writeErr(w, http.StatusBadGateway, hub.ErrUnexpectedReply.Error())
 	default:
-		log.Printf("web: hub error reason=%q", logx.Redact(err.Error()))
+		logger.Warn("hub error", "action", "hub", "result", "failed", logx.Err(err))
 		if strings.HasPrefix(err.Error(), "hub: ") { // hub-authored, already redacted at the source
 			writeErr(w, http.StatusBadGateway, err.Error())
 			return
@@ -521,7 +532,7 @@ func (s *server) allow(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, hub.ErrNotPending), errors.Is(err, hub.ErrPendingExpired):
 		hubError(w, err)
 	default:
-		log.Printf("web: allow failed reason=%q", "hub refused; details are in the hub log")
+		logger.Warn("allow failed", "action", "allow", "result", "failed", "reason", "hub refused; details are in the hub log")
 		writeErr(w, http.StatusInternalServerError, "could not approve the connection; see the server log")
 	}
 }
