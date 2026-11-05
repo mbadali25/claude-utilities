@@ -153,3 +153,50 @@ func TestConcurrentOpsRaceFree(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestForgetDropsTheAccountEntirely(t *testing.T) {
+	r := New()
+	r.SwapIn("a", "h1")
+	r.SwapIn("a", "h2")
+	r.SwapIn("b", "h1")
+
+	r.Forget("a")
+
+	if o := r.OwnerOf("a"); !o.Server || o.HostID != "" {
+		t.Fatalf("owner after Forget: %+v", o)
+	}
+	if n := len(r.HostsUsing("a")); n != 0 {
+		t.Fatalf("%d holders after Forget", n)
+	}
+	if o := r.OwnerOf("b"); o.HostID != "h1" {
+		t.Fatalf("Forget touched another account: %+v", o)
+	}
+}
+
+// SwapAway keeps an entry alive while a writeback is owed. Forget must not: the account is gone
+// from the vault, so a writeback would recreate the login the operator removed.
+func TestForgetClearsAPendingWritebackSwapAwayWouldKeep(t *testing.T) {
+	r := New()
+	r.SwapIn("a", "h1")
+	r.HostLost("h1")
+	if !r.NeedsWritebackCheck("a") {
+		t.Fatal("expected a pending writeback check")
+	}
+	r.SwapAway("a", "h1")
+	if !r.NeedsWritebackCheck("a") {
+		t.Fatal("SwapAway was expected to keep the flag; the premise of Forget has changed")
+	}
+
+	r.Forget("a")
+	if r.NeedsWritebackCheck("a") {
+		t.Fatal("Forget left the writeback flag behind")
+	}
+}
+
+func TestForgetAnUnknownAccountIsANoOp(t *testing.T) {
+	r := New()
+	r.Forget("never-seen")
+	if o := r.OwnerOf("never-seen"); !o.Server {
+		t.Fatalf("got %+v", o)
+	}
+}

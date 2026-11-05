@@ -87,6 +87,16 @@ func (r *Registry) remove(acct, host string) {
 	}
 }
 
+// Forget drops the account's entry outright: its holders, its stale mark and any pending
+// writeback check. It is for an account that no longer exists in the vault, where SwapAway is the
+// wrong call - that one keeps the entry alive whenever a writeback is still owed, and a writeback
+// to a deleted account would recreate the login the operator just removed.
+func (r *Registry) Forget(acct string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.accounts, acct)
+}
+
 // HostLost handles a host disappearing. A lost owner with remaining sharers
 // marks the account Stale; a lost sole owner returns it to the server flagged
 // for a writeback check.
