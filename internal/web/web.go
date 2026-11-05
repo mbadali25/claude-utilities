@@ -437,8 +437,9 @@ func (s *server) setPassword(w http.ResponseWriter, r *http.Request) {
 // --- API ---
 
 type windowView struct {
-	LeftPct  float64   `json:"leftPct"`
-	ResetsAt time.Time `json:"resetsAt"`
+	LeftPct float64 `json:"leftPct"`
+	// ResetsAt is null when the endpoint reported the window without a reset time.
+	ResetsAt *time.Time `json:"resetsAt"`
 }
 
 type accountView struct {
@@ -454,8 +455,8 @@ type accountView struct {
 }
 
 func window(w usage.Window) *windowView {
-	if w.ResetsAt.IsZero() {
-		return nil // the endpoint returned null for this window
+	if w.UsedPct == 0 && w.ResetsAt.IsZero() {
+		return nil // the endpoint returned null, or nothing at all, for this window
 	}
 	left := 100 - w.UsedPct
 	if left < 0 {
@@ -463,7 +464,12 @@ func window(w usage.Window) *windowView {
 	} else if left > 100 {
 		left = 100
 	}
-	return &windowView{LeftPct: left, ResetsAt: w.ResetsAt}
+	v := &windowView{LeftPct: left}
+	if !w.ResetsAt.IsZero() { // a window can carry a utilization and no reset time
+		r := w.ResetsAt
+		v.ResetsAt = &r
+	}
+	return v
 }
 
 func (s *server) view(a vault.Account, owners map[string]string) accountView {

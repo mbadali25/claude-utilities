@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -19,6 +20,11 @@ import (
 
 // logger is the poller's structured, allowlist-filtered logger.
 var logger = logx.New(os.Stderr).With("component", "usage")
+
+func init() {
+	// "field" carries a response field path (five_hour.resets_at) and never a value.
+	logx.Allow("field")
+}
 
 const (
 	endpoint   = "https://api.anthropic.com/api/oauth/usage"
@@ -35,6 +41,23 @@ var (
 	errBadBlock    = errors.New("usage: credential block has no access token")
 	errUnavailable = errors.New("usage: request failed")
 )
+
+// SchemaError names the response field path that failed validation, so the next occurrence is
+// diagnosable from the log alone. Field holds a fixed path built from the keys this package
+// looks for ("five_hour.resets_at"), never a key or a value read out of the response.
+type SchemaError struct{ Field string }
+
+func (e *SchemaError) Error() string        { return ErrSchema.Error() + " at " + e.Field }
+func (e *SchemaError) Is(target error) bool { return target == ErrSchema }
+
+// SchemaField returns the failing field path, or "" when err is not a schema failure.
+func SchemaField(err error) string {
+	var se *SchemaError
+	if errors.As(err, &se) {
+		return se.Field
+	}
+	return ""
+}
 
 // RateLimitError carries the server's Retry-After (zero when absent).
 type RateLimitError struct{ RetryAfter time.Duration }
@@ -72,19 +95,49 @@ type rawWindow struct {
 	ResetsAt    *string  `json:"resets_at"`
 }
 
-func parseWindow(raw json.RawMessage) (Window, error) {
+// parseWindow is deliberately tolerant: unknown fields are ignored, a null or absent window is
+// a zero Window, and a null or absent utilization or resets_at keeps whatever the other field
+// says. It still rejects what it cannot read - a window that is not an object, a utilization
+// that is not a finite number at or above zero, a resets_at that is not an RFC3339 string -
+// and names the field path so the failure is diagnosable without a redeploy.
+func parseWindow(name string, raw json.RawMessage) (Window, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return Window{}, nil
 	}
 	var rw rawWindow
-	if err := json.Unmarshal(raw, &rw); err != nil || rw.Utilization == nil || rw.ResetsAt == nil {
-		return Window{}, ErrSchema
+	if err := json.Unmarshal(raw, &rw); err != nil {
+		return Window{}, &SchemaError{Field: fieldPath(name, err)}
 	}
-	t, err := time.Parse(time.RFC3339Nano, *rw.ResetsAt)
-	if err != nil {
-		return Window{}, ErrSchema
+	var w Window
+	if rw.Utilization != nil {
+		u := *rw.Utilization
+		if u < 0 || math.IsNaN(u) || math.IsInf(u, 0) {
+			return Window{}, &SchemaError{Field: name + ".utilization"}
+		}
+		w.UsedPct = u
 	}
-	return Window{UsedPct: *rw.Utilization, ResetsAt: t.UTC()}, nil
+	if rw.ResetsAt != nil {
+		t, err := time.Parse(time.RFC3339Nano, *rw.ResetsAt) // accepts a fraction or none
+		if err != nil {
+			return Window{}, &SchemaError{Field: name + ".resets_at"}
+		}
+		w.ResetsAt = t.UTC()
+	}
+	return w, nil
+}
+
+// fieldPath turns a decode failure into a fixed path: the member the decoder named when it
+// named one (a wrong-typed utilization), else the window itself (a window that is not an
+// object). Only keys this package already knows can appear, never text from the response.
+func fieldPath(name string, err error) string {
+	var ute *json.UnmarshalTypeError
+	if errors.As(err, &ute) {
+		switch ute.Field {
+		case "utilization", "resets_at":
+			return name + "." + ute.Field
+		}
+	}
+	return name
 }
 
 // Fetch asks the usage endpoint once. A null window parses to a zero Window.
@@ -118,18 +171,19 @@ func Fetch(ctx context.Context, d Doer, accessToken string) (Usage, error) {
 	}
 	var top map[string]json.RawMessage
 	if json.Unmarshal(body, &top) != nil || top == nil {
-		return Usage{}, ErrSchema
+		return Usage{}, &SchemaError{Field: "body"}
 	}
 	fh, okF := top["five_hour"]
 	sd, okS := top["seven_day"]
 	if !okF && !okS {
-		return Usage{}, ErrSchema
+		// Neither known window key: this is some other payload, not a thinner one.
+		return Usage{}, &SchemaError{Field: "windows"}
 	}
 	var u Usage
-	if u.FiveHour, err = parseWindow(fh); err != nil {
+	if u.FiveHour, err = parseWindow("five_hour", fh); err != nil {
 		return Usage{}, err
 	}
-	if u.SevenDay, err = parseWindow(sd); err != nil {
+	if u.SevenDay, err = parseWindow("seven_day", sd); err != nil {
 		return Usage{}, err
 	}
 	u.FetchedAt = time.Now().UTC()
@@ -287,7 +341,8 @@ func (p *Poller) pollOnce(ctx context.Context, accounts func() []vault.Account, 
 			p.nextAt[a.ID] = p.now().Add(wait)
 			u = p.last[a.ID] // keep last-known windows and their FetchedAt
 			u.Err = category(err)
-			logger.Warn("poll failed", "action", "poll", "result", "failed", "account", a.ID, "reason", u.Err, "durationms", wait.Milliseconds())
+			logger.Warn("poll failed", "action", "poll", "result", "failed", "account", a.ID,
+				"reason", u.Err, "field", SchemaField(err), "durationms", wait.Milliseconds())
 		}
 		p.last[a.ID] = u
 		p.mu.Unlock()

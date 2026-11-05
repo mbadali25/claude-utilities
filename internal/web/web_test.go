@@ -557,6 +557,40 @@ func TestUsageShowsLastKnownWithAgeOnError(t *testing.T) {
 	}
 }
 
+// TestUsageWindowWithoutResetTimeStillShowsUsage covers a window the endpoint reported with a
+// utilization but no reset time: the percentage must still reach the UI, with a null resetsAt.
+func TestUsageWindowWithoutResetTimeStillShowsUsage(t *testing.T) {
+	r := newRig(t)
+	r.seed("a1", "personal")
+	r.usage["a1"] = usage.Usage{
+		FiveHour:  usage.Window{UsedPct: 42},
+		SevenDay:  usage.Window{},
+		FetchedAt: fixedNow,
+	}
+	s := r.login()
+	var accts []struct {
+		FiveHour *struct {
+			LeftPct  float64    `json:"leftPct"`
+			ResetsAt *time.Time `json:"resetsAt"`
+		} `json:"fiveHour"`
+		SevenDay *struct{} `json:"sevenDay"`
+	}
+	w := r.do("GET", "/api/accounts", "", s, "")
+	if err := json.Unmarshal(w.Body.Bytes(), &accts); err != nil || len(accts) != 1 {
+		t.Fatalf("%v %s", err, w.Body)
+	}
+	a := accts[0]
+	if a.FiveHour == nil || a.FiveHour.LeftPct != 58 {
+		t.Fatalf("five hour window dropped: %s", w.Body)
+	}
+	if a.FiveHour.ResetsAt != nil {
+		t.Fatalf("unknown reset time must be null, not a zero date: %s", w.Body)
+	}
+	if a.SevenDay != nil {
+		t.Fatalf("absent window must stay null: %s", w.Body)
+	}
+}
+
 func TestAccountOwnerIsHostNameOrServer(t *testing.T) {
 	r := newRig(t)
 	r.seed("a1", "one")
