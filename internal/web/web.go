@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -484,6 +485,26 @@ type sessionJSON struct {
 	Cwd         string    `json:"cwd"`
 	StartedAt   time.Time `json:"startedAt"`
 	NeedsReload bool      `json:"needsReload"`
+	// RestartCommand is set only on a session that needs a reload, for the operator to copy.
+	RestartCommand string `json:"restartCommand,omitempty"`
+}
+
+// sessionUUID matches the 36-char sessionId that `claude --resume` takes.
+var sessionUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// restartCommand returns the command that reloads a stale session's login. Nothing can tell a
+// running session to re-read its credentials (docs/runbooks/session-reload.md), so the operator
+// restarts it by hand. The session's cwd is shown beside the command, so it carries no path and
+// therefore no shell quoting. An id is agent-supplied: anything but a UUID falls back to
+// --continue rather than being pasted into a shell.
+func restartCommand(v hub.SessionView) string {
+	if !v.NeedsReload {
+		return ""
+	}
+	if !sessionUUID.MatchString(v.ID) {
+		return "claude --continue"
+	}
+	return "claude --resume " + v.ID
 }
 
 type hostJSON struct {
@@ -504,7 +525,8 @@ func (s *server) hosts(w http.ResponseWriter, _ *http.Request) {
 		j := hostJSON{HostID: h.HostID, Name: h.Name, OS: h.OS, Online: h.Online, ActiveAccount: h.ActiveAccount,
 			SwapBlocked: h.SwapBlocked, Sessions: make([]sessionJSON, 0, len(h.Sessions))}
 		for _, x := range h.Sessions {
-			j.Sessions = append(j.Sessions, sessionJSON{PID: x.PID, ID: x.ID, Cwd: x.Cwd, StartedAt: x.StartedAt, NeedsReload: x.NeedsReload})
+			j.Sessions = append(j.Sessions, sessionJSON{PID: x.PID, ID: x.ID, Cwd: x.Cwd, StartedAt: x.StartedAt,
+				NeedsReload: x.NeedsReload, RestartCommand: restartCommand(x)})
 			j.NeedsReload = j.NeedsReload || x.NeedsReload
 		}
 		out = append(out, j)

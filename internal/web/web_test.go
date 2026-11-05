@@ -401,6 +401,66 @@ func TestHostsShowNeedsReloadBadge(t *testing.T) {
 	}
 }
 
+// restartCommand is the only remedy for a stale session: no mechanism reloads a running
+// session's login (docs/runbooks/session-reload.md), so the UI hands over a command.
+func TestRestartCommandOnlyForNeedsReloadSessions(t *testing.T) {
+	r := newRig(t)
+	const id = "2f1c4a90-5b6d-4e8f-9a0b-1c2d3e4f5a6b"
+	r.fh.hosts = []hub.HostView{{HostID: "h1", Name: "box", OS: "linux", Online: true, Sessions: []hub.SessionView{
+		{Session: proto.Session{PID: 7, ID: id}, NeedsReload: true},
+		{Session: proto.Session{PID: 8, ID: "9a0b1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d"}},
+	}}}
+	s := r.login()
+	var hosts []struct {
+		Sessions []struct {
+			RestartCommand string `json:"restartCommand"`
+		} `json:"sessions"`
+	}
+	w := r.do("GET", "/api/hosts", "", s, "")
+	if err := json.Unmarshal(w.Body.Bytes(), &hosts); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := hosts[0].Sessions[0].RestartCommand, "claude --resume "+id; got != want {
+		t.Errorf("stale session command = %q, want %q", got, want)
+	}
+	if got := hosts[0].Sessions[1].RestartCommand; got != "" {
+		t.Errorf("fresh session must carry no command, got %q", got)
+	}
+}
+
+func TestRestartCommandRejectsUntrustedID(t *testing.T) {
+	// PID, ID and Cwd all arrive from the agent. A command the operator pastes into a shell
+	// must never carry agent-supplied text, so anything but a UUID falls back to --continue.
+	for _, id := range []string{
+		"", "s1", "no-uuid-here",
+		`2f1c4a90-5b6d-4e8f-9a0b-1c2d3e4f5a6b" ; rm -rf /`,
+		"2f1c4a90-5b6d-4e8f-9a0b-1c2d3e4f5a6b\n echo hi",
+		"2f1c4a90-5b6d-4e8f-9a0b-1c2d3e4f5a6b && curl evil",
+		"../../etc/passwd", "2f1c4a90_5b6d_4e8f_9a0b_1c2d3e4f5a6b",
+		"ZZZZZZZZ-5b6d-4e8f-9a0b-1c2d3e4f5a6b",
+	} {
+		got := restartCommand(hub.SessionView{Session: proto.Session{PID: 9, ID: id}, NeedsReload: true})
+		if got != "claude --continue" {
+			t.Errorf("id %q: got %q, want the --continue fallback", id, got)
+		}
+	}
+}
+
+func TestRestartCommandAcceptsEitherUUIDCase(t *testing.T) {
+	for _, id := range []string{
+		"2f1c4a90-5b6d-4e8f-9a0b-1c2d3e4f5a6b",
+		"2F1C4A90-5B6D-4E8F-9A0B-1C2D3E4F5A6B",
+	} {
+		if got, want := restartCommand(hub.SessionView{Session: proto.Session{ID: id}, NeedsReload: true}),
+			"claude --resume "+id; got != want {
+			t.Errorf("id %q: got %q, want %q", id, got, want)
+		}
+	}
+	if got := restartCommand(hub.SessionView{Session: proto.Session{ID: "2f1c4a90-5b6d-4e8f-9a0b-1c2d3e4f5a6b"}}); got != "" {
+		t.Errorf("a session that does not need a reload must carry no command, got %q", got)
+	}
+}
+
 func TestLoginFailureUsesStructuredAllowlistedLogger(t *testing.T) {
 	var buf bytes.Buffer
 	old := logger
