@@ -270,10 +270,10 @@ func sameName(a, b string) bool {
 // tookTheName reports whether a rename landed: the session's own name CHANGED, and changed to the
 // name that was asked for.
 //
-// Check `name` and ONLY `name`. nameSource is not a discriminator: a rename arriving over the
-// inbox has source "peer", but Claude Code records it in the session file as "user" (or
-// "collision" when the name had to be uniquified) and never as "peer". Code that waited for
-// nameSource "peer" would read every success as a failure.
+// Check `name` and ONLY `name`. nameSource is not the pass condition: a live 2.1.318 session read
+// back name=<asked> nameSource="peer" after an inbox rename, but "collision" can rewrite it, so
+// requiring any particular value would turn a success into a failure. "peer" is at most a
+// secondary signal; its absence is never a failure.
 //
 // `before` is load-bearing, not a convenience. A collision takes a uniquifying suffix, so a name
 // that STARTS with the one asked for counts as taken - but only if it was not already there. A

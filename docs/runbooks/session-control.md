@@ -179,7 +179,9 @@ Every part of that is load-bearing:
 - **NDJSON.** One JSON object per line, `\n`-terminated, no length prefix. A line over the
   server's limit drops the connection.
 - **The auth line is first, and is mandatory on Windows** (the server takes `requireAuth` from the
-  platform). A control line on an unauthenticated connection is dropped and the connection closed:
+  platform: `authRequired = requireAuth ?? platform==windows`). On Linux, send the auth frame
+  whenever a key file exists; nothing is verified on Linux, and only `entrypoint=cli` sessions
+  register the rename handler (`sdk-cli` does not), so attempt and report rather than refusing. A control line on an unauthenticated connection is dropped and the connection closed:
   `Dropped a 'control' line from a connection that did not authenticate; closing it`. A wrong
   token gets `Dropped a bad auth frame…`, so the token is genuinely checked.
 - **The token is the `peerToken`** in that session's **own** `<pid>.<64hex>.key` file, a 32
@@ -214,6 +216,15 @@ is "a bridge is bound."** The one to watch is `noHistoryBackfill`, which is set 
 remote-created sessions: a session **created from claude.ai** may be suppressed where one started
 in a terminal and later bridged is not. That is in [Not verified](#not-verified).
 
+**Verified live on 2.1.318 by the owner:** a bridge-bound session bound as one title was read back
+on claude.ai/code under the new title after one inbox rename frame. The host cannot observe the
+effect (fire-and-forget push), so the code ceiling stays `delivered`.
+
+**Test-harness tip.** An interactive `claude --remote-control` in a fresh directory stops on the
+workspace-trust dialog (skipped only in non-interactive mode). `claude --bg --remote-control <name>`
+avoids it and still registers `entrypoint=cli`, the app class that registers the rename handler. It
+is the reproducible way to stand up a test session.
+
 #### The ceiling is `delivered`, and that is not going to change
 
 The push is `…titleWriter.update(…).catch(()=>{})`. **The result is discarded.** Nothing on the
@@ -230,12 +241,12 @@ After the frame goes out, the agent re-reads the session file's **`name`** for a
 changed `name` proves the handler ran — the local half. The remote half is unobservable, so the UI
 says the ask reached the session and never that the remote name is fixed.
 
-> **Never wait for `nameSource: "peer"`.** `Jvn` passes through `BBe`, which records
-> `recordSource === "collision" ? "collision" : "user"`. A rename whose *source* is `"peer"` is
-> therefore written to the session file as `nameSource: "user"` (or `"collision"`), **never**
-> `"peer"`. Code that waited for `"peer"` as proof would read every success as a failure.
-> `TestInboxRenameVerifiesTheNameAndNeverWaitsForPeerNameSource` holds this. A collision takes a
-> uniquifying suffix, so a name that *starts with* the one asked for counts as taken.
+> **The pass condition is `name`; `nameSource` is never required.** A live 2.1.318 session read
+> back `name="..." nameSource="peer"` after an inbox rename (spike evidence 7.3), so `"peer"` may be
+> asserted as a secondary signal. Its absence is not a failure, and a `"collision"` can rewrite it.
+> `TestInboxRenameVerifiesTheNameAndNeverWaitsForPeerNameSource` holds this for `peer`, `user`,
+> `collision` and empty. A collision takes a uniquifying suffix, so a name that *starts with* the
+> one asked for counts as taken.
 
 **The name must have *changed*, not merely match.** The prefix tolerance above is for a collision
 suffix taken *during* the send. A session already sitting at `alpha-2`, asked for `alpha`, would
@@ -681,13 +692,10 @@ in spike 1, are **not** handled — they fall through to
 
 ## Not verified
 
-- **Whether the bridge title on claude.ai actually changes.** This is the one that matters most and
-  it is **not** verified here. What is proven is the code path (`onRename` → `Jvn` → `gJo` →
-  `titleWriter.update`) and that the frame is accepted and dispatched by a live session. The step
-  from `titleWriter.update` to a changed title on claude.ai rests on reading the bundle. A separate
-  spike is testing it live. Until that lands, nothing in the UI or the docs may say the remote
-  title changed — which is also why the ceiling is `delivered`, and why the status would stay
-  `delivered` even if the push were observable, since `.catch(()=>{})` discards it.
+- **The remote title change is verified once, by hand, not by the host.** The owner read the new
+  title back on claude.ai/code on 2.1.318 for one bridge-bound session. The host still cannot
+  observe it, so nothing in the UI may say the remote title changed; the ceiling stays `delivered`
+  (`.catch(()=>{})` discards the push result). Not covered: other versions, other platforms.
 - Whether `Tk`'s `noHistoryBackfill` disjunct suppresses the push for sessions **created from
   claude.ai**, as opposed to started in a terminal and then bridged. The bridge is constructed with
   `noHistoryBackfill: j && Oe?.uncertaintyOnly !== true`, which is set for remote-created sessions,
