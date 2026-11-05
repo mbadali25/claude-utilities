@@ -13,7 +13,7 @@
 
     { "id": "verify-harness",
       "paths": ["_verify/**"],
-      "run": ["bash -n _verify/smoke.sh", "bash -n _verify/run-all.sh", "bash -n _verify/cases/go-checks.sh"],
+      "run": ["bash -n _verify/smoke.sh", "bash -n _verify/run-all.sh", "bash -n _verify/cases/go-checks.sh", "bash -n _verify/cases/ps-parse.sh"],
       "seconds": 2,
       "reach": "local",
       "why": "a syntax error in a harness script makes every gate report a failure that is not in the code. reach: local - bash -n parses only." },
@@ -23,7 +23,14 @@
       "run": ["bash -n scripts/install-agent.sh", "bash _verify/cases/install-agent-sh.sh"],
       "seconds": 2,
       "reach": "local",
-      "why": "bash -n parses install-agent.sh, then the stub case runs it against fake agent/systemctl binaries in a throwaway HOME (36 checks, exit 77 = skipped). NOT covered: scripts/install-agent.ps1 has no automated check (no PowerShell parse step in this gate; Windows install is verified by hand per docs/runbooks). reach: local - no network, no live host, nothing outside a temp dir is touched." },
+      "why": "bash -n parses install-agent.sh, then the stub case runs it against fake agent/systemctl binaries in a throwaway HOME (36 checks, exit 77 = skipped). install-agent.ps1 is parse-checked by rule powershell-scripts-parse; its Windows install behaviour is verified by hand per docs/runbooks. reach: local - no network, no live host, nothing outside a temp dir is touched." },
+
+    { "id": "powershell-scripts-parse",
+      "paths": ["scripts/*.ps1", "_verify/cases/ps-parse.ps1", "_verify/cases/ps-parse.sh"],
+      "run": ["bash _verify/cases/ps-parse.sh"],
+      "seconds": 2,
+      "reach": "local",
+      "why": "System.Management.Automation.Language.Parser.ParseFile over claude-swap-tunnels.ps1, install-tunnels-task.ps1 and install-agent.ps1; fails on any parse error (proved with a temporary unclosed block), exit 77 = no PowerShell. Parse-only: it does NOT run the scripts or check tunnel/scheduled-task behaviour, which stay hand-verified per docs/runbooks. reach: local - parses files on disk, executes nothing." },
 
     { "id": "gitattributes-eol",
       "paths": [".gitattributes", "_verify/cases/gitattributes-check.sh"],
@@ -48,7 +55,7 @@
   ],
 
   "always": [],
-  "default": ["bash _verify/cases/go-checks.sh"],
+  "default": ["go build ./..."],
   "unmapped": "fail",
 
   "environments": {

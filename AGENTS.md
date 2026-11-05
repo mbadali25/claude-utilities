@@ -16,8 +16,8 @@ For Codex and any agent that reads AGENTS.md. Claude Code does not load it (CLAU
 - `bash -n _verify/smoke.sh`
 - `bash -n _verify/run-all.sh`
 - `bash -n _verify/cases/go-checks.sh`
-- `bash -n scripts/install-agent.sh`
-- ...and 3 more in `.crew/verify.json`.
+- `bash -n _verify/cases/ps-parse.sh`
+- ...and 6 more in `.crew/verify.json`.
 
 ## Hard rules
 <!-- crew:keep:start -->
