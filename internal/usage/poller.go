@@ -272,6 +272,27 @@ func (p *Poller) Forget(accountID string) {
 	p.epoch[accountID] = p.epochSeq
 }
 
+// Reset is for an account whose stored login was just replaced ("sign in again"): the failure state
+// belonged to the old login. It clears the failure count, the standing 401 and the wait, drops the
+// error from the last answer (the last-known windows stay), makes the account due now so the next
+// step polls it, and silences any poll of the old login still in flight. It is a no-op for an id the
+// poller never saw.
+func (p *Poller) Reset(accountID string) {
+	p.mu.Lock()
+	if u, ok := p.last[accountID]; ok {
+		u.Err, u.RetryAt = "", time.Time{}
+		p.last[accountID] = u
+	}
+	delete(p.fails, accountID)
+	delete(p.authFail, accountID)
+	delete(p.nextAt, accountID)
+	delete(p.manualAt, accountID)
+	p.epochSeq++
+	p.epoch[accountID] = p.epochSeq
+	p.mu.Unlock()
+	p.wake()
+}
+
 func (p *Poller) wake() {
 	select {
 	case p.wakeC <- struct{}{}:
