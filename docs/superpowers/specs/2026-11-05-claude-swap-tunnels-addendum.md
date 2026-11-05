@@ -48,8 +48,10 @@ saturated path for the other host (label `TSS`) for free:
 - 14:13:55Z — that 22 s connection was killed. 22 s < `stableAfter`, so the counter did **not**
   reset; the agent was on the 16–32 s tier.
 - 14:13:56Z — the tunnel was back after **1 second**.
-- The agent was still not connected when sampled roughly 10–40 s later, and was connected at
-  +64.5 s after the tunnel process started.
+- The agent was still not connected when sampled some tens of seconds later — that sample was not
+  timestamped, so treat the lower bound as unstamped rather than measured — and was connected at
+  **+64.5 s** after the tunnel process started, which is a solid upper bound and the number that
+  carries the argument.
 
 So with the tunnel restored in one second, the agent took somewhere between ~15 s and ~64 s to
 notice. Computed worst case from `backoff.go`, not measured: 60 s cap + ~18 s supervisor delay =
