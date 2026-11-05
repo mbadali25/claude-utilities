@@ -6,7 +6,7 @@ its own token has already stopped working. A swap leaves the old token valid, so
 session keeps using it. The "Needs reload" badge stays, and v1 ships a restart list.
 
 Spike date 2026-11-05. Evidence from Claude Code **2.1.318** (`claude --version`),
-binary `C:\Users\d3ade\.local\bin\claude.exe`, build sha `ca1fa9de`, plus the public docs.
+binary `C:\Users\user\.local\bin\claude.exe`, build sha `ca1fa9de`, plus the public docs.
 The binary evidence is minified internal code, **not a documented contract** — re-check it
 after a Claude Code update.
 
