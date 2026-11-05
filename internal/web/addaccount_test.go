@@ -294,9 +294,15 @@ func TestUIHasAddAccountPanel(t *testing.T) {
 		t.Errorf("index.html has %d fetch calls or lacks the CSRF header", n)
 	}
 	// Neither the URL nor the code may reach storage, the title or the query string.
-	for _, bad := range []string{"localStorage", "sessionStorage", "document.title", "location.search"} {
+	for _, bad := range []string{"sessionStorage", "document.title", "location.search"} {
 		if strings.Contains(p, bad) {
 			t.Errorf("index.html uses %s", bad)
 		}
+	}
+	// localStorage holds layout preferences only (folded panels, the account filter), under one key,
+	// and every access sits in a try/catch. Nothing else may touch it.
+	if n := strings.Count(p, "localStorage"); n != 2 || !strings.Contains(p, "PREF_KEY = 'cs.ui.v1'") ||
+		strings.Count(p, "localStorage.getItem(PREF_KEY)") != 1 || strings.Count(p, "localStorage.setItem(PREF_KEY,") != 1 {
+		t.Errorf("index.html uses localStorage beyond the one layout-preference key (%d uses)", n)
 	}
 }
