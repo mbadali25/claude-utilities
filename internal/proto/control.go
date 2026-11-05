@@ -34,7 +34,20 @@ const (
 	// CmdRepair is the composite: reload plugins, enable Remote Control and set the remote name.
 	// It takes no name of its own; each target is named after the session's own name.
 	CmdRepair = "repair"
+	// CmdRestartSessions asks for the one thing that actually fixes a stale session. It is
+	// COPY-ONLY by decision: no mechanism on a host stops, kills or restarts a session, so this
+	// command always answers StatusUnsupported / CodeRequiresRestart with the exact relaunch
+	// command for the operator to run. It exists so that answer, and the confirm that names the
+	// sessions, are first-class instead of buried in a hint. See IsRestartCommand.
+	CmdRestartSessions = "restart_sessions"
 )
+
+// IsRestartCommand reports whether c is a restart-type command: one whose whole subject is a
+// session's lifetime. The hub confirms these at EVERY scope, session scope included, because the
+// confirm step is where the operator is shown which sessions are named. Keep this a predicate
+// rather than a comparison at each call site, so a second restart-type command cannot be added
+// without every confirm gate picking it up.
+func IsRestartCommand(c string) bool { return c == CmdRestartSessions }
 
 // Per-target statuses. queued is the hub's own starting state; the other four come from an agent.
 const (
@@ -92,7 +105,7 @@ const MaxCommandsPerReport = 32
 // ValidCommand reports whether c is a command this protocol version defines.
 func ValidCommand(c string) bool {
 	switch c {
-	case CmdReloadPlugins, CmdRemoteControlEnable, CmdRenameRemote, CmdRepair:
+	case CmdReloadPlugins, CmdRemoteControlEnable, CmdRenameRemote, CmdRepair, CmdRestartSessions:
 		return true
 	}
 	return false

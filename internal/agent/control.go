@@ -508,6 +508,13 @@ func newControl(stateDir string, now func() time.Time, inboxEnabled bool) *contr
 		}
 		ex.register(c, relaunchMechanism{})
 	}
+	// restart_sessions: COPY-ONLY, and deliberately so. relaunch is its ONLY mechanism, and
+	// relaunch starts and stops nothing - it returns the command for a human to run. Nothing on
+	// this host can terminate a session, which is why no confirm token needs to exist to stop one.
+	// The experimental inbox is NOT registered here even when it is enabled: its frame is unproven
+	// and none of the handlers it exposes stops a session, so offering it would imply a kill path
+	// that does not and must not exist. docs/runbooks/session-control.md records the decision.
+	ex.register(proto.CmdRestartSessions, relaunchMechanism{})
 	return &control{q: q, ex: ex}
 }
 

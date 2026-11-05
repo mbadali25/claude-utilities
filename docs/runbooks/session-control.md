@@ -20,7 +20,8 @@ Claude Code update.
 | `reload_plugins` | Activate pending plugin changes in the session (`/reload-plugins`). |
 | `remote_control_enable` | Bind a Remote Control bridge for the session. |
 | `rename_remote` | Make the session carry a given remote-visible title. |
-| `repair` | The composite: all three, in that order, per session. It takes no name; each session is named after its own name. |
+| `restart_sessions` | Ask for the restart that actually fixes a stale session. **Copy-only: it stops nothing.** See [The restart action](#the-restart-action-copy-only-by-decision). |
+| `repair` | The composite: `reload_plugins`, `remote_control_enable`, `rename_remote`, in that order, per session. It takes no name; each session is named after its own name. It never expands to `restart_sessions`. |
 
 Scope is a separate axis, so every command works at every scope:
 
@@ -37,6 +38,11 @@ Scope is a separate axis, so every command works at every scope:
 `rename_remote` works at `session` scope only, where `name` is required. At `host` or `all` scope it
 is refused outright (`ErrNameNotAllowed`, 400): one name would give every session the same title,
 and no name would fail every target. Use `repair`, which derives each name from the session's own.
+
+`restart_sessions` needs `confirm: true` at **every** scope, `session` included — the one command
+where the scope rule above is not enough, because the confirm is what proves the operator was shown
+which sessions are named. `proto.IsRestartCommand` is the predicate the hub tests, so a second
+restart-type command cannot be added without every confirm gate picking it up.
 
 ## Statuses
 
@@ -63,7 +69,12 @@ claiming a success nobody can see.
 | `reload_plugins` | `hook-queue` | `delivered` |
 | `remote_control_enable` | `relaunch` | `unsupported` |
 | `rename_remote` | `relaunch` | `unsupported` |
-| any of the three, with the experimental flag on | `inbox` is tried first, declines, and the above still answers | unchanged |
+| `restart_sessions` | `relaunch`, and **nothing else is registered for it** | `unsupported` |
+| any of the first three, with the experimental flag on | `inbox` is tried first, declines, and the above still answers | unchanged |
+
+The experimental inbox is deliberately **not** registered for `restart_sessions`, even when the flag
+is on: none of the handlers it exposes stops a session, and offering it would imply a kill path that
+does not exist.
 
 ### relaunch — reports the command, changes nothing
 
@@ -141,6 +152,73 @@ Prove all of that against a session you own, with the key read from that session
 before this returns anything but `unsupported`. **Never guess a frame at a session holding somebody
 else's work.**
 
+## The restart action: copy-only by decision
+
+A relaunch is the only thing that actually fixes a session a swap left behind. `restart_sessions`
+exists so that answer is a first-class command with a confirm step of its own, instead of a hint
+hanging off a rename. **It restarts nothing.**
+
+### The decision, and why
+
+Asked to add an optional "Restart sessions" that terminates the session process after the hub
+passes a confirm token, the answer was **no: no kill path at all.** What shipped instead is the
+confirm dialog that names the sessions and hands over the exact relaunch commands to copy, plus a
+"Mark as restarted" that is a note in one browser.
+
+The reasons, in the order they settle it:
+
+1. **A terminate cannot be relaunched back.** A Claude Code session is attached to a terminal the
+   server has never seen. The agent could kill the process; nothing could put the session back in
+   front of the person who was working in it. "Terminate cleanly" is still throwing away their
+   work, and the relaunch has to happen in that terminal either way — so the kill buys nothing the
+   copied command does not already give.
+2. **It could not be tested.** This feature is built and gated entirely offline, with the rule that
+   no command is ever run against a real session. A kill path would ship unexercised, which is the
+   one thing a kill path must never be.
+3. **It contradicts a promise already in the product.** "No session is stopped, killed or
+   restarted" is written in the confirm dialogs and in this runbook. Adding a kill would retract it.
+
+So there is **no confirm token**, and nothing for one to unlock: `relaunch` is the only mechanism
+registered for the command, and `relaunch` starts and stops nothing. The safety argument is the
+absence of the code, not a gate in front of it. If a safe relaunch is ever wanted, it needs the
+terminal's cooperation (a wrapper the person started themselves that can re-exec), and that is a
+different feature with its own spike — not a flag on this one.
+
+### What the operator sees
+
+`restart_sessions` answers `unsupported` / `unsupported-requires-restart` per session, with the
+relaunch command in the hint. The UI reads that as **Restart required**, which is accurate: the
+restart is required and it is the operator's to run.
+
+The confirm dialog (`#ctl-restart`) must name its targets. It lists every session the ask would
+reach — the session's own name, its host and pid, whether it is on the old login, and the exact
+command with a Copy button — and says in its body that claude-swap stops nothing. Two tests hold
+that: `TestRestartConfirmDialogListsTheSessionsItWouldRestart` asserts the list element and the
+no-kill sentence are served, and `TestRestartCommandNeedsConfirmAtEveryScope` asserts the hub
+refuses a restart with no confirm at session, host and all scope (`ErrConfirmRequired`, a 409).
+
+**Mark as restarted is a no-op.** It writes a key in page memory, drops those sessions from the
+needs-reload callout's count for this browser, and prints "Marked as restarted in this browser
+only; it stays listed until the session ends" on the row. It sends no request and changes no server
+state. The hub's own needs-reload flag is cleared by one thing only: the session ending. A control
+that cleared it for the hub would let the UI assert something nobody observed, which is the failure
+this whole feature is built to avoid.
+
+### Two facts the restart answer rests on
+
+Both are recorded elsewhere in this runbook and repeated here because the restart action is where
+they bite:
+
+- **A remote-control bridge's title is latched once, when the bridge binds.** `/rename` does not
+  re-latch it (spike E), which is why a rename of a running session can only ever answer with a
+  relaunch, and why the relaunch command carries the name. See
+  [relaunch](#relaunch--reports-the-command-changes-nothing).
+- **What a credential swap does to an already-connected bridge is UNPROVEN.** Whether rewriting
+  `claudeAiOauth` under a session with a live bridge tears the bridge down, keeps the old account's
+  connection, or reconnects as the new account has never been tested; it needs a logged-in
+  two-account run. Nothing in the UI or the docs may imply the bridge survives a swap. See
+  [Not verified](#not-verified).
+
 ## The API
 
 ### POST /api/sessions/command
@@ -217,17 +295,29 @@ Everything above is driven from the **Hosts** tab of the admin UI
 - **Per session**, inside the host card's session list: *Reload plugins*, *Enable remote* and
   *Fix name*. *Fix name* opens a small dialog with a labelled field prefilled from the session's
   current remote name, capped at 256 characters.
-- **Per host**, on their own rule above the swap row: *Reload all* and *Enable remote on all*.
-  Both go through a confirm dialog that states how many sessions are affected and that no session
-  is stopped, killed or restarted — the UI side of the `confirm: true` the hub insists on.
+- **Per host**, on their own rule above the swap row: *Reload all*, *Enable remote on all* and
+  *Restart sessions*. The first two go through a confirm dialog that states how many sessions are
+  affected and that no session is stopped, killed or restarted — the UI side of the `confirm: true`
+  the hub insists on. *Restart sessions* goes to its own dialog, because a count cannot name the
+  sessions and a restart has to.
 - **Estate-wide**: a callout above the host list appears whenever a swap has left sessions on an
   old login, offering *Apply to all needs-reload sessions*
-  (`repair` + `onlyNeedsReload` + `confirm`) behind the same confirm step.
+  (`repair` + `onlyNeedsReload` + `confirm`) behind the same confirm step, and *Restart sessions*
+  through the naming dialog.
 
 Each session's verdicts render as chips whose **word** carries the state, so colour only repeats
-it: Queued, Delivered, Done, Failed, Needs restart. Beside each is the honest sentence —
-"Delivered: the session runs it at its next prompt", "Needs restart: cannot be done on a running
-session" — and a relaunch hint gets a Copy button. A counts line under the callout is recomputed
+it: Queued, Delivered, Done, Failed, **Restart required**, **Unsupported**. The last two are both
+the `unsupported` status, split on the reason code, because an operator acts on them differently:
+
+| Chip | When | The sentence beside it |
+|---|---|---|
+| Delivered | status `delivered` | "Delivered: the session runs it at its next prompt." |
+| Restart required | `unsupported` + `unsupported-requires-restart` | "Restart required: cannot be done on a running session. Nothing was stopped." |
+| Unsupported | `unsupported` + any other code | "Unsupported: no proven mechanism can do this on a running session." |
+
+Before this split every `unsupported` read as "Needs restart", which was false for an unproven
+inbox or a missing mechanism — neither of those is fixed by restarting. A relaunch hint gets a Copy
+button. A counts line under the callout is recomputed
 from the poll's own `commands[]` rather than from the 202's snapshot, so it can never contradict
 the chips beside it. Buttons go disabled for the round trip and come back on either answer,
 because a 202 means queued and not done; a refusal lands in an inline `role="alert"` beside the
@@ -329,4 +419,9 @@ Do not run `agent hooks install` against a real `~/.claude` while testing. The t
 - The inbox wire frame, end to end — see the mechanism section above.
 - Whether rewriting `claudeAiOauth` under a session with an already-connected bridge tears the
   bridge down, keeps the old account's connection, or reconnects as the new account. Needs a
-  logged-in two-account test.
+  logged-in two-account test. **Treat the effect of a swap on a live bridge as unknown**; the
+  restart answer does not depend on it either way, since a relaunch rebinds the bridge regardless.
+- Whether a pasted relaunch command brings a session back as expected. The command string is built
+  and shown; nobody has run one here. `restart_sessions` deliberately runs nothing, so there is no
+  kill or relaunch path to verify — only the string and the confirm that names the sessions, both
+  of which are covered by tests.

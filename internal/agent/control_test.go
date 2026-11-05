@@ -66,6 +66,43 @@ func TestRemoteControlAndRenameReportUnsupportedWithTheRelaunchCommand(t *testin
 	}
 }
 
+// restart_sessions is the honest no-op: the operator asked for a restart, the agent stops nothing
+// and hands back the exact command that does it. Its only registered mechanism is relaunch, which
+// is the whole safety argument - there is no code path on the host that could terminate a session,
+// so no confirm token can ever unlock one.
+func TestRestartSessionsOnlyAdvisesAndNeverTerminates(t *testing.T) {
+	ctl, dir := newTestControl(t, false)
+	ms := ctl.ex.mechanisms(proto.CmdRestartSessions)
+	if len(ms) != 1 || ms[0].Name() != "relaunch" {
+		var names []string
+		for _, m := range ms {
+			names = append(names, m.Name())
+		}
+		t.Fatalf("restart_sessions mechanisms = %v, want exactly [relaunch]", names)
+	}
+	res := ctl.ex.run(CommandTask{CommandID: "c1", Command: proto.CmdRestartSessions,
+		SessionID: testSession, PID: os.Getpid(), Name: "alpha"})
+	if res.Status != proto.StatusUnsupported || res.Code != proto.CodeRequiresRestart {
+		t.Fatalf("res = %+v", res)
+	}
+	want := "claude --resume " + testSession + " --remote-control alpha"
+	if res.Hint != want {
+		t.Fatalf("hint = %q, want %q", res.Hint, want)
+	}
+	// Nothing was queued either: a restart is not something a hook can ask a model to do.
+	if ents, err := os.ReadDir(filepath.Join(dir, commandDirName)); err == nil && len(ents) != 0 {
+		t.Fatalf("restart_sessions wrote %d queue files", len(ents))
+	}
+	// The experimental inbox must not be offered a restart even when it is on: the frame is
+	// unproven and the handlers it registers do not include one that stops a session.
+	ctlOn, _ := newTestControl(t, true)
+	for _, m := range ctlOn.ex.mechanisms(proto.CmdRestartSessions) {
+		if m.Name() == "inbox" {
+			t.Fatal("the experimental inbox is registered for restart_sessions")
+		}
+	}
+}
+
 // The relaunch mechanism must never start or stop anything: a session holds the operator's work.
 func TestRelaunchMechanismTouchesNothing(t *testing.T) {
 	dir := t.TempDir()

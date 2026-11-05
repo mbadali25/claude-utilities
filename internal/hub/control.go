@@ -272,7 +272,10 @@ func validateCommandRequest(req *CommandRequest) error {
 		return ErrUnknownHost
 	}
 	// A command that reaches every session on a host, or every host, is confirmed explicitly.
-	if req.Scope != ScopeSession && !req.Confirm {
+	// A restart-type command is confirmed at EVERY scope, session scope included: the confirm is
+	// what proves the operator was shown the names of the sessions it reaches, and one session is
+	// still somebody's work. This is not a UI-only guard; the hub refuses it here.
+	if (req.Scope != ScopeSession || proto.IsRestartCommand(req.Command)) && !req.Confirm {
 		return ErrConfirmRequired
 	}
 	return nil
@@ -381,6 +384,12 @@ func (h *Hub) Command(ctx context.Context, req CommandRequest) (CommandView, err
 			name := req.Name
 			if req.Command == proto.CmdRepair && step == proto.CmdRenameRemote {
 				name = m.name // the composite names each session after itself
+			}
+			if proto.IsRestartCommand(step) {
+				// The relaunch command the agent builds latches a name at bind, so it has to be
+				// the session's OWN name: validateCommandRequest cleared req.Name for anything but
+				// a rename, which would otherwise leave the operator a nameless relaunch.
+				name = m.name
 			}
 			t := &cmdTarget{id: tid, hostID: m.hostID, sessionID: m.sessionID, pid: m.pid,
 				command: step, name: name, status: proto.StatusQueued, created: now, updated: now}
