@@ -137,8 +137,10 @@ func setPasswordCmd(args []string, in io.Reader, errOut io.Writer) int {
 		}
 		return 1
 	}
-	_, _ = fmt.Fprintf(errOut, "set-password: stored in %s; %s is no longer used and every open session must sign in again\n",
-		passwordPath(*dataDir), passwordEnv)
+	// A running server read the hash once at startup, so it keeps accepting the old password and
+	// keeps its sessions until it restarts. Only the UI's own change ends sessions immediately.
+	_, _ = fmt.Fprintf(errOut, "set-password: stored in %s; %s is no longer used. Restart the server to pick this up: "+
+		"a running one keeps the old password and its open sessions until then.\n", passwordPath(*dataDir), passwordEnv)
 	return 0
 }
 
