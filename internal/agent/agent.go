@@ -54,6 +54,9 @@ const (
 	maxIdentity = 256
 
 	reasonExpired = "refresh token expired"
+	// reasonHomeMoved is logged when the path agent.json recorded at enrolment is not the one this
+	// run's home resolves to. It is a code: those paths name users' homes.
+	reasonHomeMoved = "home_moved"
 )
 
 var (
@@ -257,6 +260,32 @@ func newAgent(c Config, log *slog.Logger) *agent {
 	return a
 }
 
+// resolveCredsPath decides which credentials file this run swaps. The home the agent runs in wins
+// over the credsPath agent.json recorded at enrolment, because the identity the card shows, the
+// export and the swap must all name one home: the identity probe always reads the live home, so a
+// recorded path from another one made the agent rewrite a different user's login, report success,
+// and leave the card unchanged (a per-user enrolment later re-installed as a User=root system unit
+// keeping the same state dir does exactly that).
+//
+// The recorded path stays the fallback for a unit that passes no home at all - that host ran before
+// and must keep running. A divergence is logged as a code: these paths name users' homes.
+func resolveCredsPath(c Config, log *slog.Logger) (string, error) {
+	live, err := credfile.ResolvePath()
+	if err != nil {
+		if c.CredsPath == "" {
+			return "", err
+		}
+		log.Warn("no home to resolve the credentials path from; using the recorded one",
+			"action", "config", "result", "fallback", "reason", proto.ReasonNoHome)
+		return c.CredsPath, nil
+	}
+	if c.CredsPath != "" && c.CredsPath != live {
+		log.Warn("recorded credentials path is not in this run's home; following the home",
+			"action", "config", "result", "ignored", "reason", reasonHomeMoved)
+	}
+	return live, nil
+}
+
 // Run connects, reports and serves swap requests until ctx ends. It redials with NextDelay
 // backoff after any drop - NextDelayLoopback when the server URL is loopback, since the dial then
 // fails locally and instantly - and finishes or rolls back an interrupted swap first.
@@ -264,13 +293,11 @@ func Run(ctx context.Context, c Config) error {
 	if c.Token == "" {
 		return ErrNotEnrolled
 	}
-	if c.CredsPath == "" {
-		p, err := credfile.ResolvePath()
-		if err != nil {
-			return err
-		}
-		c.CredsPath = p
+	p, err := resolveCredsPath(c, logx.New(os.Stderr))
+	if err != nil {
+		return err
 	}
+	c.CredsPath = p
 	if c.StateDir == "" {
 		d, err := DefaultStateDir()
 		if err != nil {
