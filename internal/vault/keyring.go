@@ -23,6 +23,17 @@ type Keyring struct {
 	mu   sync.Mutex
 	file *sealed
 	keys map[string]TunnelKey
+	// config is the tunnel configuration, stored opaquely. The vault must not know what a tunnel
+	// Spec is - internal/tunnel imports this package, so the reverse would be a cycle - and the
+	// configuration belongs in here rather than a plaintext file: a host address and a username
+	// are not secrets on their own, but together they map the estate.
+	config json.RawMessage
+}
+
+// keyringPayload is what the encrypted file holds.
+type keyringPayload struct {
+	Keys   []TunnelKey     `json:"keys"`
+	Config json.RawMessage `json:"config,omitempty"`
 }
 
 // keyringMagic is the file's own magic, so a keyring and a vault can never be opened as each other.
@@ -75,17 +86,39 @@ func OpenKeyring(path, keyEnv string) (*Keyring, error) {
 	if plain == nil {
 		return k, nil
 	}
-	var list []TunnelKey
-	if err := json.Unmarshal(plain, &list); err != nil {
+	var p keyringPayload
+	if err := json.Unmarshal(plain, &p); err != nil {
 		return nil, errCorrupt
 	}
-	for _, t := range list {
+	for _, t := range p.Keys {
 		if len(t.Seed) != ed25519.SeedSize {
 			return nil, errCorrupt
 		}
 		k.keys[t.HostID] = t
 	}
+	k.config = p.Config
 	return k, nil
+}
+
+// Config returns the stored tunnel configuration, or nil when there is none.
+func (k *Keyring) Config() json.RawMessage {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append(json.RawMessage(nil), k.config...)
+}
+
+// PutConfig replaces the stored tunnel configuration and persists. A failed write leaves the
+// previous configuration in place, in memory and on disk.
+func (k *Keyring) PutConfig(raw json.RawMessage) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	prev := k.config
+	k.config = append(json.RawMessage(nil), raw...)
+	if err := k.saveLocked(); err != nil {
+		k.config = prev
+		return err
+	}
+	return nil
 }
 
 func newSeed() ([]byte, error) {
@@ -274,7 +307,7 @@ func (k *Keyring) saveLocked() error {
 		list = append(list, t)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].HostID < list[j].HostID })
-	plain, err := json.Marshal(list)
+	plain, err := json.Marshal(keyringPayload{Keys: list, Config: k.config})
 	if err != nil {
 		return fmt.Errorf("vault: encode: %w", err)
 	}

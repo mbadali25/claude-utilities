@@ -25,6 +25,7 @@ import (
 	"claude-utilities/internal/adminpw"
 	"claude-utilities/internal/hub"
 	"claude-utilities/internal/logx"
+	"claude-utilities/internal/tunnel"
 	"claude-utilities/internal/usage"
 	"claude-utilities/internal/vault"
 )
@@ -87,15 +88,45 @@ type PasswordAPI interface {
 	Set(password string) error
 }
 
+// tunnelAPI is the part of *tunnel.Manager the web layer uses (tunnels.go). It is nil when the
+// server runs without --tunnels, which is the default: every /api/tunnels route then answers 404
+// and the UI leaves the tab out, so the feature ships with no behaviour change at all.
+//
+// Note what is NOT on it: nothing returns a private key. The supervisor reads key material
+// straight from the keyring, and the only key-shaped values that reach a response are a
+// fingerprint and the public key inside a generated command.
+type tunnelAPI interface {
+	List() []tunnel.View
+	Get(id string) (tunnel.View, bool)
+	StateByID() map[string]tunnel.View
+	Add(s tunnel.Spec) (tunnel.View, error)
+	Update(id, address, user string, port int) (tunnel.View, error)
+	SetEnabled(id string, on bool) (tunnel.View, error)
+	SeedHostKey(id, text string) (tunnel.View, error)
+	Restart(id string) error
+	GenerateKey(id string) (tunnel.View, error)
+	RotateKey(id string) (tunnel.View, error)
+	CommitRotation(id string) (tunnel.View, error)
+	CancelRotation(id string) (tunnel.View, error)
+	RevokeKey(id string) (tunnel.View, error)
+	ConfirmRevoked(id string) (tunnel.View, error)
+	Remove(id string) (tunnel.View, error)
+	ImportFile(path string) (added int, skipped int, err error)
+}
+
 // logger is the web layer's structured, allowlist-filtered logger.
 var logger = logx.New(os.Stderr).With("component", "web")
 
-// Handler returns the admin UI and API. It panics if pw is nil.
-func Handler(h *hub.Hub, v *vault.Vault, p *usage.Poller, pw PasswordAPI) http.Handler {
+// Handler returns the admin UI and API. It panics if pw is nil. tn may be nil, which is the
+// server without --tunnels: the Tunnels tab and its routes are then absent.
+func Handler(h *hub.Hub, v *vault.Vault, p *usage.Poller, pw PasswordAPI, tn *tunnel.Manager) http.Handler {
 	if pw == nil {
 		panic("web: a password store is required")
 	}
-	return newHandler(h, v, p, pw, time.Now)
+	if tn == nil { // a typed nil in an interface is not nil, so keep the interface nil
+		return newHandler(h, v, p, pw, nil, time.Now)
+	}
+	return newHandler(h, v, p, pw, tn, time.Now)
 }
 
 type sess struct {
@@ -104,11 +135,12 @@ type sess struct {
 }
 
 type server struct {
-	hub   hubAPI
-	vault *vault.Vault
-	usage usageAPI
-	pw    PasswordAPI
-	now   func() time.Time
+	hub    hubAPI
+	vault  *vault.Vault
+	usage  usageAPI
+	pw     PasswordAPI
+	tunnel tunnelAPI
+	now    func() time.Time
 
 	mu       sync.Mutex
 	sessions map[string]sess
@@ -117,10 +149,12 @@ type server struct {
 	commandHits map[string][]time.Time
 	// refreshHits rate limits POST /api/usage/refresh across every session (usagerefresh.go).
 	refreshHits []time.Time
+	// addTunnelHits rate limits POST /api/tunnels across every session (tunnels.go).
+	addTunnelHits []time.Time
 }
 
-func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, now func() time.Time) http.Handler {
-	s := &server{hub: h, vault: v, usage: u, pw: pw, now: now, sessions: map[string]sess{},
+func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, tn tunnelAPI, now func() time.Time) http.Handler {
+	s := &server{hub: h, vault: v, usage: u, pw: pw, tunnel: tn, now: now, sessions: map[string]sess{},
 		failures: map[string][]time.Time{}, commandHits: map[string][]time.Time{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
@@ -145,6 +179,7 @@ func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, now func()
 	mux.HandleFunc("POST /api/accounts/add/{id}/cancel", s.authPost(s.addCancel))
 	mux.HandleFunc("POST /api/pending/{fp}/allow", s.authPost(s.allow))
 	mux.HandleFunc("POST /api/pending/{fp}/deny", s.authPost(s.deny))
+	s.routeTunnels(mux)
 	return headers(s.apiGate(mux))
 }
 
@@ -283,6 +318,9 @@ type pageData struct {
 	Nonce    string
 	Error    string
 	Pending  []pendRow
+	// Tunnels is true when the server runs with --tunnels. The tab, its panel and its script are
+	// left out of the page entirely when it is false, so the default build is unchanged.
+	Tunnels bool
 }
 
 func (s *server) render(w http.ResponseWriter, code int, d pageData) {
@@ -305,7 +343,7 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusOK, pageData{})
 		return
 	}
-	d := pageData{LoggedIn: true, CSRF: x.csrf}
+	d := pageData{LoggedIn: true, CSRF: x.csrf, Tunnels: s.tunnel != nil}
 	for _, p := range s.hub.Pending() {
 		d.Pending = append(d.Pending, pendRow{p.Fingerprint, p.HostName, p.OS, p.SourceIP,
 			p.Since.Format(time.RFC3339), p.ExpiresAt.Format(time.RFC3339)})
@@ -606,15 +644,44 @@ type hostJSON struct {
 	NeedsReload    bool          `json:"needsReload"`
 	SwapBlocked    bool          `json:"swapBlocked"`
 	Sessions       []sessionJSON `json:"sessions"`
+	// Tunnel is this host's reverse-SSH tunnel, when it has one. It is a SEPARATE indicator from
+	// Online and is never merged with it: a tunnel can be up while the agent is still offline,
+	// and that is the diagnostic case rather than a contradiction. A host with no tunnel leaves
+	// it out, and a tunnel with no enrolled host appears only on the Tunnels tab - tunnel-first
+	// is the real onboarding order, so the join tolerates a missing partner in both directions.
+	Tunnel *hostTunnelJSON `json:"tunnel,omitempty"`
+}
+
+// hostTunnelJSON is the tunnel summary on a host row. It deliberately carries no address and no
+// username: the Tunnels tab is where those are shown and edited.
+type hostTunnelJSON struct {
+	ID          string    `json:"id"`
+	State       string    `json:"state"`
+	Since       time.Time `json:"since"`
+	Restarts1h  int       `json:"restarts1h"`
+	LastRestart time.Time `json:"lastRestart,omitzero"`
+	Reason      string    `json:"reason,omitempty"`
+	Detail      string    `json:"detail,omitempty"`
+	Short       string    `json:"shortFingerprint,omitempty"`
+	Enabled     bool      `json:"enabled"`
 }
 
 func (s *server) hosts(w http.ResponseWriter, _ *http.Request) {
 	hs := s.hub.Hosts()
+	var tunnels map[string]tunnel.View
+	if s.tunnel != nil {
+		tunnels = s.tunnel.StateByID()
+	}
 	out := make([]hostJSON, 0, len(hs))
 	for _, h := range hs {
 		j := hostJSON{HostID: h.HostID, Name: h.Name, OS: h.OS, RunAs: h.RunAs, Online: h.Online, ActiveAccount: h.ActiveAccount,
 			IdentityReason: h.IdentityReason, SwapBlocked: h.SwapBlocked,
 			Sessions: make([]sessionJSON, 0, len(h.Sessions))}
+		if t, ok := tunnels[h.HostID]; ok {
+			j.Tunnel = &hostTunnelJSON{ID: t.ID, State: string(t.State), Since: t.Since,
+				Restarts1h: t.Restarts1h, LastRestart: t.LastRestart, Reason: string(t.Reason),
+				Detail: t.Detail, Short: t.Short, Enabled: t.Enabled}
+		}
 		for _, x := range h.Sessions {
 			j.Sessions = append(j.Sessions, sessionJSON{PID: x.PID, ID: x.ID, Name: x.Name,
 				RemoteName: x.RemoteName, Status: x.Status, RemoteControl: x.RemoteControl,

@@ -50,7 +50,7 @@ func killIfSSH(pid int) (bool, error) {
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 	buf := make([]uint16, windows.MAX_LONG_PATH)
-	size := uint32(len(buf))
+	size := uint32(len(buf)) // #nosec G115 -- MAX_LONG_PATH is a small constant, not input
 	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &size); err != nil {
 		return false, nil
 	}

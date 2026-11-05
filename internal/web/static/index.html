@@ -307,6 +307,54 @@
   .copyline { display:grid; gap:1px; min-width:0; }
   .copyline code { overflow-wrap:anywhere; }
 
+  /* --- Tunnels ----------------------------------------------------------------------------
+     The reverse SSH tunnel to each Linux host. Two rules shape this panel.
+
+     First, the state chip here is the TUNNEL's, never the agent's. "Tunnel up, agent offline"
+     is the diagnostic case, so the Hosts tab shows both indicators side by side and nothing
+     merges them. The chip always carries a word as well as a tint: the state must never be
+     readable by colour alone.
+
+     Second, these cards carry generated shell one-liners, which are long. They get a wider
+     column than an account card, the command runs full width under its Copy button, and it
+     wraps anywhere rather than scrolling sideways. Monospace is for the key, the fingerprint
+     and the command - the three places where it is the real typeface for the content. */
+  .tungrid { grid-template-columns:repeat(auto-fill, minmax(min(100%, 430px), 1fr)); }
+  .tun-tools { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 10px; }
+  .tun-tools .say { font-size:.85rem; color:var(--mut); }
+  .tun-tools .gap { flex:1 1 0; min-width:0; }
+  .tun-meta { display:grid; gap:3px; font-size:.82rem; color:var(--mut); min-width:0; }
+  .tun-meta .k { color:var(--mut); }
+  .tun-meta .v { color:var(--fg); overflow-wrap:anywhere; }
+  .tun-meta .row { gap:6px; flex-wrap:wrap; align-items:baseline; }
+  /* The fingerprint is a key, so it keeps monospace, and it is quoted in full here: the Hosts
+     tab carries only its first 8 characters, the same convention the enrolment fingerprint uses. */
+  .tun-fp { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.8rem;
+            color:var(--fg); overflow-wrap:anywhere; }
+  .tun-why { font-size:.82rem; color:var(--mut); }
+  .tun-why.bad { color:var(--bad); }
+  .tun-cmds { display:grid; gap:10px; border-top:1px solid var(--line); padding-top:12px; min-width:0; }
+  .tun-cmds code { font-size:.78rem; }
+  /* The tightened line is an OPTION that has not been verified on a real host, so it is folded
+     away behind a disclosure rather than offered beside the one we recommend. */
+  .tun-opt summary { cursor:pointer; color:var(--mut); font-size:.82rem; min-height:32px;
+                     display:flex; align-items:center; }
+  .tun-opt summary:hover { color:var(--fg); }
+  .tun-opt .body { display:grid; gap:6px; margin-top:6px; }
+  .tun-acts { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+              border-top:1px solid var(--line); padding-top:12px; }
+  /* Destructive actions last, in a group of their own, outlined in the negative colour, with
+     the consequence written out above them. The confirmation names the host. */
+  .tun-danger { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+                border-top:1px solid var(--line); padding-top:12px; }
+  .tun-danger .lead { flex:1 1 100%; font-size:.78rem; color:var(--mut); }
+  .tun-msg { flex:1 1 100%; font-size:.82rem; }
+  .tun-msg:empty { display:none; }
+  .tun-msg.ok { color:var(--ok); }
+  .tun-msg.bad { color:var(--bad); }
+  .tun-add { display:grid; gap:12px; }
+  .tun-add .pair { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap:12px; }
+
   /* Why a host names no account: one step in the ground inside the card that failed to name one,
      never a tinted ground of its own. The sentence is in the full ink; the fix is secondary. */
   .whyid { background:var(--sunk); border-radius:var(--r); padding:10px 12px; display:grid; gap:6px; font-size:.9rem; min-width:0; }
@@ -476,6 +524,7 @@
 <div class="tabs" id="tabs" role="tablist" aria-label="Accounts and hosts">
   <button type="button" id="tab-accounts" role="tab" aria-selected="true" aria-controls="panel-accounts" tabindex="0">Accounts<span class="n num" id="tab-accounts-n">-</span></button>
   <button type="button" id="tab-hosts" role="tab" aria-selected="false" aria-controls="panel-hosts" tabindex="-1">Hosts<span class="n num" id="tab-hosts-n">-</span></button>
+  {{if .Tunnels}}<button type="button" id="tab-tunnels" role="tab" aria-selected="false" aria-controls="panel-tunnels" tabindex="-1">Tunnels<span class="n num" id="tab-tunnels-n">-</span></button>{{end}}
 </div>
 
 <section id="panel-accounts" role="tabpanel" aria-labelledby="tab-accounts" tabindex="0">
@@ -512,6 +561,24 @@
   <p class="panel-meta sub" id="ctl-summary" role="status" aria-live="polite"></p>
   <div id="hosts" class="grid"><p class="empty">Loading hosts...</p></div>
 </section>
+
+{{if .Tunnels}}
+<!-- The third destination. It is a tab rather than a dialog off the Account menu because the
+     tablist already does all of this: a roving tabindex, a live count in the label and the
+     remembered selection. A dialog would need its own scrolling for a per-host command table.
+     The per-host tunnel state also appears on the Hosts tab, beside the agent's own state. -->
+<section id="panel-tunnels" role="tabpanel" aria-labelledby="tab-tunnels" tabindex="0" hidden>
+  <h2 class="sr" id="tun-panel-h">Tunnels</h2>
+  <div class="tun-tools">
+    <button type="button" class="btn primary" id="tun-add-open">Add a tunnel</button>
+    <button type="button" class="btn sm" id="tun-import">Import the interim host list</button>
+    <span class="gap"></span>
+    <span class="say" id="tun-status" role="status" aria-atomic="true"></span>
+  </div>
+  <p class="panel-meta count" id="tun-count"></p>
+  <div id="tunnels" class="grid tungrid"><p class="empty">Loading tunnels...</p></div>
+</section>
+{{end}}
 </div>
 
 </main>
@@ -654,6 +721,94 @@
     </form>
   </div>
 </dialog>
+
+{{if .Tunnels}}
+<!-- The Tunnels dialogs. Native <dialog>, like the others: Esc closes, Tab stays inside and
+     focus returns to the control that opened them. -->
+<dialog class="modal" id="tun-add-dialog" aria-labelledby="tun-add-h">
+  <div class="modal-head">
+    <h2 id="tun-add-h">Add a tunnel</h2>
+    <button type="button" class="btn sm ghost x" data-close="tun-add-dialog" aria-label="Close">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p class="mut">The server dials out to the host, so the host opens no inbound port. It holds no
+      password for the host: adding a tunnel generates a key here and gives you one line to paste on
+      the host yourself.</p>
+    <form id="tun-add-form" class="tun-add" autocomplete="off">
+      <label class="fld">Label
+        <input name="label" id="tun-label" maxlength="32" required aria-describedby="tun-label-hint" spellcheck="false">
+        <span class="hint" id="tun-label-hint">1-32 characters of A-Z a-z 0-9 . _ - . It names the host in the log and in the authorized_keys comment, and it cannot be changed later.</span>
+      </label>
+      <div class="pair">
+        <label class="fld">Address
+          <input name="address" id="tun-address" maxlength="253" required spellcheck="false" aria-describedby="tun-address-hint">
+          <span class="hint" id="tun-address-hint">A DNS name or an IP literal.</span>
+        </label>
+        <label class="fld">User
+          <input name="user" id="tun-user" maxlength="32" required spellcheck="false" aria-describedby="tun-user-hint">
+          <span class="hint" id="tun-user-hint">The login on the host.</span>
+        </label>
+      </div>
+      <label class="fld">Port
+        <input name="port" id="tun-port" type="number" min="1" max="65535" value="8443" required class="num" aria-describedby="tun-port-hint">
+        <span class="hint" id="tun-port-hint">Forwarded on both ends, and it must match the host's permitlisten option.</span>
+      </label>
+      <p class="msg" id="tun-add-msg" role="alert"></p>
+      <div class="modal-foot">
+        <button type="button" class="btn" data-close="tun-add-dialog">Cancel</button>
+        <button type="submit" class="btn primary" id="tun-add-go">Add and generate a key</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<dialog class="modal" id="tun-key-dialog" aria-labelledby="tun-key-h">
+  <div class="modal-head">
+    <h2 id="tun-key-h">Paste the host's own key</h2>
+    <button type="button" class="btn sm ghost x" data-close="tun-key-dialog" aria-label="Close">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p class="mut" id="tun-key-for"></p>
+    <p class="mut">The tunnel refuses an unknown host key rather than asking, so the host's own public
+      key has to be recorded here first. Take it from the host itself, not from the network.</p>
+    <form id="tun-key-form" autocomplete="off">
+      <label class="fld">The host's public key
+        <input name="hostKey" id="tun-key-input" maxlength="4096" required spellcheck="false" aria-describedby="tun-key-hint">
+        <span class="hint" id="tun-key-hint">One authorized_keys line from the host, such as the contents of /etc/ssh/ssh_host_ed25519_key.pub. A trailing comment is fine.</span>
+      </label>
+      <p class="msg" id="tun-key-msg" role="alert"></p>
+      <div class="modal-foot">
+        <button type="button" class="btn" data-close="tun-key-dialog">Cancel</button>
+        <button type="submit" class="btn primary" id="tun-key-go">Record this key</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<!-- One confirmation for every action that cannot be taken back here. It names the host and says
+     what will still be true on that host afterwards, because this server cannot change it. -->
+<dialog class="modal" id="tun-confirm" aria-labelledby="tun-confirm-h" aria-describedby="tun-confirm-body">
+  <div class="modal-head">
+    <h2 id="tun-confirm-h">Confirm</h2>
+    <button type="button" class="btn sm ghost x" data-close="tun-confirm" aria-label="Close without doing it">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p id="tun-confirm-body"></p>
+    <p class="mut" id="tun-confirm-note"></p>
+    <p class="msg" id="tun-confirm-msg" role="alert"></p>
+    <div class="modal-foot">
+      <button type="button" class="btn" data-close="tun-confirm">Cancel</button>
+      <button type="button" class="btn danger" id="tun-confirm-go">Confirm</button>
+    </div>
+  </div>
+</dialog>
+{{end}}
 
 <!-- The two announcers. They live in the shell, not on a host card, because renderHosts replaces
      the whole card subtree: a live region created in the same pass as its text is not reliably
@@ -1661,6 +1816,23 @@
     state.appendChild(el('span', h.online ? 'online' : 'offline', h.online ? 'ok' : 'mut'));
     top.appendChild(state); c.appendChild(top);
 
+    // The tunnel is a SECOND indicator, never merged with the agent's. "Tunnel up, agent
+    // offline" is the diagnostic case: the tunnel being up means its ssh child is alive, not
+    // that the agent has dialled through it yet. A host with no tunnel shows nothing here.
+    if (h.tunnel) {
+      var tl = el('div', undefined, 'row wrap');
+      tl.appendChild(el('span', 'Tunnel', 'mut'));
+      tl.appendChild(tunChip(h.tunnel));
+      if (h.tunnel.since) tl.appendChild(el('span', since(h.tunnel.since), 'mut'));
+      if (h.tunnel.restarts1h) tl.appendChild(el('span', h.tunnel.restarts1h + ' restarts this hour', 'mut'));
+      if (h.tunnel.shortFingerprint) tl.appendChild(el('span', 'key ' + h.tunnel.shortFingerprint, 'mut'));
+      c.appendChild(tl);
+      if (h.tunnel.reason) {
+        c.appendChild(el('div', (h.tunnel.detail || h.tunnel.reason) + ' (' + h.tunnel.reason + ')',
+          'tun-why' + (h.tunnel.state === 'failed' ? ' bad' : '')));
+      }
+    }
+
     var act = (accountsCache.filter(function (a) { return a.id === h.activeAccount; })[0] || {}).label;
     var line = el('div', undefined, 'row wrap');
     line.appendChild(el('span', 'Active account', 'mut'));
@@ -1984,6 +2156,329 @@
       out.appendChild(document.createTextNode(' single use, expires ' + new Date(r.expires).toLocaleTimeString()));
     }).catch(function (e) { say(e.message); });
   });
+
+  // --- Tunnels ------------------------------------------------------------------------------
+  //
+  // The reverse SSH tunnel to each Linux host. The whole block is inert unless the server runs
+  // with --tunnels, in which case the panel is not in the page at all.
+  //
+  // Two things here are deliberate and easy to undo by accident:
+  //
+  //   * The state word is always written out beside the tint. A tint alone is not a state.
+  //   * Nothing claims a revoke took effect on the host. This server can delete its own key and
+  //     nothing more, so a revoked tunnel keeps offering the line that removes it and keeps
+  //     saying that the line is probably still there.
+  var tunnelsOn = !!$('#panel-tunnels');
+  var tunnelsCache = [], tunBusy = false, tunConfirm = null;
+
+  // The vocabulary of the tunnel state machine. kind is the chip tint, word is what it says.
+  var TUN_STATE = {
+    up: { word: 'up', kind: 'ok', g: 'ok' },
+    connecting: { word: 'connecting', kind: '', g: 'info' },
+    down: { word: 'retrying', kind: 'warn', g: 'warn' },
+    failed: { word: 'failed', kind: 'bad', g: 'bad' },
+    disabled: { word: 'off', kind: '', g: 'info' },
+    revoke_pending: { word: 'key revoked', kind: 'warn', g: 'warn' }
+  };
+  function tunState(v) { return TUN_STATE[v.state] || { word: v.state || 'unknown', kind: '', g: 'info' }; }
+  function tunChip(v) { var s = tunState(v); return chip(s.word, s.kind, s.g); }
+
+  function tunSay(msg) { if (tunnelsOn) $('#tun-status').textContent = msg || ''; }
+
+  // since turns a timestamp into "for 3 h 12 m", which is what the operator reads the state by.
+  function since(ts) {
+    if (!ts) return '';
+    var secs = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 1000));
+    if (secs < 60) return 'for ' + secs + ' s';
+    var mins = Math.round(secs / 60);
+    if (mins < 60) return 'for ' + mins + ' m';
+    var hrs = Math.floor(mins / 60);
+    return 'for ' + hrs + ' h ' + (mins % 60) + ' m';
+  }
+
+  function tunRow(key, value, cls) {
+    var r = el('div', undefined, 'row');
+    r.appendChild(el('span', key, 'k'));
+    r.appendChild(el('span', value, 'v' + (cls ? ' ' + cls : '')));
+    return r;
+  }
+
+  // tunAct runs one action against one tunnel, with the card's own message line carrying the
+  // verdict: an error belongs where the operator is looking, not in the page-wide status line.
+  function tunAct(v, method, path, body, msgEl, buttons) {
+    tunBusy = true; tunSay('');
+    msgEl.textContent = ''; msgEl.className = 'tun-msg';
+    buttons.forEach(function (b) { b.disabled = true; });
+    return call(method, '/api/tunnels/' + encodeURIComponent(v.id) + path, body)
+      .then(function () { tunBusy = false; return loadTunnels(true); })
+      .catch(function (e) {
+        tunBusy = false;
+        buttons.forEach(function (b) { b.disabled = false; });
+        msgEl.textContent = e.message; msgEl.className = 'tun-msg bad';
+        throw e;
+      });
+  }
+
+  // A confirmation that names the host and says what stays true on it afterwards.
+  function tunAsk(title, body, note, verb, run) {
+    $('#tun-confirm-h').textContent = title;
+    $('#tun-confirm-body').textContent = body;
+    $('#tun-confirm-note').textContent = note || '';
+    $('#tun-confirm-msg').textContent = '';
+    $('#tun-confirm-go').textContent = verb;
+    tunConfirm = run;
+    openModal('#tun-confirm');
+    var b = $('#tun-confirm-go'); b.disabled = false; b.focus();
+  }
+
+  function tunnelCard(v) {
+    var c = el('article', undefined, 'card'); c.dataset.tunnel = v.id;
+    var top = el('div', undefined, 'row between');
+    var t = el('div');
+    t.appendChild(el('div', v.label, 'title'));
+    t.appendChild(el('div', v.user + '@' + v.address + ' · port ' + v.port, 'sub'));
+    top.appendChild(t);
+    top.appendChild(tunChip(v));
+    c.appendChild(top);
+
+    var meta = el('div', undefined, 'tun-meta');
+    var st = tunState(v);
+    meta.appendChild(tunRow('State', st.word + (v.since ? ' ' + since(v.since) : '')));
+    // A real zero prints as a zero: "0 restarts" is an answer, an empty cell is not.
+    meta.appendChild(tunRow('Restarts in the last hour', String(v.restarts1h) +
+      (v.lastRestart ? ' · last at ' + new Date(v.lastRestart).toLocaleTimeString() : '')));
+    if (v.hasKey) {
+      var fp = el('div', undefined, 'row');
+      fp.appendChild(el('span', 'Key', 'k'));
+      fp.appendChild(el('span', v.fingerprint, 'tun-fp'));
+      meta.appendChild(fp);
+    } else {
+      meta.appendChild(tunRow('Key', 'none on this server'));
+    }
+    meta.appendChild(tunRow('Host key', v.hasHostKey ? v.hostKeyFingerprint : 'not recorded yet'));
+    c.appendChild(meta);
+
+    if (v.reason) {
+      var why = el('div', (v.detail || v.reason) + ' (' + v.reason + ')',
+        'tun-why' + (v.state === 'failed' ? ' bad' : ''));
+      c.appendChild(why);
+    }
+    if (v.revokePending) {
+      c.appendChild(el('div', 'The key is gone from this server. Its authorized_keys line is ' +
+        'almost certainly still on the host: run the remove command there, then confirm it.', 'tun-why'));
+    }
+    if (v.rotating) {
+      c.appendChild(el('div', 'Rotating. Both lines are valid until you finish it: paste the new ' +
+        'line, wait for the tunnel to settle, then finish the rotation.', 'tun-why'));
+    }
+
+    // The generated commands. Public key only; there is no endpoint that returns a private key.
+    var cmds = el('div', undefined, 'tun-cmds');
+    if (v.rotateInstall) cmds.appendChild(copyLine('Add the NEW line on ' + v.label, v.rotateInstall,
+      'Copy the install command for the new key on ' + v.label));
+    if (v.install) cmds.appendChild(copyLine('Add this line on ' + v.label, v.install,
+      'Copy the install command for ' + v.label));
+    if (v.remove) cmds.appendChild(copyLine('Remove it again with', v.remove,
+      'Copy the remove command for ' + v.label));
+    // A revoked key's line survives a replacement key, so its remove command does too: it is
+    // the only way that line comes off the host, and nothing here can do it.
+    if (v.revokedRemove && v.revokedRemove !== v.remove) {
+      cmds.appendChild(copyLine('Remove the REVOKED line on ' + v.label, v.revokedRemove,
+        'Copy the remove command for the revoked key on ' + v.label));
+    }
+    if (v.installTight) {
+      var d = el('details', undefined, 'tun-opt');
+      d.appendChild(el('summary', 'A tighter line, not verified'));
+      var body = el('div', undefined, 'body');
+      body.appendChild(el('p', 'port-forwarding re-enables -L as well as -R, and permitlisten ' +
+        'constrains only the -R listen address, so a stolen key could forward out of the host. ' +
+        'Adding permitopen="127.0.0.1:1" should close that. Whether it leaves the -R forward ' +
+        'working has NOT been tested on a real host, so it is not what we recommend yet.', 'sub'));
+      body.appendChild(copyLine('The tightened line', v.installTight,
+        'Copy the tightened install command for ' + v.label));
+      d.appendChild(body);
+      cmds.appendChild(d);
+    }
+    if (cmds.childNodes.length) c.appendChild(cmds);
+
+    var msg = el('p', undefined, 'tun-msg'); msg.setAttribute('role', 'alert');
+
+    // Everyday actions.
+    var acts = el('div', undefined, 'tun-acts');
+    var btns = [];
+    function act(text, cls, fn) {
+      var b = el('button', text, 'btn sm' + (cls ? ' ' + cls : '')); b.type = 'button';
+      b.addEventListener('click', fn); acts.appendChild(b); btns.push(b); return b;
+    }
+    if (!v.hasHostKey) {
+      act('Record the host key', 'primary', function () {
+        $('#tun-key-for').textContent = 'For ' + v.label + '.';
+        $('#tun-key-msg').textContent = '';
+        $('#tun-key-input').value = ''; $('#tun-key-input').dataset.tunnel = v.id;
+        openModal('#tun-key-dialog'); $('#tun-key-input').focus();
+      });
+    } else if (v.enabled) {
+      act('Stop', '', function () { tunAct(v, 'POST', '/disable', undefined, msg, btns).catch(function () {}); });
+    } else if (v.hasKey) {
+      act('Start', 'primary', function () { tunAct(v, 'POST', '/enable', undefined, msg, btns).catch(function () {}); });
+    }
+    if (v.enabled) act('Restart now', '', function () {
+      tunAct(v, 'POST', '/restart', undefined, msg, btns).catch(function () {});
+    });
+    if (v.hasHostKey) act('Replace the host key', '', function () {
+      $('#tun-key-for').textContent = 'For ' + v.label + '. The one recorded now is ' + v.hostKeyFingerprint + '.';
+      $('#tun-key-msg').textContent = '';
+      $('#tun-key-input').value = ''; $('#tun-key-input').dataset.tunnel = v.id;
+      openModal('#tun-key-dialog'); $('#tun-key-input').focus();
+    });
+    if (!v.hasKey) act('Generate a key', 'primary', function () {
+      tunAct(v, 'POST', '/key/generate', undefined, msg, btns).catch(function () {});
+    });
+    if (v.rotating) {
+      act('Finish the rotation', 'primary', function () {
+        tunAct(v, 'POST', '/key/rotate/commit', undefined, msg, btns).catch(function () {});
+      });
+      act('Cancel the rotation', '', function () {
+        tunAct(v, 'POST', '/key/rotate/cancel', undefined, msg, btns).catch(function () {});
+      });
+    }
+    if (v.revokePending) act('I have removed the line', '', function () {
+      tunAct(v, 'POST', '/key/revoked', undefined, msg, btns).catch(function () {});
+    });
+    acts.appendChild(msg);
+    c.appendChild(acts);
+
+    // Destructive actions last, in their own group, with the consequence written out.
+    var dang = el('div', undefined, 'tun-danger');
+    dang.appendChild(el('span', 'These cannot be undone here, and none of them changes anything ' +
+      'on the host: only the operator can edit its authorized_keys.', 'lead'));
+    function danger(text, fn) {
+      var b = el('button', text, 'btn sm danger'); b.type = 'button';
+      b.addEventListener('click', fn); dang.appendChild(b); btns.push(b); return b;
+    }
+    if (v.hasKey && !v.rotating) danger('Rotate the key', function () {
+      tunAsk('Rotate the key for ' + v.label + '?',
+        'A new key is generated for ' + v.label + ' and the tunnel restarts on it.',
+        'The old line keeps working until you finish the rotation, so nothing stops. You will ' +
+        'have to paste the new line on the host.', 'Rotate the key', function (msgEl, bs) {
+          return tunAct(v, 'POST', '/key/rotate', undefined, msgEl, bs);
+        });
+    });
+    if (v.hasKey) danger('Revoke the key', function () {
+      tunAsk('Revoke the key for ' + v.label + '?',
+        'The private key for ' + v.label + ' is deleted here and the tunnel stops.',
+        'The authorized_keys line stays on ' + v.label + ' until you run the remove command ' +
+        'there. This server cannot do that, and it will keep saying so.', 'Revoke the key',
+        function (msgEl, bs) { return tunAct(v, 'POST', '/key/revoke', undefined, msgEl, bs); });
+    });
+    danger('Forget this tunnel', function () {
+      tunAsk('Forget the tunnel for ' + v.label + '?',
+        'The configuration and the key for ' + v.label + ' are deleted here.',
+        'The authorized_keys line stays on ' + v.label + '. Copy the remove command from this ' +
+        'card before you forget it, or you will have to find the line by hand.', 'Forget it',
+        function (msgEl, bs) { return tunAct(v, 'DELETE', '', undefined, msgEl, bs); });
+    });
+    c.appendChild(dang);
+    return c;
+  }
+
+  function renderTunnels(force) {
+    if (!tunnelsOn) return;
+    var list = tunnelsCache;
+    $('#tab-tunnels-n').textContent = list.length;
+    $('#tun-count').textContent = list.length
+      ? list.filter(function (v) { return v.state === 'up'; }).length + ' of ' + list.length + ' up'
+      : '';
+    if (!force && !changed('tun', list) && !$('#tunnels .empty')) return;
+    sig.tun = JSON.stringify(list);
+    var box = $('#tunnels'); box.textContent = '';
+    if (!list.length) {
+      box.appendChild(el('p', 'No tunnels configured. Add one, paste the line it gives you on the ' +
+        'host, then record the host’s own key.', 'empty'));
+      return;
+    }
+    list.forEach(function (v) { box.appendChild(tunnelCard(v)); });
+  }
+
+  function loadTunnels(force) {
+    if (!tunnelsOn) return Promise.resolve();
+    return call('GET', '/api/tunnels').then(function (list) {
+      tunnelsCache = list || [];
+      renderTunnels(!!force);
+      renderHosts(true); // the Hosts tab shows each host's tunnel state beside its agent state
+    }).catch(function (e) { tunSay(e.message); });
+  }
+
+  if (tunnelsOn) {
+    $('#tun-add-open').addEventListener('click', function () {
+      $('#tun-add-msg').textContent = '';
+      openModal('#tun-add-dialog'); $('#tun-label').focus();
+    });
+    $('#tun-add-form').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var msg = $('#tun-add-msg'), go = $('#tun-add-go');
+      msg.textContent = ''; go.disabled = true;
+      call('POST', '/api/tunnels', {
+        label: $('#tun-label').value.trim(), address: $('#tun-address').value.trim(),
+        user: $('#tun-user').value.trim(), port: Number($('#tun-port').value)
+      }).then(function (v) {
+        go.disabled = false;
+        $('#tun-label').value = ''; $('#tun-address').value = ''; $('#tun-user').value = '';
+        $('#tun-add-dialog').close();
+        tunSay('Added ' + v.label + '. Paste its line on the host, then record the host’s key.');
+        return loadTunnels(true);
+      }).catch(function (e) { go.disabled = false; msg.textContent = e.message; });
+    });
+    $('#tun-key-form').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var msg = $('#tun-key-msg'), go = $('#tun-key-go'), id = $('#tun-key-input').dataset.tunnel;
+      msg.textContent = ''; go.disabled = true;
+      call('POST', '/api/tunnels/' + encodeURIComponent(id) + '/hostkey',
+        { hostKey: $('#tun-key-input').value })
+        .then(function () {
+          go.disabled = false; $('#tun-key-input').value = ''; $('#tun-key-dialog').close();
+          tunSay('Host key recorded.');
+          return loadTunnels(true);
+        }).catch(function (e) { go.disabled = false; msg.textContent = e.message; });
+    });
+    $('#tun-confirm-go').addEventListener('click', function () {
+      var run = tunConfirm, b = $('#tun-confirm-go');
+      if (!run) return;
+      run($('#tun-confirm-msg'), [b]).then(function () {
+        tunConfirm = null; $('#tun-confirm').close();
+      }, function () {});
+    });
+    // Importing the interim scheduled task's host list. The file is left where it is: it is the
+    // rollback path for that task, so the import must not consume it.
+    $('#tun-import').addEventListener('click', function () {
+      var b = $('#tun-import');
+      tunAsk('Import the interim host list?',
+        'Every host in %USERPROFILE%\\.claude-swap\\tunnels.json that is not configured here is ' +
+        'added, with a key, switched off.',
+        'The file is left where it is, because it is how you roll back to the scheduled task. ' +
+        'Do not enable an imported tunnel while that task is still running: two supervisors ' +
+        'dialling one host fight over its port.', 'Import them', function (msgEl, bs) {
+          bs.forEach(function (x) { x.disabled = true; });
+          return call('POST', '/api/tunnels/import').then(function (r) {
+            tunSay('Imported ' + r.added + ', skipped ' + r.skipped + '.');
+            return loadTunnels(true);
+          }).catch(function (e) {
+            bs.forEach(function (x) { x.disabled = false; });
+            msgEl.textContent = e.message; msgEl.className = 'msg';
+            throw e;
+          });
+        });
+      b.blur();
+    });
+    loadTunnels(true);
+    setInterval(function () { if (!tunBusy && !tunDialogOpen()) loadTunnels(false); }, 15000);
+  }
+
+  function tunDialogOpen() {
+    return ['#tun-add-dialog', '#tun-key-dialog', '#tun-confirm'].some(function (s) {
+      var d = $(s); return d && d.open;
+    });
+  }
 
   refresh();
   setInterval(loadPending, 5000);

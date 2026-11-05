@@ -34,9 +34,13 @@ type Spec struct {
 	Port int `json:"port"`
 	// Enabled is false for a configured tunnel that is switched off in the UI.
 	Enabled bool `json:"enabled"`
-	// HostKey is the host's own public key, as `ssh-keygen -lf` prints it or in authorized_keys
-	// form, used to seed known_hosts. Empty until the operator pastes it back.
+	// HostKey is the host's own public key in authorized_keys form, used to seed known_hosts.
+	// Empty until the operator pastes it back.
 	HostKey string `json:"hostKey,omitempty"`
+	// RevokedKey is the PUBLIC key body of a key that has been revoked here but whose
+	// authorized_keys line is probably still on the host. It is kept so the UI can keep offering
+	// the remove command and keep saying so; a cleared field means the operator confirmed.
+	RevokedKey string `json:"revokedKey,omitempty"`
 }
 
 // DefaultPort is the port the agent dials on the host's loopback and the server listens on.

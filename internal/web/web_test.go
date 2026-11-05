@@ -197,6 +197,9 @@ type rig struct {
 	usage fakeUsage
 	pw    *fakePW
 	now   time.Time
+	// tn is nil for the default rig: that is the server without --tunnels, where every
+	// /api/tunnels route is absent. newTunnelRig builds a rig that has one.
+	tn tunnelAPI
 }
 
 func newRig(t *testing.T) *rig {
@@ -214,7 +217,7 @@ func newRig(t *testing.T) *rig {
 		}
 		return err
 	}
-	r.h = newHandler(r.fh, v, r.usage, r.pw, func() time.Time { return r.now })
+	r.h = newHandler(r.fh, v, r.usage, r.pw, r.tn, func() time.Time { return r.now })
 	return r
 }
 
@@ -1044,7 +1047,7 @@ func TestHandlerRejectsMissingPasswordStore(t *testing.T) {
 			t.Fatal("Handler accepted a nil password store")
 		}
 	}()
-	Handler(nil, nil, nil, nil)
+	Handler(nil, nil, nil, nil, nil)
 }
 
 func TestWrongMethodOnAPIWithoutSessionIs401(t *testing.T) {

@@ -36,6 +36,9 @@ func Fingerprint(pub ed25519.PublicKey) (string, error) {
 	return ssh.FingerprintSHA256(k), nil
 }
 
+// FingerprintKey is Fingerprint for a key already in ssh wire form.
+func FingerprintKey(k ssh.PublicKey) string { return ssh.FingerprintSHA256(k) }
+
 // Short is the first 8 characters of the fingerprint's base64 body, the form the Hosts tab shows
 // beside a host - the same convention the enrolment fingerprint already uses.
 func Short(fingerprint string) string {

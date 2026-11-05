@@ -69,8 +69,16 @@ func InstallCommand(pub ssh.PublicKey, label string, port int, tighten bool) str
 // RemoveCommand returns the matching one line that takes the key out again. It leaves every other
 // line in the file alone, writes temp-then-rename rather than editing in place, and is a no-op
 // when the file or the line is already gone.
-func RemoveCommand(pub ssh.PublicKey) string {
-	k := keyBody(pub)
+func RemoveCommand(pub ssh.PublicKey) string { return removeCommandForBody(keyBody(pub)) }
+
+// removeCommandForBody is RemoveCommand from a stored public key body, which is all that is left
+// after a revoke: the private key is gone but the line on the host is not.
+func removeCommandForBody(k string) string {
+	// A key body is a type name, a space and base64. Anything that could end the single-quoted
+	// shell string is not one of ours, so refuse rather than quote it.
+	if k == "" || strings.ContainsAny(k, "'\"\\\r\n;&|$`<>()") {
+		return ""
+	}
 	return "umask 077; [ -f ~/.ssh/authorized_keys ] || exit 0; K='" + k + "'; " +
 		`T="$(mktemp ~/.ssh/ak.XXXXXX)"; grep -vF "$K" ~/.ssh/authorized_keys > "$T"; ` +
 		`chmod 600 "$T"; mv "$T" ~/.ssh/authorized_keys`

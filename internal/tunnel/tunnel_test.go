@@ -448,6 +448,16 @@ func TestSupervisorStartsOneChildPerEnabledHostAndNoneForADisabledOne(t *testing
 	if got := x.r.labels(); len(got) != 1 || got[0] != "SRL-LIN" {
 		t.Fatalf("spawned %v, want exactly [SRL-LIN]", got)
 	}
+	// The child must be pointed at the MANAGED known_hosts in the data dir and at the ephemeral
+	// key file, not at anything in the operator's own ~/.ssh.
+	argv := strings.Join(x.r.lastArgv(t), " ")
+	wantKH := "UserKnownHostsFile=" + filepath.Join(x.dir, KnownHostsFileName)
+	if !strings.Contains(argv, wantKH) {
+		t.Errorf("argv does not use the managed known_hosts (%s): %s", wantKH, argv)
+	}
+	if !strings.Contains(argv, "-i "+filepath.Join(x.dir, keyDirName)) {
+		t.Errorf("argv does not use the ephemeral key file in the data dir: %s", argv)
+	}
 }
 
 func TestRetryableExitGoesDownThenRestartsAndCountsTheAttempt(t *testing.T) {

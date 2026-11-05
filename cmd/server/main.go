@@ -25,6 +25,7 @@ import (
 	"claude-utilities/internal/hub"
 	"claude-utilities/internal/logx"
 	"claude-utilities/internal/ownership"
+	"claude-utilities/internal/tunnel"
 	"claude-utilities/internal/usage"
 	"claude-utilities/internal/vault"
 	"claude-utilities/internal/web"
@@ -41,6 +42,10 @@ const (
 const usageText = `usage: server <flags> | server set-password [--data-dir DIR]
   --listen host:port     run the hub and admin UI (required, no default)
   --data-dir DIR         vault, host list, TLS certificate and admin password hash
+  --tunnels              supervise the reverse SSH tunnels to the Linux hosts, and
+                         show the Tunnels tab. OFF by default: it must not run at the
+                         same time as the interim claude-swap-tunnels scheduled task,
+                         because two supervisors dialling one host fight over its port.
   set-password           replace the admin UI password; it is read from a no-echo
                          prompt when stdin is a terminal, else one line of stdin.
                          There is no flag for it, by design.`
@@ -68,6 +73,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, in io.R
 	fs.SetOutput(errOut)
 	listen := fs.String("listen", "", "host:port to listen on (required, no default)")
 	dataDir := fs.String("data-dir", defaultDataDir(), "directory for the vault, host list, TLS certificate and admin password hash")
+	tunnels := fs.Bool("tunnels", false, "supervise the reverse SSH tunnels and show the Tunnels tab (must not overlap the interim scheduled task)")
 	if err := fs.Parse(args); err != nil {
 		_, _ = fmt.Fprintln(errOut, usageText)
 		return 2
@@ -95,7 +101,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, in io.R
 		_, _ = fmt.Fprintf(errOut, "server: set %s (admin UI password) or run `server set-password` first\n", passwordEnv)
 		return 2
 	}
-	if err := serve(ctx, *listen, *dataDir, pw, errOut); err != nil && !errors.Is(err, context.Canceled) {
+	if err := serve(ctx, *listen, *dataDir, pw, *tunnels, errOut); err != nil && !errors.Is(err, context.Canceled) {
 		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
 		return 1
 	}
@@ -177,7 +183,7 @@ func readNewPassword(in io.Reader, errOut io.Writer) (string, error) {
 // maxStdinPassword bounds a piped password so a stuck or hostile producer cannot be read forever.
 const maxStdinPassword = 4 << 10
 
-func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, errOut io.Writer) error {
+func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunnels bool, errOut io.Writer) error {
 	certFile, keyFile, fp, err := hub.EnsureCert(filepath.Join(dataDir, "tls"))
 	if err != nil {
 		return err
@@ -192,9 +198,30 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, errO
 	// Without a refresher (spike S2 deferred) an expired token shows as "unauthorized" in the UI.
 	poller := usage.NewPoller(&http.Client{Timeout: 20 * time.Second}, usagePoll)
 
+	// The tunnel supervisor, only with --tunnels. It is started after the vault passphrase has
+	// been accepted, because the keyring is unlocked with the same one, and stopped before the
+	// listener goes away so its ssh children do not outlive the process.
+	var tm *tunnel.Manager
+	if tunnels {
+		kr, kerr := vault.OpenKeyring(filepath.Join(dataDir, vault.KeyringFileName), keyEnv)
+		if kerr != nil {
+			return kerr
+		}
+		tm, err = tunnel.NewManager(tunnel.Options{DataDir: dataDir, Log: log}, kr)
+		if err != nil {
+			return err
+		}
+		defer tm.Stop()
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go h.Run(ctx)
+	if tm != nil {
+		tm.Start(ctx)
+		_, _ = fmt.Fprintln(errOut, "server: tunnel supervisor started; make sure the "+
+			"claude-swap-tunnels scheduled task is NOT also running")
+	}
 	// Poll every stored account, including ones a host currently holds: the agent sends no usage
 	// report, so the vault copy (refreshed by swap write-back) is the only source. The accounts are
 	// set before the listener starts, so an admin's Refresh cannot arrive before the source exists.
@@ -203,7 +230,7 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, errO
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.ServeWS)
-	mux.Handle("/", web.Handler(h, v, poller, pw))
+	mux.Handle("/", web.Handler(h, v, poller, pw, tm))
 	srv := &http.Server{Addr: listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
 	_, _ = fmt.Fprintf(errOut, "server: listening on https://%s  certificate sha256=%s\n", listen, fp)

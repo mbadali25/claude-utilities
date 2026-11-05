@@ -202,6 +202,8 @@ func writeKeyFile(dir, hostID string, seed []byte) (string, error) {
 	path := filepath.Join(dir, "tun-"+safeName(hostID))
 	// O_EXCL so a leftover file is never written through: the caller removes it first.
 	removeQuiet(path)
+	// #nosec G304 -- path is built here from the data dir and safeName(hostID), which keeps only
+	// [A-Za-z0-9_-]; no caller-supplied string reaches it.
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("tunnel: key file: %w", err)
