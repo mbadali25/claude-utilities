@@ -113,6 +113,7 @@ done <"$pw"
 echo "id: no such user" >&2
 exit 1
 STUBEOF
+sed -i "s/STUB_SELF:-1000}/STUB_SELF:-$REAL_UID}/" "$STUB/id"   # default identity = the real uid, not 1000
 chmod 0755 "$STUB/id"
 
 cat >"$STUB/getent" <<'STUBEOF'
