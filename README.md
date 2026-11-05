@@ -28,8 +28,8 @@ Environment variables:
 
 The server authenticates the admin UI against an argon2id hash in `<data-dir>/admin-password.json`
 (0600, owner-only ACL on Windows). While that file does not exist, `CLAUDESWAP_ADMIN_PASSWORD`
-is the bootstrap. Change the password either in the UI (**Admin password**, which ends every
-signed-in session) or from the command line:
+is the bootstrap. Change the password either in the UI (**Account** > **Change password**, which
+ends every signed-in session) or from the command line:
 
 ```
 go run ./cmd/server set-password [--data-dir DIR]

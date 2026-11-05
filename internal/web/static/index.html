@@ -507,9 +507,12 @@
   // button is focused first, so the browser returns focus there, and the close handler sends it
   // back as well for the browsers that do not. Closing a dialog never touches a running job:
   // only "Cancel sign-in" posts /cancel.
+  var opener = null;
   function openModal(sel) {
-    var d = $(sel);
-    closeMenu(true);
+    var d = $(sel), from = document.activeElement;
+    if (!from || mBox.contains(from)) from = mBtn; // a menu item is hidden once the menu shuts
+    closeMenu(false);
+    opener = from; from.focus(); // focus the opener before showModal, so the browser returns here
     if (d.showModal) d.showModal(); else d.setAttribute('open', 'open');
     return d;
   }
@@ -517,7 +520,7 @@
     b.addEventListener('click', function () { $('#' + b.dataset.close).close(); });
   });
   Array.prototype.forEach.call(document.querySelectorAll('.modal'), function (d) {
-    d.addEventListener('close', function () { mBtn.focus(); });
+    d.addEventListener('close', function () { (opener && opener.isConnected ? opener : mBtn).focus(); });
   });
 
   var SVG = 'http://www.w3.org/2000/svg';
