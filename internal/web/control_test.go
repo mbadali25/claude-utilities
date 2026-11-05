@@ -263,12 +263,21 @@ func TestPageCarriesSessionControlSurface(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"Delivered: the session runs it at its next prompt.",
+		// General on purpose: it has to be true of a hook's instruction waiting for the next
+		// prompt AND of a rename that reaches the session at once but whose effect on claude.ai
+		// the host cannot see. "runs it at its next prompt" was true of only the first.
+		"Delivered: the ask reached the session. It does not mean the session acted on it.",
 		"Restart required: cannot be done on a running session.",
 		"Queued: nothing has reached the session yet.",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("index.html lacks the honest wording %q", want)
+		}
+	}
+	// The page must not claim the remote title changed, nor that the title is fixed at bind.
+	for _, bad := range []string{"latch", "the remote name is fixed", "renamed on claude.ai"} {
+		if strings.Contains(p, bad) {
+			t.Errorf("index.html still claims %q", bad)
 		}
 	}
 	// A confirm step for anything wider than one session, and it says what is not done.
@@ -392,7 +401,7 @@ func TestStatusLabelsSeparateRestartRequiredFromUnsupported(t *testing.T) {
 
 	for _, want := range []string{
 		"Restart required", "Unsupported", "Delivered",
-		"Delivered: the session runs it at its next prompt.",
+		"Delivered: the ask reached the session. It does not mean the session acted on it.",
 		"Restart required: cannot be done on a running session.",
 	} {
 		if !strings.Contains(p, want) {
@@ -400,9 +409,13 @@ func TestStatusLabelsSeparateRestartRequiredFromUnsupported(t *testing.T) {
 		}
 	}
 	// The split is on the reason code, not on the status: an unsupported that is NOT a
-	// requires-restart (an unproven inbox, a missing mechanism) must not read as "restart".
-	if !strings.Contains(p, proto.CodeRequiresRestart) {
-		t.Errorf("index.html never reads the %q code, so it cannot tell the two declines apart", proto.CodeRequiresRestart)
+	// requires-restart (a missing mechanism, a session with nothing to send to) must not read as
+	// "restart". Every code the UI can be handed has a sentence an operator can act on.
+	for _, code := range []string{proto.CodeRequiresRestart, proto.CodeNoBridge, proto.CodeNoInbox,
+		proto.CodeInboxNoChange, proto.CodeInboxSendFailed} {
+		if !strings.Contains(p, code) {
+			t.Errorf("index.html never reads the %q code, so it cannot label that decline", code)
+		}
 	}
 	if !strings.Contains(p, "stOf(c.status, c.code)") {
 		t.Error("the chip is not built from the status AND the code")

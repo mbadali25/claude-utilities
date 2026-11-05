@@ -501,9 +501,19 @@ the `unsupported` status, split on the reason code, because an operator acts on 
 
 | Chip | When | The sentence beside it |
 |---|---|---|
-| Delivered | status `delivered` | "Delivered: the session runs it at its next prompt." |
-| Restart required | `unsupported` + `unsupported-requires-restart` | "Restart required: cannot be done on a running session. Nothing was stopped." |
-| Unsupported | `unsupported` + any other code | "Unsupported: no proven mechanism can do this on a running session." |
+| Delivered | status `delivered` | "Delivered: the ask reached the session. It does not mean the session acted on it." |
+| Restart required | `unsupported-requires-restart`, or `unsupported-no-bridge` | "Restart required: cannot be done on a running session. Nothing was stopped." (the no-bridge variant names the missing bridge) |
+| Unsupported | `unsupported` + any other code | "Unsupported: no proven mechanism can do this on a running session", or the specific sentence for `unsupported-no-inbox` / `unsupported-inbox-no-change` |
+| Failed | status `failed` | "Failed: nothing was asked of the session", or for `inbox-send-failed`, "the session would not take the ask. Nothing reached it." |
+
+The **Delivered** sentence is deliberately general. It has to be true of a hook putting an
+instruction in front of the model at the next prompt *and* of a rename that reaches the session at
+once but whose effect on claude.ai cannot be seen from the host. "The session runs it at its next
+prompt" was true of only the first, and the UI must not imply the second was observed.
+
+**The "Fix name" dialog's hint must not promise a mechanism.** It says a session with remote control
+bound can take a new name where it stands, a session without gets the restart command, and either
+way the answer means the ask reached the session — not that the name on claude.ai changed.
 
 Before this split every `unsupported` read as "Needs restart", which was false for an unproven
 inbox or a missing mechanism — neither of those is fixed by restarting. A relaunch hint gets a Copy

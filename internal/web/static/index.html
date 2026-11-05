@@ -870,7 +870,7 @@
     <form id="ctl-name-form">
       <label class="fld">Remote name
         <input id="ctl-name-input" name="name" maxlength="256" required autocomplete="off" spellcheck="false" aria-describedby="ctl-name-hint">
-        <span class="hint" id="ctl-name-hint">256 characters or fewer, and anything past 200 is shortened to 200 when it is applied. The remote title is latched when the bridge binds, so a running session cannot take a new one: the answer will be the restart command that would.</span>
+        <span class="hint" id="ctl-name-hint">256 characters or fewer, and anything past 200 is shortened to 200 when it is applied. A session with remote control bound can take a new name where it stands; one without gets the restart command that would set it. Either way the answer says the ask reached the session, not that the name on claude.ai changed.</span>
       </label>
       <p class="msg" id="ctl-name-msg" role="alert"></p>
       <div class="modal-foot">
@@ -1107,7 +1107,7 @@
   // A command the operator has to run by hand, with a copy button. Several of these sit on one
   // page, so each Copy carries its own accessible name. See docs/runbooks/session-reload.md and
   // docs/runbooks/session-control.md - no mechanism reloads a running session's login, and none
-  // can bind Remote Control or latch a remote title on a running session either.
+  // can bind Remote Control on one either, so the command is what the operator is left with.
   // The lead and the Copy button share the top line and the command runs full width under it:
   // a command long enough to wrap would otherwise push Copy onto a line of its own, where a
   // borderless button reads as a stray word.
@@ -1568,8 +1568,10 @@
   // POST /api/sessions/command asks a running session to do something. The verdicts arrive on
   // the next /api/hosts poll, inside each session's commands[]; there is no status endpoint.
   // The wording is the honest one from docs/runbooks/session-control.md: "delivered" means the
-  // instruction reached the session and never that it ran, and Remote Control and the remote
-  // title cannot be set on a running session at all, so those come back "needs restart".
+  // instruction reached the session and never that it ran. Remote Control cannot be bound on a
+  // running session at all, so that comes back "restart required". A remote title CAN reach a
+  // running session that has a bridge bound, but whether the title on claude.ai followed is not
+  // observable from the host - so a rename stops at "delivered" and must never read as done.
   var CMD_LABEL = {
     reload_plugins: 'Reload plugins', remote_control_enable: 'Enable remote',
     rename_remote: 'Fix name', repair: 'Repair', restart_sessions: 'Restart sessions'
@@ -1578,7 +1580,10 @@
     queued: { word: 'Queued', count: 'queued', kind: '', g: 'info',
       say: 'Queued: nothing has reached the session yet.' },
     delivered: { word: 'Delivered', count: 'delivered', kind: 'ok', g: 'ok',
-      say: 'Delivered: the session runs it at its next prompt.' },
+      // True of both mechanisms that reach "delivered", and of neither more than it should be: a
+      // hook puts the instruction in front of the model at the next prompt, and a rename reaches
+      // the session at once but its effect on claude.ai cannot be seen from here.
+      say: 'Delivered: the ask reached the session. It does not mean the session acted on it.' },
     done: { word: 'Done', count: 'done', kind: 'ok', g: 'ok',
       say: 'The session ran it.' },
     failed: { word: 'Failed', count: 'failed', kind: 'bad', g: 'bad',
@@ -1591,7 +1596,17 @@
   // code is what separates them, so the word comes off the code when there is one for it.
   var ST_CODE = {
     'unsupported-requires-restart': { word: 'Restart required', kind: 'warn', g: 'warn',
-      say: 'Restart required: cannot be done on a running session. Nothing was stopped.' }
+      say: 'Restart required: cannot be done on a running session. Nothing was stopped.' },
+    // The rest are a mechanism declining in a way an operator can act on. They normally sit
+    // behind the relaunch answer, which wins; they surface when nothing is registered after them.
+    'unsupported-no-bridge': { word: 'Restart required', kind: 'warn', g: 'warn',
+      say: 'Restart required: this session has no remote control bound, so it cannot be given a remote name. Nothing was stopped.' },
+    'unsupported-no-inbox': { word: 'Unsupported', kind: 'warn', g: 'warn',
+      say: 'Unsupported: this session offers nothing to send to. Nothing was sent.' },
+    'unsupported-inbox-no-change': { word: 'Unsupported', kind: 'warn', g: 'warn',
+      say: 'Unsupported: the ask was sent and the session did not take the name. Nothing is claimed.' },
+    'inbox-send-failed': { word: 'Failed', kind: 'bad', g: 'bad',
+      say: 'Failed: the session would not take the ask. Nothing reached it.' }
   };
   // A status word is agent-reported, so an unknown one reads as itself rather than as nothing.
   // The count word stays per-status: the summary line tallies by status, not by code.
@@ -1958,8 +1973,8 @@
     askConfirm('Apply to all needs-reload sessions',
       'Ask every session that is still on an old login to repair itself?',
       'This reaches ' + n + (n === 1 ? ' session' : ' sessions') + ' across every connected host. Each is ' +
-      'asked to reload its plugins, and answers with what it would take to bind remote control and ' +
-      'latch its name. No session is stopped, killed or restarted.',
+      'asked to reload its plugins and to take back its own name, and answers with what it would ' +
+      'take to bind remote control. No session is stopped, killed or restarted.',
       function (dmsg, dbtns) {
         return ask({ command: 'repair', scope: 'all', onlyNeedsReload: true, confirm: true },
           'all/repair', dmsg, dbtns);
