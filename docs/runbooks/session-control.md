@@ -197,6 +197,12 @@ that: `TestRestartConfirmDialogListsTheSessionsItWouldRestart` asserts the list 
 no-kill sentence are served, and `TestRestartCommandNeedsConfirmAtEveryScope` asserts the hub
 refuses a restart with no confirm at session, host and all scope (`ErrConfirmRequired`, a 409).
 
+A session on an **offline** host is listed too, with "host offline, so the ask will not reach it"
+on its row. Leaving it out would make the dialog's count disagree with the needs-reload callout
+above it, which counts stale sessions whether or not their host is connected; two numbers on one
+screen that disagree cost more trust than a row that states its own limit. The ask comes back
+`failed` / `agent-offline` for those targets.
+
 **Mark as restarted is a no-op.** It writes a key in page memory, drops those sessions from the
 needs-reload callout's count for this browser, and prints "Marked as restarted in this browser
 only; it stays listed until the session ends" on the row. It sends no request and changes no server
@@ -294,7 +300,10 @@ Everything above is driven from the **Hosts** tab of the admin UI
 
 - **Per session**, inside the host card's session list: *Reload plugins*, *Enable remote* and
   *Fix name*. *Fix name* opens a small dialog with a labelled field prefilled from the session's
-  current remote name, capped at 256 characters.
+  current remote name, capped at 256 characters. There is deliberately **no per-session Restart
+  button**: a stale session's row already carries its own relaunch command with a Copy button, which
+  is the whole of what a restart can give one session. `restart_sessions` is still reachable at
+  `session` scope through the API, with `confirm: true` like every other scope.
 - **Per host**, on their own rule above the swap row: *Reload all*, *Enable remote on all* and
   *Restart sessions*. The first two go through a confirm dialog that states how many sessions are
   affected and that no session is stopped, killed or restarted — the UI side of the `confirm: true`

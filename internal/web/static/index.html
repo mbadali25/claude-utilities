@@ -1453,7 +1453,10 @@
     var out = [];
     hostsCache.forEach(function (h) {
       if (opts.hostId && h.hostId !== opts.hostId) return;
-      if (!h.online) return; // nothing can be asked of a host that is not connected
+      // An offline host is NOT skipped. Its stale sessions still count in the callout above, and
+      // a dialog that quietly listed fewer sessions than the callout counts would put two numbers
+      // on one screen that disagree. The row says the host is offline instead, and the ask itself
+      // comes back agent-offline for those targets, which is the honest answer.
       (h.sessions || []).forEach(function (s) {
         if (opts.stale && !s.needsReload) return;
         if (opts.stale && restartMarked(h, s)) return;
@@ -1480,7 +1483,9 @@
     targets.forEach(function (t) {
       var li = el('li'), named = !!t.sess.name;
       li.appendChild(el('span', named ? t.sess.name : 'Unnamed session', 'who' + (named ? '' : ' nameless')));
-      li.appendChild(el('span', t.host.name + ' · pid ' + t.sess.pid + (t.sess.needsReload ? ' · on the old login' : ''), 'sub'));
+      li.appendChild(el('span', t.host.name + ' · pid ' + t.sess.pid +
+        (t.sess.needsReload ? ' · on the old login' : '') +
+        (t.host.online ? '' : ' · host offline, so the ask will not reach it'), 'sub'));
       // The command is known up front only for a session a swap left stale and whose id can be
       // resumed; otherwise the ask is what brings it back, which is what the row says.
       if (t.sess.restartCommand) {

@@ -335,6 +335,18 @@ func TestRestartConfirmDialogListsTheSessionsItWouldRestart(t *testing.T) {
 	if j := strings.Index(p[i:], "}"); j < 0 || !strings.Contains(p[i:i+j], "confirm: true") {
 		t.Error("the restart ask does not carry confirm: true")
 	}
+	// The dialog and the callout above it must count the same sessions. restartTargets therefore
+	// does NOT skip an offline host: staleSessions() does not either, and a dialog that quietly
+	// listed fewer sessions than the callout counts would put two numbers on one screen that
+	// disagree. The row says the host is offline instead.
+	rt := p[strings.Index(p, "function restartTargets("):]
+	rt = rt[:strings.Index(rt, "\n  function ")]
+	if strings.Contains(rt, "if (!h.online) return") {
+		t.Error("restartTargets drops offline hosts, so its count can disagree with the callout's")
+	}
+	if !strings.Contains(p, "host offline, so the ask will not reach it") {
+		t.Error("a session on an offline host is listed without saying the ask cannot reach it")
+	}
 	// Nothing in the page may terminate or kill anything, and no confirm token exists to unlock
 	// one: the decision is copy-only (docs/runbooks/session-control.md).
 	for _, bad := range []string{"'terminate'", "'kill'", "confirmToken", "confirm_token"} {
@@ -352,6 +364,9 @@ func TestPageDeclaresNoFunctionNameTwice(t *testing.T) {
 	r := newRig(t)
 	p := page(r, r.login())
 
+	// This covers top-level `function NAME(` declarations only. A duplicate `var` at the same
+	// scope, or a `var f = function`, fails the same way and is NOT caught here.
+	//
 	// Exactly two spaces of indent is the page's one shared scope, the body of its IIFE. A helper
 	// nested inside another function is indented further and has a scope of its own, so two of
 	// those may share a name (`mk` does) without replacing anything.
