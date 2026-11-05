@@ -39,6 +39,8 @@ type fakeHub struct {
 	swapCalls   [][2]string
 	swapErr     error
 	swapOutcome hub.SwapOutcome
+	// swapRes, when set, is the whole result SwapEx returns on success (warnings, home).
+	swapRes *hub.SwapResult
 	// swapFn, when set, answers per host, so one rig can stand in for an estate whose hosts each
 	// fail differently.
 	swapFn     func(host, acct string) (hub.SwapOutcome, error)
@@ -117,6 +119,24 @@ func (f *fakeHub) Swap(_ context.Context, host, acct string) (hub.SwapOutcome, e
 	}
 	return out, nil
 }
+
+// SwapEx is what the handler calls: the plain Swap answer, or swapRes when a test sets one.
+func (f *fakeHub) SwapEx(ctx context.Context, host, acct string) (hub.SwapResult, error) {
+	out, err := f.Swap(ctx, host, acct)
+	if err != nil {
+		return hub.SwapResult{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.swapRes != nil {
+		return *f.swapRes, nil
+	}
+	return hub.SwapResult{Outcome: out}, nil
+}
+
+// StaleAfter mirrors hub.DefaultStaleAfter.
+func (f *fakeHub) StaleAfter() time.Duration { return hub.DefaultStaleAfter }
+
 func (f *fakeHub) NewEnrolCode() (string, time.Time) {
 	return "abcd2345", fixedNow.Add(10 * time.Minute)
 }
