@@ -66,6 +66,20 @@ func TestImportRefusesEmptyIdentityOrLabelAndOfflineHost(t *testing.T) {
 	}
 }
 
+// storeLogin is shared with the add-account job, so Import refuses a taken label too.
+func TestImportRefusesTakenLabel(t *testing.T) {
+	f := newFixture(t)
+	f.seedAccounts()
+	a, _, id := f.enrol("box")
+	f.newScript("id-new", `{"claudeAiOauth":{"tok":"x"}}`).serve(a)
+	if _, err := f.h.Import(context.Background(), id, "  A  "); !errors.Is(err, vault.ErrLabelTaken) {
+		t.Fatalf("err %v", err)
+	}
+	if n := len(f.v.List()); n != 3 {
+		t.Fatalf("vault has %d accounts", n)
+	}
+}
+
 func TestRelabelRenamesLogsIdAndMapsErrors(t *testing.T) {
 	f := newFixture(t)
 	f.seedAccounts()
