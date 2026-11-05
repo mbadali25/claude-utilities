@@ -189,7 +189,10 @@
   details.sess ul { list-style:none; margin:6px 0 0; padding:0; display:grid; gap:6px; font-size:.82rem; }
   details.sess li { padding:6px 8px; background:var(--sunk); border-radius:6px; overflow-wrap:anywhere; display:flex; gap:8px; justify-content:space-between; align-items:center; flex-wrap:wrap; }
   .swap { display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-top:1px solid var(--line); padding-top:12px; min-height:56px; }
-  .swap select { flex:1 1 160px; min-width:0; }
+  /* 120px basis: select, Swap and Revoke share one row in a 300px card instead of Revoke wrapping alone. */
+  .swap select { flex:1 1 120px; min-width:0; }
+  /* The ghost Copy button sits flush with the command above it, not inset by its own padding. */
+  details.sess li .btn.ghost { margin-left:-10px; }
   .confirm { display:flex; gap:8px; flex-wrap:wrap; align-items:center; width:100%; }
   .confirm .q { flex:1 1 100%; font-weight:600; }
 
