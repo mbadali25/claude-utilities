@@ -207,11 +207,114 @@ func TestInstallOnAMissingFileCreatesOne(t *testing.T) {
 
 func TestHookCommandQuotesAPathWithSpaces(t *testing.T) {
 	got := HookCommand(`C:\Program Files\claude-swap\agent.exe`)
-	if !strings.HasPrefix(got, `"C:\Program Files\claude-swap\agent.exe"`) {
+	if !strings.HasPrefix(got, `"C:/Program Files/claude-swap/agent.exe"`) {
 		t.Fatalf("not quoted: %s", got)
 	}
 	if !strings.Contains(got, hookTag) {
 		t.Fatalf("the marker is missing, so an uninstall could not find it: %s", got)
+	}
+}
+
+// shellWords is a minimal POSIX word splitter: whitespace separates words, double quotes group and
+// let backslash escape only $ ` " \ and newline, a bare backslash escapes the next byte. That is
+// what bash does to a hook command, and the backslash handling is the bug this guards.
+func shellWords(s string) []string {
+	var words []string
+	var cur strings.Builder
+	inWord, inQuote := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case inQuote && c == '"':
+			inQuote = false
+		case inQuote && c == '\\' && i+1 < len(s) && strings.IndexByte("$`\"\\\n", s[i+1]) >= 0:
+			i++
+			cur.WriteByte(s[i])
+		case inQuote:
+			cur.WriteByte(c)
+		case c == '"':
+			inQuote, inWord = true, true
+		case c == '\\' && i+1 < len(s):
+			i++
+			cur.WriteByte(s[i])
+			inWord = true
+		case c == ' ' || c == '\t':
+			if inWord {
+				words = append(words, cur.String())
+				cur.Reset()
+				inWord = false
+			}
+		default:
+			cur.WriteByte(c)
+			inWord = true
+		}
+	}
+	if inWord {
+		words = append(words, cur.String())
+	}
+	return words
+}
+
+func TestHookCommandIsBashSafe(t *testing.T) {
+	cases := []struct{ name, exe, want string }{
+		{"windows backslashes", `C:\Users\d3ade\.claude-swap\claude-swap-agent.exe`, "C:/Users/d3ade/.claude-swap/claude-swap-agent.exe"},
+		{"windows with spaces", `C:\Program Files\claude-swap\agent.exe`, "C:/Program Files/claude-swap/agent.exe"},
+		{"windows forward slashes", `C:/Users/x/agent.exe`, "C:/Users/x/agent.exe"},
+		{"unc", `\\host\share\agent.exe`, "//host/share/agent.exe"},
+		{"posix", "/opt/claude-swap/agent", "/opt/claude-swap/agent"},
+		{"posix with space", "/opt/claude swap/agent", "/opt/claude swap/agent"},
+		{"posix with dollar", "/opt/$x/agent", "/opt/$x/agent"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := HookCommand(c.exe)
+			words := shellWords(got)
+			want := []string{c.want, "hook", "--tag", hookTag}
+			if len(words) != len(want) {
+				t.Fatalf("words = %q from %s", words, got)
+			}
+			for i := range want {
+				if words[i] != want[i] {
+					t.Fatalf("words = %q, want %q (command %s)", words, want, got)
+				}
+			}
+			if strings.HasPrefix(c.exe, "C:") || strings.HasPrefix(c.exe, `\\`) {
+				if strings.Contains(got, `\`) {
+					t.Fatalf("backslash left in a Windows command: %s", got)
+				}
+			}
+		})
+	}
+}
+
+func TestInstallReplacesOldBackslashEntries(t *testing.T) {
+	path := sandboxSettings(t)
+	old := `C:\Users\d3ade\.claude-swap\claude-swap-agent.exe hook --tag ` + hookTag
+	seed := map[string]any{"hooks": map[string]any{
+		"SessionStart":     []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "echo mine"}}}, map[string]any{"hooks": []any{map[string]any{"type": "command", "command": old}}}},
+		"UserPromptSubmit": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": old}}}},
+	}}
+	data, _ := json.Marshal(seed)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := InstallHooks(`C:\Users\d3ade\.claude-swap\claude-swap-agent.exe`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := readRaw(t, path)
+	for _, ev := range hookEvents {
+		if n := ourEntries(t, m, ev); n != 1 {
+			t.Fatalf("%s has %d entries of ours", ev, n)
+		}
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), `C:\\Users`) {
+		t.Fatalf("old backslash entry survived: %s", raw)
+	}
+	if !strings.Contains(string(raw), "echo mine") {
+		t.Fatalf("foreign hook lost: %s", raw)
 	}
 }
 
