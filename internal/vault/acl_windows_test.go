@@ -29,7 +29,7 @@ func ownerOnlyACL(t *testing.T, path string) {
 		}
 		n++
 		if !aceNamesUser(l, u) {
-			t.Fatalf("%s: non-owner ACE: %s", path, strings.TrimSpace(l))
+			t.Fatalf("%s: non-owner ACE: %s (user %s, uid %s; full icacls: %q)", path, strings.TrimSpace(l), u.Username, u.Uid, out)
 		}
 	}
 	if n != 1 {

@@ -579,7 +579,7 @@ unset CLAUDESWAP_DRY_RUN CLAUDESWAP_RUN_AS
 unset STUB_SELF
 EXTRA_PASSWD=()
 printf '%s\n' "$out12" >"$TMP/out12"
-check "dry run names the user" grep -q '^==> run as tester (uid 1000)' "$TMP/out12"
+check "dry run names the user" grep -q "^==> run as tester (uid $UID_DEF)" "$TMP/out12"
 check "dry run names the home" grep -q "home $H12\$" "$TMP/out12"
 check "dry run names the state dir" grep -q "^==> state dir $H12/.config/claude-swap-agent\$" "$TMP/out12"
 check "dry run names the unit path" grep -q "^==> unit $SYSUNITS/claude-swap-agent.service\$" "$TMP/out12"

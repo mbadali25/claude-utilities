@@ -29,7 +29,7 @@ func checkOwnerOnly(path string) error {
 		}
 		n++
 		if !aceNamesUser(l, u) {
-			return fmt.Errorf("non-owner ACE: %s", strings.TrimSpace(l))
+			return fmt.Errorf("non-owner ACE: %s (user %s, uid %s; full icacls: %q)", strings.TrimSpace(l), u.Username, u.Uid, out)
 		}
 	}
 	if n != 1 {
