@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"claude-utilities/internal/agent"
 	"claude-utilities/internal/install"
@@ -22,7 +23,10 @@ const usage = `usage: agent <command>
   enrol   --server URL --pin SHA256HEX   register this host
           (pre-approved code: set CLAUDESWAP_ENROL_CODE, not a flag)
   run                                    connect and serve the server
-  install                                start the agent at login`
+  install                                start the agent at login
+  hooks   install | uninstall            opt in to (or out of) the session-control hook;
+                                         edits only this program's block in settings.json
+  hook    --tag TAG                      the hook itself: reads the hook payload on stdin`
 
 // codeEnv names the environment variable holding the pre-approved enrolment code.
 const codeEnv = "CLAUDESWAP_ENROL_CODE"
@@ -47,9 +51,62 @@ func dispatch(ctx context.Context, args []string, out, errOut io.Writer) int {
 		return runCmd(ctx, errOut)
 	case "install":
 		return installCmd(errOut)
+	case "hooks":
+		return hooksCmd(args[1:], out, errOut)
+	case "hook":
+		return hookCmd(os.Stdin, out)
 	}
 	_, _ = fmt.Fprintln(errOut, usage)
 	return 1
+}
+
+// hooksCmd installs or removes the session-control hook. It is explicit opt-in: nothing else in
+// this program edits the user's settings.json, and the previous file is kept as a backup.
+func hooksCmd(args []string, out, errOut io.Writer) int {
+	if len(args) == 0 {
+		_, _ = fmt.Fprintln(errOut, "hooks: say install or uninstall")
+		return 1
+	}
+	switch args[0] {
+	case "install":
+		exe, err := os.Executable()
+		if err != nil {
+			_, _ = fmt.Fprintln(errOut, "hooks install:", logx.Redact(err.Error()))
+			return 1
+		}
+		path, err := agent.InstallHooks(exe)
+		if err != nil {
+			_, _ = fmt.Fprintln(errOut, "hooks install:", logx.Redact(err.Error()))
+			return 1
+		}
+		_, _ = fmt.Fprintln(out, "hook installed in", path)
+		return 0
+	case "uninstall":
+		path, n, err := agent.UninstallHooks()
+		if err != nil {
+			_, _ = fmt.Fprintln(errOut, "hooks uninstall:", logx.Redact(err.Error()))
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "removed %d hook entries from %s\n", n, path)
+		return 0
+	}
+	_, _ = fmt.Fprintln(errOut, "hooks: say install or uninstall")
+	return 1
+}
+
+// hookCmd is the hook itself. It always writes valid JSON and always exits 0: a hook that fails
+// interrupts the user's session, and nothing it carries is worth that. The --tag flag exists so
+// the installed command string carries a marker the installer can recognise; its value is unused.
+func hookCmd(in io.Reader, out io.Writer) int {
+	dir, err := agent.DefaultStateDir()
+	if err != nil {
+		_, _ = fmt.Fprintln(out, "{}")
+		return 0
+	}
+	if err := agent.RunHook(in, out, dir, time.Now); err != nil {
+		_, _ = fmt.Fprintln(out, "{}")
+	}
+	return 0
 }
 
 func enrolCmd(ctx context.Context, args []string, out, errOut io.Writer) int {

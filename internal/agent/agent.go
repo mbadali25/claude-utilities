@@ -35,6 +35,13 @@ import (
 	"claude-utilities/internal/sessions"
 )
 
+func init() {
+	// Session-control audit fields (control.go). "command" and "mechanism" are fixed names from
+	// a small set; neither carries a secret, a name or a path. A session's name, its cwd and the
+	// operator-facing hint are never logged, so they get no key.
+	logx.Allow("command", "mechanism")
+}
+
 const (
 	configName = "agent.json"
 	wsPath     = "/ws"
@@ -214,6 +221,9 @@ type agent struct {
 	readBack  func(path string) (json.RawMessage, error)
 	replace   func(path string, block json.RawMessage, onPrev func(json.RawMessage) error) (string, error)
 
+	// Session control (control.go): the instruction queue and the mechanism registry.
+	ctl *control
+
 	// Add-account sign-in (login.go). At most one job is live.
 	login                               loginRunner
 	urlTimeout, jobTimeout, exitTimeout time.Duration
@@ -231,6 +241,7 @@ func newAgent(c Config, log *slog.Logger) *agent {
 		replace: credfile.ReplaceWith,
 		login:   execRunner{}, logins: map[string]*loginJob{},
 		urlTimeout: defaultURLTimeout, jobTimeout: defaultJobTimeout, exitTimeout: defaultExitTimeout,
+		ctl: newControl(c.StateDir, time.Now, os.Getenv(ExperimentalInboxEnv) == "1"),
 	}
 }
 
@@ -358,10 +369,14 @@ func (a *agent) beat(ctx context.Context, s *sess) {
 	t := time.NewTicker(a.heartbeat)
 	defer t.Stop()
 	for {
-		if err := s.send(ctx, proto.TypeReport, "", a.report(ctx)); err != nil {
+		rep := a.report(ctx)
+		if err := s.send(ctx, proto.TypeReport, "", rep); err != nil {
 			_ = s.ws.Close(websocket.StatusInternalError, "write failed")
 			return
 		}
+		// Only now that the report is on the wire: a failed send must leave the delivery notices
+		// in the queue so the next report repeats them.
+		a.ctl.q.confirmReported(rep.Commands)
 		select {
 		case <-ctx.Done():
 			return
@@ -372,7 +387,8 @@ func (a *agent) beat(ctx context.Context, s *sess) {
 
 func (a *agent) handle(ctx context.Context, s *sess, env proto.Envelope) error {
 	switch env.Type {
-	case proto.TypeExportReq, proto.TypeSwapReq, proto.TypeLoginStart, proto.TypeLoginCode, proto.TypeLoginCancel:
+	case proto.TypeExportReq, proto.TypeSwapReq, proto.TypeCommandReq,
+		proto.TypeLoginStart, proto.TypeLoginCode, proto.TypeLoginCancel:
 		if env.ID == "" {
 			a.log.Warn("request without id", "action", env.Type, "result", "ignored")
 			return nil
@@ -394,6 +410,13 @@ func (a *agent) handle(ctx context.Context, s *sess, env proto.Envelope) error {
 	case proto.TypeLoginCancel:
 		a.cancelLogin(env.ID)
 		return nil
+	case proto.TypeCommandReq:
+		var cr proto.CommandReq
+		if err := json.Unmarshal(env.Body, &cr); err != nil {
+			return s.send(ctx, proto.TypeCommandRes, env.ID,
+				proto.CommandRes{Status: proto.StatusFailed, Code: proto.CodeBadReply})
+		}
+		return s.send(ctx, proto.TypeCommandRes, env.ID, a.command(cr))
 	}
 	if env.Type == proto.TypeExportReq {
 		return s.send(ctx, proto.TypeExportRes, env.ID, a.export())
@@ -431,7 +454,7 @@ func (a *agent) report(ctx context.Context) proto.Report {
 		sessions[i].Name = capRunes(sessions[i].Name, maxNameRunes)
 		sessions[i].RemoteName = capRunes(sessions[i].RemoteName, maxNameRunes)
 	}
-	rep := proto.Report{Sessions: sessions, SwapBlocked: a.blocked.Load()}
+	rep := proto.Report{Sessions: sessions, SwapBlocked: a.blocked.Load(), Commands: a.ctl.q.delivered()}
 	if _, err := credfile.ReadBlock(a.cfg.CredsPath); err == nil {
 		rep.CredsPresent = true
 		rep.ActiveIdentity = a.identity()
