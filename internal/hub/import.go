@@ -74,15 +74,24 @@ func (h *Hub) Import(ctx context.Context, hostID, label string) (vault.Account, 
 }
 
 // storeLogin validates a login an agent produced and stores it as a new account: an identity is
-// required and must not already be stored, and only the claudeAiOauth block is kept. It claims no
-// ownership. The returned account has no Block.
+// required and must not already be stored, the label must still be free, and only the claudeAiOauth
+// block is kept. It claims no ownership. The returned account has no Block.
+//
+// The label is re-checked here, not only by the caller: an add-account sign-in waits for the owner
+// for up to 10 minutes, and an import or a rename can take the label in that window.
 func (h *Hub) storeLogin(label, identity string, raw json.RawMessage) (vault.Account, error) {
 	if identity == "" {
 		return vault.Account{}, errors.New("hub: the host reports no signed-in account")
 	}
-	for _, a := range h.vault.List() {
+	stored := h.vault.List()
+	for _, a := range stored {
 		if a.Identity == identity {
 			return vault.Account{}, ErrAlreadyStored
+		}
+	}
+	for _, a := range stored {
+		if strings.EqualFold(a.Label, label) {
+			return vault.Account{}, vault.ErrLabelTaken
 		}
 	}
 	block, err := oauthBlock(raw)
