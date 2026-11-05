@@ -67,9 +67,20 @@ const (
 const (
 	// CodeRequiresRestart means only a relaunch can do it; the hint carries the command.
 	CodeRequiresRestart = "unsupported-requires-restart"
-	// CodeInboxUnproven means the experimental per-session inbox has an unproven wire frame.
-	CodeInboxUnproven = "unsupported-inbox-unproven"
-	// CodeNoMechanism means no mechanism is registered for the command.
+	// CodeNoBridge means the session has no Remote Control bridge bound, so nothing sent into it
+	// could carry a remote title: the host->bridge push needs a bridgeSessionId to push to.
+	CodeNoBridge = "unsupported-no-bridge"
+	// CodeNoInbox means the session publishes no inbox this agent can use: no socket path, no key
+	// file, a key file whose owner is not the live pid, or a session id that is not the one asked
+	// for. A key file on disk does not prove a live session; a killed session leaves an orphan.
+	CodeNoInbox = "unsupported-no-inbox"
+	// CodeInboxNoChange means the frame was written and the session's own name did not change, so
+	// nothing can be claimed to have reached it.
+	CodeInboxNoChange = "unsupported-inbox-no-change"
+	// CodeInboxSendFailed means the inbox was there and the frame could not be written to it.
+	CodeInboxSendFailed = "inbox-send-failed"
+	// CodeNoMechanism means no mechanism is registered for the command, or the mechanism tried has
+	// no action that could carry it out at all.
 	CodeNoMechanism = "no-mechanism"
 	// CodeUnknownCommand means the command name is not one this build defines.
 	CodeUnknownCommand = "unknown-command"

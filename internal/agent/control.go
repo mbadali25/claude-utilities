@@ -17,23 +17,25 @@ import (
 )
 
 // Session control on the host. The hub says WHAT to do; this file decides HOW, through a registry
-// of mechanisms per command. A mechanism the spike has not proven reports StatusUnsupported with a
+// of mechanisms per command. A mechanism that cannot do a thing reports StatusUnsupported with a
 // reason code rather than claiming a success nobody can see:
 //
-//   - relaunch: Remote Control cannot be turned on from outside a running session, and the
-//     remote-visible title is latched once when the bridge binds, so both of those need a
-//     relaunch. The mechanism returns the exact command for an operator to run. It never starts
+//   - inbox: the per-session message socket, the one channel from outside that reaches a RUNNING
+//     session. It renames, and that is all it does: it has no action that enables Remote Control,
+//     and injecting slash-command text would cost an API turn without running the command. Off
+//     unless CLAUDESWAP_EXPERIMENTAL_INBOX=1, real when on. Ceiling: "delivered". See inbox.go.
+//   - relaunch: Remote Control cannot be turned on from outside a running session at all, and a
+//     session with no bridge bound has nothing a rename could push a title to, so both of those
+//     end here. The mechanism returns the exact command for an operator to run. It never starts
 //     or stops a process: killing a session would throw away the operator's work.
 //   - hook-queue: an instruction file per session, read by the `agent hook` subcommand installed
 //     as a SessionStart/UserPromptSubmit hook. A hook can only put text in front of the model
 //     (spike G), so this mechanism can honestly reach "delivered" and never "done".
-//   - inbox: the experimental per-session named pipe. Off unless enabled, and unsupported even
-//     then, because the wire frame is unproven.
 //
 // docs/runbooks/session-control.md has the whole picture.
 
-// ExperimentalInboxEnv turns the experimental inbox mechanism on. It is off by default and
-// reports "unsupported" even when on; see inboxMechanism.
+// ExperimentalInboxEnv turns the inbox mechanism on. It is off by default - Matthew has not
+// enabled it - and when it is off nothing in this program connects to a session's socket.
 const ExperimentalInboxEnv = "CLAUDESWAP_EXPERIMENTAL_INBOX"
 
 const (
@@ -129,8 +131,12 @@ func (e *executor) run(task CommandTask) CommandResult {
 
 // --- relaunch ---
 
-// relaunchMechanism reports the one thing that does work: an operator relaunching the session with
-// Remote Control bound and the name set at bind time. It changes nothing on the host.
+// relaunchMechanism reports the one thing that always works: an operator relaunching the session
+// with Remote Control bound and the name given at bind time. It changes nothing on the host.
+//
+// For rename_remote it is the FALLBACK, not the mechanism: a rename reaches a running,
+// bridge-bound session over its own inbox. Relaunch is what answers when there is no bridge bound
+// to push a title to, or when the inbox is off.
 type relaunchMechanism struct{}
 
 func (relaunchMechanism) Name() string { return "relaunch" }
@@ -138,7 +144,8 @@ func (relaunchMechanism) Name() string { return "relaunch" }
 func (relaunchMechanism) Execute(task CommandTask) CommandResult {
 	if !sessionIDRe.MatchString(task.SessionID) {
 		return unsupported("relaunch", proto.CodeRequiresRestart,
-			"restart this session by hand: nothing outside it can enable Remote Control or latch its remote title")
+			"restart this session by hand: nothing outside it can enable Remote Control, "+
+				"and a session with no bridge bound cannot be given a remote title")
 	}
 	return unsupported("relaunch", proto.CodeRequiresRestart, RelaunchCommand(task.SessionID, task.Name))
 }
@@ -149,8 +156,8 @@ func (relaunchMechanism) Execute(task CommandTask) CommandResult {
 var safeNameRe = regexp.MustCompile(`^[\p{L}\p{N} ._\-+/:@#]+$`)
 
 // RelaunchCommand is the command an operator runs to restart a session with Remote Control bound
-// and, when the name is safe to quote, that name latched. The returned string is for a human to
-// read and paste; nothing in this program ever executes it.
+// and, when the name is safe to quote, that name set at bind. The returned string is for a human
+// to read and paste; nothing in this program ever executes it.
 func RelaunchCommand(sessionID, name string) string {
 	cmd := "claude --resume " + sessionID + " --remote-control"
 	name = proto.CleanRemoteName(name)
@@ -164,34 +171,6 @@ func RelaunchCommand(sessionID, name string) string {
 		return cmd + ` "` + name + `"`
 	}
 	return cmd + " " + name
-}
-
-// --- inbox (experimental, unproven) ---
-
-// inboxMechanism is the per-session message inbox: on Windows a named pipe at
-// \\.\pipe\LOCAL\cc-msg-<32hex>, named by messagingSocketPath in ~/.claude/sessions/<pid>.json,
-// with the auth key published beside it as <pid>.<64hex>.key. The module registers exactly the
-// handlers this feature would need - onEnqueue, onRename, onEnableRemoteControl - and the
-// telemetry event uds_enable_remote_control proves enabling Remote Control over it is a real
-// path. It still reports "unsupported".
-//
-// TODO(unproven wire frame): the spike could not start a sandbox session to send into, so the
-// frame was never exercised. What is known: messages are JSON objects {type, session_id?, ...}
-// with type one of control | user | notification | in_process_teammate, a session_id mismatch is
-// dropped with "[uds-messaging] Dropping <type> message: session_id mismatch", and the peer
-// authenticates with the published key file. What is NOT known: the framing (length prefix or
-// newline), the field that selects onEnqueue vs onRename vs onEnableRemoteControl, how the key
-// turns into an authentication value, and whether the gate that silences the inbox
-// ("cross-session messaging gate off") is on for this account. Prove those against a live
-// session, with the key read from that session's own key file, before this returns anything but
-// unsupported - and never guess a frame at a session holding somebody's work.
-type inboxMechanism struct{}
-
-func (inboxMechanism) Name() string { return "inbox" }
-
-func (inboxMechanism) Execute(CommandTask) CommandResult {
-	return unsupported("inbox", proto.CodeInboxUnproven,
-		"the experimental per-session inbox has an unproven wire frame; nothing was sent")
 }
 
 // --- hook queue ---
@@ -492,28 +471,40 @@ type control struct {
 
 // newControl builds the registry. The order inside each command is the order mechanisms are tried.
 func newControl(stateDir string, now func() time.Time, inboxEnabled bool) *control {
+	return newControlWith(stateDir, now, inboxEnabled, newInboxMechanism())
+}
+
+// newControlWith is newControl with the inbox mechanism supplied, so tests can register a fake
+// socket instead of reaching a real session.
+func newControlWith(stateDir string, now func() time.Time, inboxEnabled bool, inbox Mechanism) *control {
 	q := newQueue(stateDir, now)
 	ex := newExecutor()
-	inbox := inboxMechanism{}
-	// reload_plugins: a hook can ask the model to run /reload-plugins. Nothing else can.
-	if inboxEnabled {
-		ex.register(proto.CmdReloadPlugins, inbox)
-	}
+	// reload_plugins: a hook can ask the model to run /reload-plugins. Nothing else can, and in
+	// particular the inbox cannot: its enqueue path sets skipSlashCommands, so "/reload-plugins"
+	// would arrive as literal text, cost an API turn and run nothing. hook-queue is the ONLY
+	// mechanism registered here, flag or no flag.
 	ex.register(proto.CmdReloadPlugins, queueMechanism{q: q})
-	// remote_control_enable and rename_remote: no outside channel reaches a running session's
-	// bridge, and the remote title is latched at bind, so both end in the relaunch command.
-	for _, c := range []string{proto.CmdRemoteControlEnable, proto.CmdRenameRemote} {
-		if inboxEnabled {
-			ex.register(c, inbox)
-		}
-		ex.register(c, relaunchMechanism{})
+	// rename_remote: the inbox is the mechanism. A rename frame reaches a running, bridge-bound
+	// session's own rename handler, which pushes the title to the bridge. relaunch is the
+	// FALLBACK, for a session with no bridge bound - and the only answer when the flag is off.
+	if inboxEnabled {
+		ex.register(proto.CmdRenameRemote, inbox)
 	}
+	ex.register(proto.CmdRenameRemote, relaunchMechanism{})
+	// remote_control_enable: nothing outside a running session can bind its bridge. The inbox has
+	// no action for it - the handler it would need is dead code in the session - so when the flag
+	// is on it declines with no-mechanism, and relaunch answers with the command that does work.
+	if inboxEnabled {
+		ex.register(proto.CmdRemoteControlEnable, inbox)
+	}
+	ex.register(proto.CmdRemoteControlEnable, relaunchMechanism{})
 	// restart_sessions: COPY-ONLY, and deliberately so. relaunch is its ONLY mechanism, and
 	// relaunch starts and stops nothing - it returns the command for a human to run. Nothing on
 	// this host can terminate a session, which is why no confirm token needs to exist to stop one.
-	// The experimental inbox is NOT registered here even when it is enabled: its frame is unproven
-	// and none of the handlers it exposes stops a session, so offering it would imply a kill path
-	// that does not and must not exist. docs/runbooks/session-control.md records the decision.
+	// The inbox is NOT registered here even when it is enabled: its whole accepted surface is a
+	// rename and six notification actions, none of which stops a session, so offering it would
+	// imply a kill path that does not and must not exist.
+	// docs/runbooks/session-control.md records the decision.
 	ex.register(proto.CmdRestartSessions, relaunchMechanism{})
 	return &control{q: q, ex: ex}
 }

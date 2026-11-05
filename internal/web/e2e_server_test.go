@@ -49,8 +49,8 @@ func e2eVerdicts(i int, id string) []hub.CommandTargetView {
 	case 1:
 		return v(proto.CmdReloadPlugins, proto.StatusDelivered, "", "hook-queue", "")
 	case 2:
-		return v(proto.CmdRemoteControlEnable, proto.StatusUnsupported, proto.CodeInboxUnproven,
-			"inbox", "the experimental per-session inbox has an unproven wire frame; nothing was sent")
+		return v(proto.CmdRemoteControlEnable, proto.StatusUnsupported, proto.CodeNoMechanism,
+			"inbox", "the session inbox has no action that enables Remote Control; nothing was sent")
 	}
 	return nil
 }

@@ -24,6 +24,19 @@ import (
 // ErrNotImplemented is returned by Scan on platforms other than Windows and Linux.
 var ErrNotImplemented = errors.New("sessions: scan not implemented on this OS")
 
+// Dir is the directory Claude Code writes its session files to. It is the one place the path is
+// built, so anything that acts on a session - the host report here, the agent's inbox - reads the
+// same files. CLAUDE_CONFIG_DIR is deliberately NOT honoured: a session file is keyed on a pid
+// that lives on this host, and pointing only part of the agent at another config dir would let it
+// report a session from one directory and act on a different one.
+func Dir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("sessions: home dir: %w", err)
+	}
+	return filepath.Join(home, ".claude", "sessions"), nil
+}
+
 // record is one session file. procStart is kept for liveness checks only.
 //
 // Name is the session's own name: Claude Code 2.1.318 writes it to the sessions file as
