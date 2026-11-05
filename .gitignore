@@ -271,3 +271,6 @@ __marimo__/
 .crew/.hook-*
 .crew/transcripts/
 .work/
+
+# Playwright MCP scratch output
+.playwright-mcp/
