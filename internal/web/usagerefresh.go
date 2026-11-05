@@ -110,3 +110,25 @@ func (s *server) usageRefresh(w http.ResponseWriter, r *http.Request) {
 		"count", refreshed, "targetCount", len(rows), "source_ip", ip)
 	writeJSON(w, http.StatusOK, map[string]any{"results": rows})
 }
+
+// usageWatch says an admin has a card open: the account joins the short polling schedule for a few
+// minutes. It sends no request upstream itself, so it needs no rate limit of its own beyond the
+// session and CSRF checks every POST has; an unknown id is a 404 so a stale page learns it.
+func (s *server) usageWatch(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Account string `json:"account"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if in.Account == "" || len(in.Account) > maxLabel {
+		writeErr(w, http.StatusBadRequest, "account id required")
+		return
+	}
+	if _, ok := s.vault.Get(in.Account); !ok {
+		writeErr(w, http.StatusNotFound, "no such account")
+		return
+	}
+	s.usage.Touch(in.Account)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}

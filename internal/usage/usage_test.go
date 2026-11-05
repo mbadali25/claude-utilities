@@ -249,9 +249,11 @@ type clock struct{ t time.Time }
 func (c *clock) now() time.Time { return c.t }
 
 func newTestPoller(d Doer) (*Poller, *clock) {
-	p := NewPoller(d, time.Minute)
+	p := NewPoller(d, Config{BackoffBase: time.Minute, Jitter: 0})
+	p.rnd = func() float64 { return 0.5 }
 	c := &clock{t: time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)}
 	p.now = c.now
+	p.sleep = func(_ context.Context, d time.Duration) error { c.t = c.t.Add(d); return nil }
 	return p, c
 }
 
@@ -284,7 +286,7 @@ func TestPollerBacksOffExponentiallyOn429(t *testing.T) {
 
 func TestBackoffCappedAndHonoursRetryAfter(t *testing.T) {
 	p, _ := newTestPoller(staticDoer(200, okBody, nil))
-	if got := p.backoff(50, 0); got != maxBackoff {
+	if got := p.backoff(50, 0); got != p.cfg.BackoffMax {
 		t.Fatalf("cap: %v", got)
 	}
 	if got := p.backoff(1, 10*time.Minute); got != 10*time.Minute {
@@ -432,7 +434,7 @@ func TestPollerNeverLogsToken(t *testing.T) {
 
 func TestRunStopsOnContextCancelAndPollsImmediately(t *testing.T) {
 	d := staticDoer(200, okBody, nil)
-	p := NewPoller(d, time.Hour)
+	p := NewPoller(d, Config{})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	updated := make(chan struct{}, 1)

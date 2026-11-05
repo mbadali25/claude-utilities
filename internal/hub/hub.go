@@ -220,6 +220,8 @@ type Hub struct {
 	ipOf       func(*http.Request) string
 	// onReject is a test hook that observes why a hello was refused.
 	onReject func(error)
+	// onSwap is told when an account lands on a host (SetOnSwap).
+	onSwap func(accountID string)
 
 	mu         sync.Mutex
 	hosts      map[string]*host
@@ -262,6 +264,23 @@ func New(v *vault.Vault, r *ownership.Registry, tokensPath string, log *slog.Log
 		h.log.Error("load enrolled hosts failed", logx.Err(err))
 	}
 	return h
+}
+
+// SetOnSwap registers a callback told, after ownership changes, which account just landed on a host.
+// The usage poller uses it to give that account one prompt poll. Call before serving.
+func (h *Hub) SetOnSwap(fn func(accountID string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onSwap = fn
+}
+
+func (h *Hub) noteSwap(accountID string) {
+	h.mu.Lock()
+	fn := h.onSwap
+	h.mu.Unlock()
+	if fn != nil {
+		fn(accountID)
+	}
 }
 
 // Run sweeps expired state until ctx ends. The server MUST start it (go hub.Run(ctx)): heartbeat
@@ -853,6 +872,7 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) (SwapOutcome, 
 	// possibly rotated-out copy. The vault already holds this host's fresh block, so the host stays
 	// the recorded owner until another host swaps in or the host is lost.
 	h.reg.SwapIn(accountID, hostID)
+	h.noteSwap(accountID)
 	h.mu.Lock()
 	ho.markReloadLocked()
 	ho.identity = target.Identity

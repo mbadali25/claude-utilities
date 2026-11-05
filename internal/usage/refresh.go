@@ -63,6 +63,7 @@ type gate struct {
 	f     *flight
 	owner bool          // the caller must fetch, record and finish f
 	wait  time.Duration // non-zero: refused, this much time is left
+	epoch uint64        // the account's Forget epoch when the flight began
 }
 
 // enter decides, under one lock, what a caller may do with this account. A poll already in flight is
@@ -80,8 +81,8 @@ func (p *Poller) enter(id string, manual bool) gate {
 	}
 	if manual {
 		until := p.manualAt[id].Add(MinRefreshInterval)
-		if n := p.nextAt[id]; n.After(until) {
-			until = n // the scheduler is serving a backoff; a button does not get past it
+		if n := p.nextAt[id]; n.After(until) && p.fails[id] > 0 && !p.authFail[id] { // a standing 401 is bypassed by a button: the login may have been fixed
+			until = n // the scheduler is serving a rate limit; a button does not get past it
 		}
 		if now.Before(until) {
 			return gate{wait: until.Sub(now)}
@@ -90,22 +91,43 @@ func (p *Poller) enter(id string, manual bool) gate {
 	}
 	f := &flight{done: make(chan struct{})}
 	p.inflight[id] = f
-	return gate{f: f, owner: true}
+	return gate{f: f, owner: true, epoch: p.epoch[id]}
 }
 
 // poll runs the account's poll, or waits for the one already running, and returns what was stored.
+// Starting a request is what the global spacing counts from.
 func (p *Poller) poll(ctx context.Context, a vault.Account, g gate) (Usage, error) {
 	if !g.owner {
 		return g.f.wait(ctx)
 	}
-	u, err := p.fetchAccount(ctx, a)
-	u = p.record(a.ID, u, err)
 	p.mu.Lock()
-	delete(p.inflight, a.ID)
+	p.lastPollAt, p.slotGap = p.now(), p.jitter(p.cfg.MinSpacing)
+	p.mu.Unlock()
+	u, err := p.fetchAccount(ctx, a)
+	u = p.record(a.ID, u, err, g.epoch)
+	p.finish(a.ID, g, u, err)
+	return u, err
+}
+
+// finish releases the account's flight and tells everyone who joined it the answer.
+func (p *Poller) finish(id string, g gate, u Usage, err error) {
+	p.mu.Lock()
+	delete(p.inflight, id)
 	p.mu.Unlock()
 	g.f.u, g.f.err = u, err
 	close(g.f.done)
-	return u, err
+}
+
+// waitManualSlot holds a button-pressed poll until ManualSpacing after the previous request, so a
+// Refresh-all of ten accounts is ten requests a couple of seconds apart, not ten at once.
+func (p *Poller) waitManualSlot(ctx context.Context) error {
+	p.mu.Lock()
+	owed := p.lastPollAt.Add(p.cfg.ManualSpacing).Sub(p.now())
+	p.mu.Unlock()
+	if owed <= 0 {
+		return nil
+	}
+	return p.sleep(ctx, owed)
 }
 
 // RefreshNow polls the named accounts outside the schedule and reports one result each, in the order
@@ -133,7 +155,19 @@ func (p *Poller) RefreshNow(ctx context.Context, ids []string) []RefreshResult {
 			out = append(out, RefreshResult{ID: id, Status: UnknownID})
 			continue
 		}
-		if g := p.enter(id, true); g.wait > 0 {
+		if len(ids) > 0 {
+			p.Touch(id) // a named Refresh means someone is looking at this card
+		}
+		g := p.enter(id, true)
+		if g.owner {
+			if werr := p.waitManualSlot(ctx); werr != nil {
+				last, _ := p.Last(id)
+				p.finish(id, g, last, errUnavailable) // cancelled before any request: record nothing
+				out = append(out, RefreshResult{ID: id, Status: Failed, Usage: last})
+				continue
+			}
+		}
+		if g.wait > 0 {
 			last, _ := p.Last(id)
 			out = append(out, RefreshResult{ID: id, Status: RateLimited, Usage: last, RetryAfter: g.wait})
 		} else if u, err := p.poll(ctx, a, g); err != nil {

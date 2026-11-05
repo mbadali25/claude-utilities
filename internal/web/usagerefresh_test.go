@@ -76,7 +76,7 @@ func newRefreshRig(t *testing.T, labels ...string) *refreshRig {
 		t.Fatal(err)
 	}
 	d := &stubDoer{fn: func() (*http.Response, error) { return reply(http.StatusOK, refreshBody, nil), nil }}
-	p := usage.NewPoller(d, time.Hour)
+	p := usage.NewPoller(d, usage.Config{})
 	p.SetAccounts(v.List)
 	r := &rig{t: t, fh: &fakeHub{}, v: v, pw: &fakePW{pw: adminPW}, now: fixedNow}
 	r.h = newHandler(r.fh, v, p, r.pw, nil, func() time.Time { return r.now })
@@ -298,5 +298,86 @@ func TestRefreshedUsageShowsOnTheAccountsEndpoint(t *testing.T) {
 	}
 	if len(accs) != 1 || accs[0].SevenDay == nil || accs[0].SevenDay.LeftPct != 40 {
 		t.Fatalf("accounts = %+v", accs)
+	}
+}
+
+// Info and Touch satisfy usageAPI for the map fake: every account is idle on the default schedule.
+func (u fakeUsage) Info(id string) usage.Info {
+	if x := u[id]; !x.RetryAt.IsZero() {
+		return usage.Info{Tier: usage.TierBackoff, NextAt: x.RetryAt}
+	}
+	return usage.Info{Tier: usage.TierIdle, Every: 20 * time.Minute}
+}
+func (u fakeUsage) Touch(string) {}
+
+func TestWatchNeedsSessionAndCSRF(t *testing.T) {
+	rr := newRefreshRig(t, "one")
+	if w := rr.do(http.MethodPost, "/api/usage/watch", `{"account":"a"}`, nil, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("no session: %d", w.Code)
+	}
+	s := rr.login()
+	if w := rr.do(http.MethodPost, "/api/usage/watch", `{"account":"a"}`, s, "wrong"); w.Code != http.StatusForbidden {
+		t.Fatalf("bad csrf: %d", w.Code)
+	}
+	if rr.poller.Info("a").Tier != usage.TierIdle {
+		t.Fatal("a refused watch changed the tier")
+	}
+}
+
+func TestWatchPromotesTheAccountAndMakesNoRequest(t *testing.T) {
+	rr := newRefreshRig(t, "one")
+	s := rr.login()
+	w := rr.do(http.MethodPost, "/api/usage/watch", `{"account":"a"}`, s, s.csrf)
+	if w.Code != http.StatusOK {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if got := rr.poller.Info("a").Tier; got != usage.TierActive {
+		t.Fatalf("tier %q", got)
+	}
+	if rr.doer.n() != 0 {
+		t.Fatal("watch must not call the usage endpoint")
+	}
+}
+
+func TestWatchRejectsUnknownAndMissingAccounts(t *testing.T) {
+	rr := newRefreshRig(t, "one")
+	s := rr.login()
+	if w := rr.do(http.MethodPost, "/api/usage/watch", `{"account":"zz"}`, s, s.csrf); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown: %d", w.Code)
+	}
+	if w := rr.do(http.MethodPost, "/api/usage/watch", `{"account":""}`, s, s.csrf); w.Code != http.StatusBadRequest {
+		t.Fatalf("empty: %d", w.Code)
+	}
+}
+
+func TestAccountsReportScheduleAndRetryForAStaleRateLimitedAccount(t *testing.T) {
+	r := newRig(t)
+	if err := r.v.Put(vault.Account{ID: "a", Label: "one", Identity: "u", Updated: fixedNow, Block: json.RawMessage(`{"accessToken":"x"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	r.usage["a"] = usage.Usage{
+		SevenDay: usage.Window{UsedPct: 5, ResetsAt: fixedNow.Add(time.Hour)}, FetchedAt: fixedNow.Add(-10 * time.Minute),
+		Err: "rate limited", RetryAt: fixedNow.Add(7*time.Minute + 30*time.Second),
+	}
+	s := r.login()
+	w := r.do(http.MethodGet, "/api/accounts", "", s, "")
+	var rows []struct {
+		Error         string `json:"error"`
+		Tier          string `json:"tier"`
+		CheckEverySec int64  `json:"checkEverySec"`
+		RetryInSec    *int64 `json:"retryInSec"`
+		SevenDay      *struct {
+			LeftPct float64 `json:"leftPct"`
+		} `json:"sevenDay"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil || len(rows) != 1 {
+		t.Fatalf("%v %s", err, w.Body.String())
+	}
+	g := rows[0]
+	if g.Error != "rate limited" || g.SevenDay == nil || g.SevenDay.LeftPct != 95 {
+		t.Fatalf("stale data lost: %+v", g)
+	}
+	if g.RetryInSec == nil || *g.RetryInSec != 450 || g.Tier != "backoff" || g.CheckEverySec != 0 {
+		t.Fatalf("schedule: %+v", g)
 	}
 }

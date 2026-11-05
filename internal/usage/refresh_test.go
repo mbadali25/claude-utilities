@@ -24,6 +24,7 @@ func results(rs []RefreshResult) map[string]RefreshResult {
 func TestRefreshNowPollsEveryAccountWhenNoIDsAreNamed(t *testing.T) {
 	d := staticDoer(200, okBody, nil)
 	p, c := newTestPoller(d)
+	c0 := c.t
 	p.SetAccounts(func() []vault.Account { return []vault.Account{acct("a", "tok-a"), acct("b", "tok-b")} })
 
 	out := p.RefreshNow(context.Background(), nil)
@@ -31,7 +32,7 @@ func TestRefreshNowPollsEveryAccountWhenNoIDsAreNamed(t *testing.T) {
 		t.Fatalf("results=%d calls=%d", len(out), len(d.calls))
 	}
 	for _, r := range out {
-		if r.Status != Refreshed || r.Usage.SevenDay.UsedPct != 95 || !r.Usage.FetchedAt.Equal(c.t.UTC()) {
+		if r.Status != Refreshed || r.Usage.SevenDay.UsedPct != 95 || r.Usage.FetchedAt.After(c.t.UTC()) || r.Usage.FetchedAt.Before(c0) {
 			t.Fatalf("%s: %+v", r.ID, r)
 		}
 	}
