@@ -243,8 +243,8 @@ func TestDeleteAndPutValidation(t *testing.T) {
 		t.Fatal("empty id accepted")
 	}
 	v.Put(acct("a"))
-	if err := v.Delete("nope"); err != nil {
-		t.Fatal(err)
+	if err := v.Delete("nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleting an unknown id: %v, want ErrNotFound", err)
 	}
 	if err := v.Delete("a"); err != nil {
 		t.Fatal(err)

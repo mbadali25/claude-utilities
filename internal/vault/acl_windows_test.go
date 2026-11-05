@@ -10,13 +10,11 @@ import (
 	"testing"
 )
 
-func TestVaultFileOwnerOnlyACL(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "v.bin")
-	v, _ := open(t, p, "pw")
-	if err := v.Put(acct("a")); err != nil {
-		t.Fatal(err)
-	}
-	out, err := exec.Command("icacls", p).CombinedOutput()
+// ownerOnlyACL fails unless path carries exactly one ACE and it names the current user. Windows
+// Chmod only toggles the read-only bit, so this - not the file mode - is the owner-only guarantee.
+func ownerOnlyACL(t *testing.T, path string) {
+	t.Helper()
+	out, err := exec.Command("icacls", path).CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,10 +29,33 @@ func TestVaultFileOwnerOnlyACL(t *testing.T) {
 		}
 		n++
 		if !strings.Contains(l, u.Username) && !strings.Contains(l, u.Uid) {
-			t.Fatalf("non-owner ACE: %s", strings.TrimSpace(l))
+			t.Fatalf("%s: non-owner ACE: %s", path, strings.TrimSpace(l))
 		}
 	}
 	if n != 1 {
-		t.Fatalf("want 1 ACE, got %d", n)
+		t.Fatalf("%s: want 1 ACE, got %d", path, n)
 	}
+}
+
+func TestVaultFileOwnerOnlyACL(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "v.bin")
+	v, _ := open(t, p, "pw")
+	if err := v.Put(acct("a")); err != nil {
+		t.Fatal(err)
+	}
+	ownerOnlyACL(t, p)
+}
+
+// The delete backup is a full copy of the sealed vault, so it needs the vault's own ACL: a
+// world-readable vault.bin.bak would undo the file mode the vault is written with.
+func TestDeleteBackupOwnerOnlyACL(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "v.bin")
+	v, _ := open(t, p, "pw")
+	if err := v.Put(acct("a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Delete("a"); err != nil {
+		t.Fatal(err)
+	}
+	ownerOnlyACL(t, p+bakSuffix)
 }

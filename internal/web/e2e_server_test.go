@@ -178,6 +178,23 @@ func TestE2EServer(t *testing.T) {
 		return hub.SwapDone, nil
 	}
 
+	// Removal, both endings. acct-x is the account the online hosts above are signed in as, so it
+	// is refused the way the real hub refuses it, naming the host whose card says so on the Hosts
+	// tab. Every other account removes cleanly. Nothing here contacts a host: the real hub does not
+	// either, which is the point of the feature.
+	r.fh.removeFn = func(id string, force bool) error {
+		if id == "acct-x" && !force {
+			return &hub.HeldLiveError{HostID: e2eOK, HostName: "oak (windows)"}
+		}
+		if err := r.v.Delete(id); err != nil {
+			if errors.Is(err, vault.ErrNotFound) {
+				return hub.ErrUnknownAccount
+			}
+			return err
+		}
+		return nil
+	}
+
 	if os.Getenv("CLAUDESWAP_E2E_TUNNELS") != "" {
 		r.tn = e2eTunnels(t, r)
 		r.h = newHandler(r.fh, r.v, r.usage, r.pw, r.tn, func() time.Time { return r.now })
