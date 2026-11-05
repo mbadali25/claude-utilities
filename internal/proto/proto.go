@@ -117,7 +117,29 @@ type Report struct {
 	// additive and omitted when empty, so an older hub sees the report shape it expects. Bounded
 	// by MaxCommandsPerReport.
 	Commands []SessionCommandStatus `json:"commands,omitempty"`
+	// IdentityReason is a fixed Reason* code saying why ActiveIdentity is empty, so a host that
+	// cannot read the signed-in account is not mistaken for one with no login. Additive and
+	// omitted when empty; the hub drops any value ValidIdentityReason does not recognise, so
+	// nothing agent-controlled reaches the UI through this field.
+	IdentityReason string `json:"identityReason,omitempty"`
 }
+
+// Identity reason codes. They are a closed set of short machine codes, never free text and
+// never an identity: an email address must not travel in this field.
+const (
+	// ReasonNoHome means the agent has no home directory to read ~/.claude.json from: HOME is
+	// empty and CLAUDE_CONFIG_DIR is unset. A root systemd unit without Environment=HOME= is
+	// how this happens. It cannot catch HOME pointing at the wrong user's home (systemd
+	// defaults a root service to /root), which reads as a host with no login.
+	ReasonNoHome = "no_home"
+)
+
+// identityReasons is the allowlist behind ValidIdentityReason.
+var identityReasons = map[string]bool{ReasonNoHome: true}
+
+// ValidIdentityReason reports whether s is a known identity reason code. The hub calls it on
+// every report so an agent cannot push arbitrary text into the owner's UI.
+func ValidIdentityReason(s string) bool { return identityReasons[s] }
 
 type ExportRes struct {
 	Block    json.RawMessage `json:"block,omitempty"`

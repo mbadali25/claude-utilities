@@ -476,6 +476,11 @@ func (h *Hub) touch(c *conn, rep *proto.Report) {
 		return
 	}
 	ho.report = *rep
+	// A fixed code set, not free text: an unrecognised reason is dropped here, which is what
+	// keeps this one report field out of the "the UI must escape it" list.
+	if !proto.ValidIdentityReason(ho.report.IdentityReason) {
+		ho.report.IdentityReason = ""
+	}
 	ho.identity = rep.ActiveIdentity
 	if ho.swapTarget != "" {
 		if rep.ActiveIdentity == ho.swapFrom {
@@ -609,6 +614,10 @@ type HostView struct {
 	RunAs         string
 	Online        bool
 	ActiveAccount string
+	// IdentityReason is a proto.Reason* code saying why the host reports no signed-in account,
+	// or "" when there is nothing to explain. Validated against proto's closed set on arrival,
+	// so unlike Name, OS and RunAs it is never agent-controlled text.
+	IdentityReason string
 	// SwapBlocked mirrors the agent's report: an unfinished earlier swap blocks every new one.
 	SwapBlocked bool
 	Sessions    []SessionView
@@ -627,7 +636,8 @@ func (h *Hub) Hosts() []HostView {
 			continue
 		}
 		v := HostView{HostID: ho.ID, Name: ho.Name, OS: ho.OS, RunAs: ho.runAs, Online: ho.c != nil,
-			SwapBlocked: ho.report.SwapBlocked, Sessions: []SessionView{}}
+			IdentityReason: ho.report.IdentityReason,
+			SwapBlocked:    ho.report.SwapBlocked, Sessions: []SessionView{}}
 		for _, a := range accts {
 			if ho.identity != "" && a.Identity == ho.identity {
 				v.ActiveAccount = a.ID

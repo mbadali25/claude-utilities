@@ -1268,6 +1268,19 @@
     li.appendChild(sessionControls(h, s));
     return li;
   }
+  // Report identityReason codes (proto.Reason*). The hub drops anything not in its own
+  // allowlist, so an unknown key here simply shows nothing rather than raw agent text.
+  var IDENT_REASON = {
+    no_home: {
+      chip: 'No home directory',
+      hint: 'The agent cannot read the signed-in account: it has no home directory. ' +
+        'A system service needs Environment=HOME=<the user’s home> in its unit, ' +
+        'which install-agent.sh sets. See docs/runbooks/linux-agent-install.md.'
+    }
+  };
+  function identReason(code) {
+    return code && Object.prototype.hasOwnProperty.call(IDENT_REASON, code) ? IDENT_REASON[code] : null;
+  }
   function hostCard(h) {
     var c = el('article', undefined, 'card'); c.dataset.host = h.hostId; c.tabIndex = -1;
     var top = el('div', undefined, 'row between');
@@ -1289,7 +1302,14 @@
     line.appendChild(el('strong', h.activeAccount ? (act || '?') : '-'));
     if (h.needsReload) line.appendChild(chip('Needs reload', 'warn', 'warn'));
     if (h.swapBlocked) line.appendChild(chip('Swaps blocked', 'bad', 'bad'));
+    // A host whose agent cannot find a home directory reports no account at all, which reads
+    // as "nobody is signed in here". Say which it is, and what to change, rather than letting
+    // the dash lie. The reason is a fixed code the hub validated, so the text is ours; the
+    // own-property check keeps a key like "constructor" from rendering an empty chip.
+    var ir = identReason(h.identityReason);
+    if (ir) line.appendChild(chip(ir.chip, 'warn', 'warn'));
     c.appendChild(line);
+    if (ir) c.appendChild(el('div', ir.hint, 'mut sub'));
 
     // Sessions collapse, but a restart command must never start out hidden: a host with a stale
     // session opens by default, and the closed summary still says how many need one. With no

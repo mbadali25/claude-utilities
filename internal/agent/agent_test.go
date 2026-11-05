@@ -153,7 +153,7 @@ func newRig(t *testing.T, serverURL, pin string) *rig {
 	a.delay = func(int) time.Duration { return time.Millisecond }
 	a.heartbeat = 20 * time.Millisecond
 	a.hostName = "test-host"
-	a.identity = func() string { return "id-1" }
+	a.identity = func() (string, string) { return "id-1", "" }
 	a.scan = func(context.Context) ([]proto.Session, error) { return nil, nil }
 	return &rig{a: a, log: logs, creds: creds, dir: dir}
 }

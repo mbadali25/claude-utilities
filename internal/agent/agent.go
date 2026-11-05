@@ -216,10 +216,13 @@ type agent struct {
 	hostName  string
 	heartbeat time.Duration
 	delay     func(attempt int) time.Duration
-	identity  func() string
-	scan      func(context.Context) ([]proto.Session, error)
-	readBack  func(path string) (json.RawMessage, error)
-	replace   func(path string, block json.RawMessage, onPrev func(json.RawMessage) error) (string, error)
+	// identity returns the signed-in account, else a proto.Reason* code saying why it is unknown.
+	identity func() (ident, reason string)
+	// identityWarned keeps the reason out of every heartbeat: it is logged on first sight only.
+	identityWarned atomic.Bool
+	scan           func(context.Context) ([]proto.Session, error)
+	readBack       func(path string) (json.RawMessage, error)
+	replace        func(path string, block json.RawMessage, onPrev func(json.RawMessage) error) (string, error)
 
 	// Session control (control.go): the instruction queue and the mechanism registry.
 	ctl *control
@@ -236,7 +239,7 @@ func newAgent(c Config, log *slog.Logger) *agent {
 	name, _ := os.Hostname()
 	return &agent{
 		cfg: c, log: log.With("component", "agent"), hostName: name, heartbeat: HeartbeatInterval,
-		delay: NextDelay, identity: func() string { return readIdentity(claudeJSONPath()) },
+		delay: NextDelay, identity: defaultIdentity,
 		scan: sessions.Scan, readBack: credfile.ReadBlock,
 		replace: credfile.ReplaceWith,
 		login:   execRunner{}, logins: map[string]*loginJob{},
@@ -456,9 +459,16 @@ func (a *agent) report(ctx context.Context) proto.Report {
 		sessions[i].RemoteName = capRunes(sessions[i].RemoteName, maxNameRunes)
 	}
 	rep := proto.Report{Sessions: sessions, SwapBlocked: a.blocked.Load(), Commands: a.ctl.q.delivered()}
+	ident, reason := a.identity()
+	// Reported even with no credentials: "cannot read the home directory" is a different
+	// problem from "no login here", and only the agent can tell them apart.
+	rep.IdentityReason = reason
+	if reason != "" && !a.identityWarned.Swap(true) {
+		a.log.Warn("signed-in identity unreadable", "action", "report", "result", "no_identity", "reason", reason)
+	}
 	if _, err := credfile.ReadBlock(a.cfg.CredsPath); err == nil {
 		rep.CredsPresent = true
-		rep.ActiveIdentity = a.identity()
+		rep.ActiveIdentity = ident
 	}
 	return rep
 }
@@ -474,7 +484,8 @@ func (a *agent) export() proto.ExportRes {
 		return proto.ExportRes{Err: "credentials unreadable"}
 	}
 	a.log.Info("exported", "action", "export", "result", "ok")
-	return proto.ExportRes{Block: block, Identity: a.identity()}
+	ident, _ := a.identity() // an export without an identity is refused by the hub, not here
+	return proto.ExportRes{Block: block, Identity: ident}
 }
 
 // applySwap replaces the claudeAiOauth block. Order: validate, journal, Replace, read-back,
@@ -603,16 +614,34 @@ func (a *agent) settleJournal() error {
 	return clearJournal(a.cfg.StateDir)
 }
 
+// homeDirFn is a test seam: on Windows os.UserHomeDir reads USERPROFILE, so a test cannot
+// reproduce an empty HOME by setting the environment.
+var homeDirFn = os.UserHomeDir
+
 // claudeJSONPath locates Claude Code's global state file, which names the signed-in account.
-func claudeJSONPath() string {
+// The second result is a proto.Reason* code when there is no such path to look at, so the hub
+// can say why the identity is unknown instead of showing the host as having no login.
+func claudeJSONPath() (path, reason string) {
 	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return filepath.Join(d, ".claude.json")
+		return filepath.Join(d, ".claude.json"), ""
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+	// os.UserHomeDir errors on an empty HOME, which is what a root system unit without
+	// Environment=HOME= gives. The path is not reported: it names a user's home.
+	home, err := homeDirFn()
+	if err != nil || home == "" {
+		return "", proto.ReasonNoHome
 	}
-	return filepath.Join(home, ".claude.json")
+	return filepath.Join(home, ".claude.json"), ""
+}
+
+// defaultIdentity reads the signed-in account, or returns the reason it cannot be read. An
+// unreadable or account-less .claude.json is not a reason: the path existed and was looked at.
+func defaultIdentity() (ident, reason string) {
+	path, reason := claudeJSONPath()
+	if reason != "" {
+		return "", reason
+	}
+	return readIdentity(path), ""
 }
 
 // readIdentity returns the signed-in account's email, else its account uuid, else "".
