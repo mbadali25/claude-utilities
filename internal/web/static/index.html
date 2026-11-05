@@ -586,7 +586,7 @@
       val.textContent = p + '% left' + (p === 0 ? ' (out)' : p <= 15 ? ' (low)' : '');
     } else { bar.setAttribute('aria-label', name + ' usage: not available'); }
     m.appendChild(val); m.appendChild(bar);
-    m.appendChild(el('span', w ? 'Resets ' + fmtDate(w.resetsAt) : 'No data', 'reset'));
+    m.appendChild(el('span', !w ? 'No data' : w.resetsAt ? 'Resets ' + fmtDate(w.resetsAt) : 'Reset time unknown', 'reset'));
     return m;
   }
 

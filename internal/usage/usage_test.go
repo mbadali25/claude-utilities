@@ -101,6 +101,122 @@ func TestFetchUnexpectedSchemaReturnsErrSchemaNotPanic(t *testing.T) {
 	}
 }
 
+// ultraBody is a redacted, fake-numbers body shaped like a higher plan tier: extra windows,
+// extra scalar fields, a null window, and a present window with no reset time.
+const ultraBody = `{
+  "five_hour": {"utilization": 7, "resets_at": "2026-11-05T12:00:00Z", "remaining": 93},
+  "seven_day": {"utilization": 41.5, "resets_at": null},
+  "seven_day_opus": {"utilization": 0, "resets_at": null},
+  "seven_day_oauth_apps": null,
+  "plan": "ultra",
+  "plan_tier": 3,
+  "limits": [],
+  "organization": {"role": "admin"}
+}`
+
+// TestFetchToleratesNullMissingAndExtraFields pins the shapes a poll must survive: a window
+// field that is null or absent, an integer utilization, a reset time with or without a
+// fraction, and unknown fields at either level.
+func TestFetchToleratesNullMissingAndExtraFields(t *testing.T) {
+	reset := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name       string
+		body       string
+		wantFive   Window
+		wantSevenD Window
+	}{
+		{"null resets_at keeps utilization", `{"seven_day":{"utilization":42,"resets_at":null}}`,
+			Window{}, Window{UsedPct: 42}},
+		{"missing resets_at keeps utilization", `{"seven_day":{"utilization":42}}`,
+			Window{}, Window{UsedPct: 42}},
+		{"null utilization keeps reset time", `{"seven_day":{"utilization":null,"resets_at":"2026-11-06T18:00:00Z"}}`,
+			Window{}, Window{ResetsAt: reset}},
+		{"missing utilization keeps reset time", `{"seven_day":{"resets_at":"2026-11-06T18:00:00Z"}}`,
+			Window{}, Window{ResetsAt: reset}},
+		{"empty window object", `{"seven_day":{}}`, Window{}, Window{}},
+		{"integer utilization", `{"seven_day":{"utilization":3,"resets_at":"2026-11-06T18:00:00Z"}}`,
+			Window{}, Window{UsedPct: 3, ResetsAt: reset}},
+		{"fractional seconds", `{"seven_day":{"utilization":3,"resets_at":"2026-11-06T18:00:00.317113Z"}}`,
+			Window{}, Window{UsedPct: 3, ResetsAt: reset.Add(317113 * time.Microsecond)}},
+		{"unknown fields everywhere", `{"five_hour":null,"seven_day":{"utilization":3,"resets_at":"2026-11-06T18:00:00Z","remaining":97,"label":"x"},"next":{"a":1},"count":2}`,
+			Window{}, Window{UsedPct: 3, ResetsAt: reset}},
+		{"only five_hour present", `{"five_hour":{"utilization":8,"resets_at":"2026-11-06T18:00:00Z"}}`,
+			Window{UsedPct: 8, ResetsAt: reset}, Window{}},
+		{"both windows null", `{"five_hour":null,"seven_day":null}`, Window{}, Window{}},
+		{"ultra shape", ultraBody,
+			Window{UsedPct: 7, ResetsAt: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)},
+			Window{UsedPct: 41.5}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			u, err := Fetch(context.Background(), staticDoer(200, c.body, nil), "t")
+			if err != nil {
+				t.Fatalf("err = %v (field %q)", err, SchemaField(err))
+			}
+			if u.FiveHour != c.wantFive || u.SevenDay != c.wantSevenD {
+				t.Fatalf("five = %+v want %+v; seven = %+v want %+v",
+					u.FiveHour, c.wantFive, u.SevenDay, c.wantSevenD)
+			}
+		})
+	}
+}
+
+// TestFetchSchemaErrorNamesFailingField keeps a schema failure diagnosable: the error says
+// which field path failed, and carries no value from the body.
+func TestFetchSchemaErrorNamesFailingField(t *testing.T) {
+	cases := map[string]string{
+		`not json`:                             "body",
+		`[]`:                                   "body",
+		`null`:                                 "body",
+		`{}`:                                   "windows",
+		`{"other":1}`:                          "windows",
+		`{"seven_day":7}`:                      "seven_day",
+		`{"seven_day":[]}`:                     "seven_day",
+		`{"seven_day":{"utilization":"high"}}`: "seven_day.utilization",
+		`{"seven_day":{"utilization":[1]}}`:    "seven_day.utilization",
+		`{"seven_day":{"utilization":-1}}`:     "seven_day.utilization",
+		`{"five_hour":{"utilization":1,"resets_at":"yesterday"}}`: "five_hour.resets_at",
+		`{"five_hour":{"utilization":1,"resets_at":99}}`:          "five_hour.resets_at",
+	}
+	for body, wantField := range cases {
+		_, err := Fetch(context.Background(), staticDoer(200, body, nil), "t")
+		if !errors.Is(err, ErrSchema) {
+			t.Errorf("body %q: err = %v, want ErrSchema", body, err)
+			continue
+		}
+		if got := SchemaField(err); got != wantField {
+			t.Errorf("body %q: field = %q, want %q", body, got, wantField)
+		}
+		if strings.Contains(err.Error(), "high") || strings.Contains(err.Error(), "yesterday") {
+			t.Errorf("body %q: error text echoes a value: %v", body, err)
+		}
+	}
+	if got := SchemaField(ErrUnauthorized); got != "" {
+		t.Errorf("SchemaField(non-schema error) = %q, want empty", got)
+	}
+}
+
+// TestPollFailureLogsFailingField proves the next occurrence is diagnosable from the log alone.
+func TestPollFailureLogsFailingField(t *testing.T) {
+	var buf bytes.Buffer
+	old := logger
+	logger = logx.New(&buf)
+	defer func() { logger = old }()
+	p, _ := newTestPoller(staticDoer(200, `{"seven_day":{"utilization":"high"}}`, nil))
+	p.pollOnce(context.Background(),
+		func() []vault.Account { return []vault.Account{acct("a", "tok-a")} },
+		func(string, Usage) {})
+	if !strings.Contains(buf.String(), "seven_day.utilization") {
+		t.Fatalf("log does not name the failing field: %s", buf.String())
+	}
+	if strings.Contains(buf.String(), "[dropped]") {
+		t.Fatalf("field key is not allowlisted: %s", buf.String())
+	}
+	if strings.Contains(buf.String(), "high") {
+		t.Fatalf("log echoes a response value: %s", buf.String())
+	}
+}
+
 func TestFetch401ReturnsErrUnauthorized(t *testing.T) {
 	for _, c := range []int{401, 403} {
 		_, err := Fetch(context.Background(), staticDoer(c, "", nil), "t")
