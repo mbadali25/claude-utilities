@@ -224,6 +224,12 @@ type Hub struct {
 	ipHits     map[string][]time.Time
 	badHits    map[string][]time.Time // failed token or code hellos per source IP
 	adds       map[string]*addJob     // add-account jobs by id (addaccount.go)
+	// Session control (control.go): requests by id, every target by its own id, each session's
+	// recent targets, and the idempotency keys already spent.
+	cmds         map[string]*cmdBatch
+	cmdByID      map[string]*cmdTarget
+	cmdBySession map[string][]*cmdTarget
+	cmdReqIDs    map[string]string
 }
 
 // New returns a Hub that keeps enrolled hosts (token hashes only) in tokensPath.
@@ -242,6 +248,8 @@ func New(v *vault.Vault, r *ownership.Registry, tokensPath string, log *slog.Log
 		pending: map[string]*pendEntry{}, suppressed: map[string]time.Time{},
 		expired: map[string]time.Time{}, ipHits: map[string][]time.Time{},
 		badHits: map[string][]time.Time{}, adds: map[string]*addJob{},
+		cmds: map[string]*cmdBatch{}, cmdByID: map[string]*cmdTarget{},
+		cmdBySession: map[string][]*cmdTarget{}, cmdReqIDs: map[string]string{},
 	}
 	if err := h.load(); err != nil {
 		h.log.Error("load enrolled hosts failed", logx.Err(err))
@@ -267,6 +275,7 @@ func (h *Hub) Run(ctx context.Context) {
 			h.mu.Lock()
 			h.sweepLocked(h.now())
 			h.sweepAddsLocked(h.now())
+			h.sweepCommandsLocked(h.now())
 			h.mu.Unlock()
 		}
 	}
@@ -431,7 +440,7 @@ func (h *Hub) dispatch(c *conn, env proto.Envelope) bool {
 			return false
 		}
 		h.touch(c, &rep)
-	case proto.TypeExportRes, proto.TypeSwapRes:
+	case proto.TypeExportRes, proto.TypeSwapRes, proto.TypeCommandRes:
 		if env.ID == "" {
 			return false
 		}
@@ -476,6 +485,7 @@ func (h *Hub) touch(c *conn, rep *proto.Report) {
 		h.log.Info("host sessions changed", "host_id", ho.ID, "action", "report",
 			"sessionCount", t.total, "namedCount", t.named, "remoteCount", t.remote)
 	}
+	h.applyCommandStatusesLocked(ho.ID, rep.Commands)
 	live := map[string]struct{}{}
 	for _, s := range rep.Sessions {
 		live[sessionKey(s)] = struct{}{}
@@ -577,10 +587,12 @@ func (h *Hub) dropConn(c *conn) {
 	h.mu.Unlock()
 }
 
-// SessionView is a running Claude session plus whether a swap since its start needs a reload.
+// SessionView is a running Claude session plus whether a swap since its start needs a reload and
+// the session-control commands recently aimed at it (control.go), oldest first.
 type SessionView struct {
 	proto.Session
 	NeedsReload bool
+	Commands    []CommandTargetView
 }
 
 // HostView is the UI-safe view of an enrolled host.
@@ -599,6 +611,7 @@ func (h *Hub) Hosts() []HostView {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.sweepLocked(h.now())
+	h.sweepCommandsLocked(h.now())
 	out := make([]HostView, 0, len(h.hosts))
 	for _, ho := range h.hosts {
 		if ho.Revoked {
@@ -613,7 +626,8 @@ func (h *Hub) Hosts() []HostView {
 		}
 		for _, s := range ho.report.Sessions {
 			_, stale := ho.reloadIDs[sessionKey(s)]
-			v.Sessions = append(v.Sessions, SessionView{Session: s, NeedsReload: stale})
+			v.Sessions = append(v.Sessions, SessionView{Session: s, NeedsReload: stale,
+				Commands: h.sessionCommandsLocked(ho.ID, s.ID)})
 		}
 		out = append(out, v)
 	}
