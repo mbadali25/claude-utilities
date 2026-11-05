@@ -12,7 +12,7 @@
     --bg:#f4f5f7; --surface:#fff; --sunk:#eceef2; --fg:#16181d; --mut:#586070; --line:#dde0e6; --line-strong:#b9bec8;
     --acc:#2447b8; --acc-ink:#fff; --bad:#a8231b; --bad-bg:#fdecea; --ok:#176b36; --ok-bg:#e6f4ea; --warn:#7a4f00; --warn-bg:#fdf1d6;
     --track:#e3e6ec; --focus:#2447b8;
-    --r:10px; --gap:16px;
+    --r:10px; --gap:16px; --tabh:46px;
   }
   @media (prefers-color-scheme: dark) { :root {
     --bg:#101114; --surface:#181a1f; --sunk:#22252b; --fg:#ecedf0; --mut:#a2a8b4; --line:#2b2f37; --line-strong:#454a55;
@@ -20,7 +20,8 @@
     --track:#2b2f37; --focus:#8fabf6;
   } }
   * { box-sizing:border-box; }
-  html { -webkit-text-size-adjust:100%; scroll-padding-top:16px; }
+  /* scroll-padding clears the sticky tab bar, or an anchored card lands underneath it. */
+  html { -webkit-text-size-adjust:100%; scroll-padding-top:calc(var(--tabh) + 20px); }
   body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   .canvas { max-width:1440px; margin:0 auto; padding:20px 24px 56px; }
   h1, h2, h3, p { margin:0; }
@@ -66,7 +67,9 @@
   .shell { display:grid; grid-template-columns:minmax(0,1fr); gap:20px; align-items:start; }
   @media (min-width:1000px) {
     .shell { grid-template-columns:300px minmax(0,1fr); gap:28px; }
-    .side { position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+    /* The markup is content-first; on a wide screen the sidebar goes back to the left column. */
+    .side { grid-area:1 / 1; position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+    .main { grid-area:1 / 2; }
   }
   .side { display:grid; gap:14px; min-width:0; }
   .panel { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:14px 16px; display:grid; gap:12px; min-width:0; }
@@ -79,18 +82,14 @@
   .count { color:var(--mut); font-size:.9rem; }
   .head .count { margin-right:auto; }
 
-  /* Collapsible headings: a real button inside the heading, state in aria-expanded. */
-  .fold { display:inline-flex; align-items:center; gap:10px; min-height:36px; padding:0 6px 0 0; margin:0; background:none; border:0; border-radius:6px; font:inherit; font-weight:700; color:inherit; cursor:pointer; text-align:left; }
-  .fold:hover { color:var(--acc); }
+  /* The caret, shared by the account menu's disclosure button. */
   .chev { width:8px; height:8px; flex:none; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(-45deg); margin:0 2px 0 4px; }
-  .fold[aria-expanded="true"] .chev { transform:rotate(45deg); margin-top:-3px; }
-  @media (pointer:coarse) { .fold { min-height:44px; } }
 
   /* Summary */
   .stats { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:8px; margin:0; }
-  .stat { background:var(--sunk); border-radius:8px; padding:10px 12px; display:grid; gap:2px; align-content:start; min-width:0; }
+  .stat { background:var(--sunk); border-radius:8px; padding:9px 11px; display:grid; gap:2px; align-content:start; min-width:0; }
   .stat dt { font-size:.78rem; color:var(--mut); }
-  .stat dd { margin:0; font-size:1.6rem; line-height:1.1; font-weight:700; letter-spacing:-.02em; }
+  .stat dd { margin:0; font-size:1.45rem; line-height:1.15; font-weight:700; letter-spacing:-.02em; }
   .stat dd small { font-size:.8rem; font-weight:500; color:var(--mut); letter-spacing:0; }
   .stat.alert { background:var(--warn-bg); } .stat.alert dd, .stat.alert dt { color:var(--warn); }
   .stat.hot { background:var(--bad-bg); } .stat.hot dd, .stat.hot dt { color:var(--bad); }
@@ -105,16 +104,28 @@
   .seg button .n { font-variant-numeric:tabular-nums; opacity:.75; }
   @media (pointer:coarse) { .seg button { min-height:40px; } }
 
-  /* Sidebar host list */
-  .hostnav { list-style:none; margin:0; padding:0; display:grid; gap:4px; }
-  .hostnav button { width:100%; display:grid; grid-template-columns:auto 1fr; column-gap:10px; align-items:center; text-align:left; background:transparent; border:1px solid transparent; border-radius:8px; padding:6px 8px; cursor:pointer; min-height:44px; }
-  .hostnav button:hover { background:var(--sunk); }
-  .hostnav .nm { font-weight:600; overflow-wrap:anywhere; }
-  .hostnav .as { grid-column:2; font-size:.8rem; color:var(--mut); overflow-wrap:anywhere; }
+  /* Tabs: the main column's two destinations. An underline on one full-width rule, so the bar reads
+     as an edge rather than as a row of buttons, and sticky, so switching never needs a scroll back
+     up. The count rides in the label; selection is the ink and the 2px underline, never colour. */
+  .tabwrap { display:grid; min-width:0; }
+  .tabs { position:sticky; top:0; z-index:4; display:flex; flex-wrap:wrap; margin:0 0 16px; padding-top:8px;
+          background:var(--bg); box-shadow:inset 0 -1px 0 var(--line); }
+  .tabs [role="tab"] { position:relative; min-height:var(--tabh); margin-right:22px; padding:0 2px; background:none; border:0;
+          font:inherit; font-size:1rem; font-weight:600; color:var(--mut); cursor:pointer; display:inline-flex; align-items:center; gap:8px; }
+  .tabs [role="tab"]:hover { color:var(--fg); }
+  .tabs [role="tab"]::after { content:""; position:absolute; left:0; right:0; bottom:0; height:2px; background:transparent; }
+  .tabs [role="tab"][aria-selected="true"] { color:var(--fg); }
+  .tabs [role="tab"][aria-selected="true"]::after { background:var(--fg); }
+  .tabs [role="tab"]:focus-visible { outline-offset:-2px; }
+  .tabs .n { padding:1px 7px; border-radius:10px; background:var(--sunk); font-size:.8rem; font-weight:650; font-variant-numeric:tabular-nums; }
+  .tabs [role="tab"][aria-selected="true"] .n { color:var(--fg); }
+  [role="tabpanel"]:focus-visible { outline-offset:5px; }
+  .panel-meta { margin:0 0 10px; }
+  .panel-meta:empty { display:none; }
 
   /* Cards */
   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap:var(--gap); align-items:start; }
-  .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:16px; display:flex; flex-direction:column; gap:14px; min-width:0; }
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:14px; display:flex; flex-direction:column; gap:12px; min-width:0; }
   .card:focus-visible { outline-offset:3px; }
   .card.acct { border-top:4px solid var(--line-strong); }
   .card.acct.s-ok { border-top-color:var(--ok); }
@@ -136,7 +147,7 @@
   .chip svg { width:11px; height:11px; flex:none; }
 
   /* Meters: the bar length, the % text and the Low/Out label each say the same thing. */
-  .meters { display:grid; gap:12px; }
+  .meters { display:grid; gap:10px; }
   .meter { display:grid; grid-template-columns:1fr auto; align-items:baseline; column-gap:10px; row-gap:5px; }
   .meter .lbl { font-size:.82rem; color:var(--mut); font-weight:600; }
   .meter .val { font-weight:700; text-align:right; }
@@ -150,7 +161,8 @@
 
   .holder { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:.88rem; color:var(--mut); }
   .holder strong { color:var(--fg); font-weight:650; overflow-wrap:anywhere; }
-  .acct-foot { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; font-size:.85rem; color:var(--mut); border-top:1px solid var(--line); padding-top:10px; min-height:44px; }
+  /* The foot holds a status chip and no control, so it needs no 44px touch height. */
+  .acct-foot { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; font-size:.85rem; color:var(--mut); border-top:1px solid var(--line); padding-top:9px; }
 
   /* Rename */
   .rename { display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex:1; min-width:0; }
@@ -163,17 +175,24 @@
   .fp { font:700 1.9rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:.1em; overflow-wrap:anywhere; }
   .pend .actions { display:flex; gap:8px; margin-top:6px; flex-wrap:wrap; }
   #pending-list > p { margin-top:2px; }
-  #pending-panel .none { color:var(--mut); padding:10px 14px; background:var(--sunk); border-radius:var(--r); font-size:.9rem; }
+  #pending-panel .none { color:var(--mut); padding:8px 12px; background:var(--sunk); border-radius:var(--r); font-size:.9rem; }
+  /* With an empty queue the panel is one row, so it costs no scroll above the tabs. Browsers
+     without :has() just keep the two-line stack. */
+  #pending-panel:has(.none) { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  #pending-panel:has(.none) .head { margin-bottom:0; }
 
   /* Hosts */
   .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); flex:none; }
   .dot.off { background:transparent; border:2px solid var(--mut); }
-  details.sess summary { cursor:pointer; color:var(--mut); font-size:.88rem; min-height:32px; display:flex; align-items:center; }
+  details.sess summary { cursor:pointer; color:var(--mut); font-size:.88rem; min-height:32px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   details.sess summary:hover { color:var(--fg); }
   details.sess ul { list-style:none; margin:6px 0 0; padding:0; display:grid; gap:6px; font-size:.82rem; }
   details.sess li { padding:6px 8px; background:var(--sunk); border-radius:6px; overflow-wrap:anywhere; display:flex; gap:8px; justify-content:space-between; align-items:center; flex-wrap:wrap; }
   .swap { display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-top:1px solid var(--line); padding-top:12px; min-height:56px; }
-  .swap select { flex:1 1 160px; min-width:0; }
+  /* 120px basis: select, Swap and Revoke share one row in a 300px card instead of Revoke wrapping alone. */
+  .swap select { flex:1 1 120px; min-width:0; }
+  /* The ghost Copy button sits flush with the command above it, not inset by its own padding. */
+  details.sess li .btn.ghost { margin-left:-10px; }
   .confirm { display:flex; gap:8px; flex-wrap:wrap; align-items:center; width:100%; }
   .confirm .q { flex:1 1 100%; font-weight:600; }
 
@@ -236,19 +255,22 @@
 
   @media (max-width:560px) {
     .canvas { padding:14px 14px 48px; }
-    .top { align-items:flex-start; }
-    .enrol { width:100%; }
+    /* The wordmark takes the first line; the enrolment button and the account menu share the
+       second, so the header costs two rows rather than three and the tabs sit higher. */
+    .top { align-items:center; position:relative; padding-bottom:14px; }
+    .mark { flex:1 1 100%; margin-right:0; }
+    .enrol { flex:0 1 auto; margin-right:auto; }
     .fp { font-size:1.5rem; }
     .stat dd { font-size:1.35rem; }
     /* On a phone the menu spans the header instead of the button, or its labels wrap. */
-    #acct { width:100%; position:relative; }
-    .menuwrap { margin-left:auto; position:static; }
+    #acct { position:static; }
+    .menuwrap { position:static; }
     .menu { left:0; right:0; min-width:0; }
     .modal-foot .btn { flex:1 1 auto; }
   }
   @media (prefers-reduced-motion: no-preference) {
     .bar > i { transition:width .3s ease; }
-    .btn, .seg button, .hostnav button, .mi { transition:border-color .15s, color .15s, background-color .15s; }
+    .btn, .seg button, .mi, .tabs [role="tab"] { transition:border-color .15s, color .15s, background-color .15s; }
     .chev { transition:transform .15s ease; }
     .modal[open] { animation:rise .14s ease-out; }
     @keyframes rise { from { opacity:0; transform:translateY(8px); } }
@@ -305,31 +327,9 @@
 <p id="status" class="err" role="status"></p>
 
 <div class="shell">
-<aside class="side" aria-label="Overview and filters">
-  <section class="panel" aria-labelledby="sum-h">
-    <h2 id="sum-h">Overview</h2>
-    <dl class="stats" id="stats">
-      <div class="stat"><dt>Accounts</dt><dd id="st-acc">-</dd></div>
-      <div class="stat"><dt>Hosts online</dt><dd id="st-host">-</dd></div>
-      <div class="stat"><dt>Sessions</dt><dd id="st-sess">-</dd></div>
-      <div class="stat" id="st-attn-box"><dt>Need attention</dt><dd id="st-attn">-</dd></div>
-    </dl>
-  </section>
-
-  <section class="panel" aria-labelledby="flt-h">
-    <h2 id="flt-h">Filter accounts</h2>
-    <div class="filters">
-      <input type="search" id="acc-q" placeholder="Search label or identity" aria-label="Search accounts by label or identity" autocomplete="off" maxlength="64">
-      <div class="seg" id="acc-filter" role="group" aria-label="Show accounts"></div>
-    </div>
-  </section>
-
-  <section class="panel" aria-labelledby="hnav-h">
-    <h2 id="hnav-h"><button type="button" class="fold" data-fold="sidehosts" aria-expanded="true" aria-controls="hostnav-body"><span class="chev" aria-hidden="true"></span>Hosts</button></h2>
-    <div id="hostnav-body"><ul class="hostnav" id="hostnav"><li class="mut">No hosts yet.</li></ul></div>
-  </section>
-</aside>
-
+<!-- The main column comes first in the markup. On a phone that puts the tabs and the cards on the
+     first screen instead of behind a screenful of sidebar; at 1000px and up the grid places the
+     sidebar back in the left column. -->
 <main class="main" id="main" tabindex="-1">
 <section id="pending-panel" aria-labelledby="pending-h">
   <div class="head"><h2 id="pending-h">Pending connections</h2></div>
@@ -350,17 +350,56 @@
   </div>
 </section>
 
-<section aria-labelledby="acc-h">
-  <div class="head"><h2 id="acc-h">Accounts</h2><span class="count" id="acc-count"></span></div>
+<!-- Two tabs, so neither list pushes the other off the screen. Each tab is labelled by the panel it
+     opens and by that panel's live count; the tablist keeps a roving tabindex. -->
+<div class="tabwrap">
+<div class="tabs" id="tabs" role="tablist" aria-label="Accounts and hosts">
+  <button type="button" id="tab-accounts" role="tab" aria-selected="true" aria-controls="panel-accounts" tabindex="0">Accounts<span class="n num" id="tab-accounts-n">-</span></button>
+  <button type="button" id="tab-hosts" role="tab" aria-selected="false" aria-controls="panel-hosts" tabindex="-1">Hosts<span class="n num" id="tab-hosts-n">-</span></button>
+</div>
+
+<section id="panel-accounts" role="tabpanel" aria-labelledby="tab-accounts" tabindex="0">
+  <p class="panel-meta count" id="acc-count"></p>
   <div id="accounts" class="grid"><p class="empty">Loading accounts...</p></div>
 </section>
 
-<section aria-labelledby="host-h">
-  <div class="head"><h2 id="host-h"><button type="button" class="fold" data-fold="hosts" aria-expanded="true" aria-controls="hosts"><span class="chev" aria-hidden="true"></span>Hosts</button></h2><span class="count" id="host-count"></span></div>
+<section id="panel-hosts" role="tabpanel" aria-labelledby="tab-hosts" tabindex="0" hidden>
+  <p class="panel-meta count" id="host-count"></p>
   <div id="hosts" class="grid"><p class="empty">Loading hosts...</p></div>
 </section>
+</div>
 
 </main>
+
+<!-- The sidebar carries what neither tab shows: the estate's state, and the filter for whichever
+     tab is open. The account and host lists themselves live in the tabs, never twice. -->
+<aside class="side" aria-label="Overview and filters">
+  <section class="panel" aria-labelledby="sum-h">
+    <h2 id="sum-h">Overview</h2>
+    <dl class="stats" id="stats">
+      <div class="stat"><dt>Hosts online</dt><dd id="st-host">-</dd></div>
+      <div class="stat"><dt>Sessions</dt><dd id="st-sess">-</dd></div>
+      <div class="stat"><dt>Low or out</dt><dd id="st-low">-</dd></div>
+      <div class="stat" id="st-attn-box"><dt>Need attention</dt><dd id="st-attn">-</dd></div>
+    </dl>
+  </section>
+
+  <section class="panel" id="flt-acc" aria-labelledby="flt-h">
+    <h2 id="flt-h">Filter accounts</h2>
+    <div class="filters">
+      <input type="search" id="acc-q" placeholder="Search label or identity" aria-label="Search accounts by label or identity" autocomplete="off" maxlength="64">
+      <div class="seg" id="acc-filter" role="group" aria-label="Show accounts"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="flt-host" aria-labelledby="fhost-h" hidden>
+    <h2 id="fhost-h">Filter hosts</h2>
+    <div class="filters">
+      <input type="search" id="host-q" placeholder="Search host or system" aria-label="Search hosts by name or operating system" autocomplete="off" maxlength="64">
+      <div class="seg" id="host-filter" role="group" aria-label="Show hosts"></div>
+    </div>
+  </section>
+</aside>
 </div>
 
 <dialog class="modal" id="add-dialog" aria-labelledby="add-sec-h">
@@ -446,31 +485,49 @@
     });
   }
 
-  // Layout preferences only (which panels are folded, the account filter). Never a URL, code or token.
+  // Layout preferences only (the selected tab, the two filters, which hosts show their sessions).
+  // Never a URL, code or token.
   var PREF_KEY = 'cs.ui.v1', prefs = {};
   try { prefs = JSON.parse(localStorage.getItem(PREF_KEY) || '{}') || {}; } catch (e) { prefs = {}; }
   function savePrefs() { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (e) {} }
   function pref(k, dflt) { return Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : dflt; }
-  var narrow = window.matchMedia && window.matchMedia('(max-width:999px)').matches;
 
-  // Collapsible regions: the heading button owns aria-expanded, the region it controls toggles hidden.
-  function setFold(btn, open) {
-    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    var t = document.getElementById(btn.getAttribute('aria-controls')); if (t) t.hidden = !open;
+  // Tabs. Both panels are already in the page, so there is nothing to wait for: an arrow key moves
+  // focus and selects in one step, and Enter or Space selects the focused tab as well. The tablist
+  // keeps a roving tabindex, so Tab reaches the tabs once and then moves into the open panel. The
+  // sidebar's filter follows the tab, since each filter drives only its own list.
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('#tabs [role="tab"]'));
+  function selectTab(tab, focus) {
+    tabs.forEach(function (t) {
+      var on = t === tab;
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+      t.tabIndex = on ? 0 : -1;
+      var p = document.getElementById(t.getAttribute('aria-controls')); if (p) p.hidden = !on;
+    });
+    $('#flt-acc').hidden = tab.id !== 'tab-accounts';
+    $('#flt-host').hidden = tab.id !== 'tab-hosts';
+    if (prefs.tab !== tab.id) { prefs.tab = tab.id; savePrefs(); }
+    if (focus) tab.focus();
   }
-  Array.prototype.forEach.call(document.querySelectorAll('.fold'), function (btn) {
-    var key = 'fold.' + btn.dataset.fold;
-    var dflt = !(narrow && btn.dataset.fold === 'sidehosts');
-    setFold(btn, pref(key, dflt));
-    btn.addEventListener('click', function () {
-      var open = btn.getAttribute('aria-expanded') !== 'true';
-      setFold(btn, open); prefs[key] = open; savePrefs();
+  function moveTab(step) {
+    var at = tabs.indexOf(document.activeElement); if (at < 0) at = 0;
+    selectTab(tabs[(at + step + tabs.length) % tabs.length], true);
+  }
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () { selectTab(t, false); });
+    t.addEventListener('keydown', function (ev) {
+      if (ev.key === 'ArrowRight') { ev.preventDefault(); moveTab(1); }
+      else if (ev.key === 'ArrowLeft') { ev.preventDefault(); moveTab(-1); }
+      else if (ev.key === 'Home') { ev.preventDefault(); selectTab(tabs[0], true); }
+      else if (ev.key === 'End') { ev.preventDefault(); selectTab(tabs[tabs.length - 1], true); }
+      else if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); selectTab(t, true); }
     });
   });
-  function openFold(name) {
-    var b = $('.fold[data-fold="' + name + '"]');
-    if (b && b.getAttribute('aria-expanded') !== 'true') { setFold(b, true); prefs['fold.' + name] = true; savePrefs(); }
-  }
+  // Apply the remembered tab before the first data arrives, so a reload never flashes the other panel.
+  (function () {
+    var want = pref('tab', 'tab-accounts');
+    selectTab(tabs.filter(function (t) { return t.id === want; })[0] || tabs[0], false);
+  })();
 
   // Account menu. The button owns aria-expanded; the items hold a roving tabindex, so the arrows
   // move inside the menu and Tab leaves it. Nothing here is a link: every item acts in place.
@@ -564,6 +621,7 @@
 
   var accountsCache = [], hostsCache = [], pendingCount = 0, editing = null, confirming = null;
   var filter = { mode: pref('filter', 'all'), q: '' };
+  var hostFilter = { mode: pref('hostFilter', 'all'), q: '' };
 
   function pct(w) { return w ? Math.max(0, Math.min(100, Math.round(w.leftPct))) : null; }
   function level(a) { // worst state across both windows, for the card's top edge and the filters
@@ -675,20 +733,56 @@
     });
     return n;
   }
-  function renderFilters() {
-    var box = $('#acc-filter'), n = counts(), had = document.activeElement && box.contains(document.activeElement) ? document.activeElement.dataset.mode : null;
+  // Hosts have their own filter, because the sidebar's panel follows the open tab and a single
+  // filter could not mean both things.
+  var HMODES = [['all', 'All'], ['online', 'Online'], ['reload', 'Needs reload'], ['blocked', 'Swaps blocked']];
+  function hostMatches(h) {
+    var m = hostFilter.mode;
+    if (m === 'online' && !h.online) return false;
+    if (m === 'reload' && !h.needsReload) return false;
+    if (m === 'blocked' && !h.swapBlocked) return false;
+    if (hostFilter.q) {
+      var hay = (h.name + ' ' + h.os).toLowerCase();
+      if (hay.indexOf(hostFilter.q.toLowerCase()) < 0) return false;
+    }
+    return true;
+  }
+  function hostCounts() {
+    var n = { all: hostsCache.length, online: 0, reload: 0, blocked: 0 };
+    hostsCache.forEach(function (h) {
+      if (h.online) n.online++;
+      if (h.needsReload) n.reload++;
+      if (h.swapBlocked) n.blocked++;
+    });
+    return n;
+  }
+
+  // One segmented filter for both tabs. Each button carries aria-pressed and its own count, and
+  // focus returns to the button that was pressed so the keyboard keeps its place.
+  function renderSeg(sel, modes, n, state, after) {
+    var box = $(sel), had = document.activeElement && box.contains(document.activeElement) ? document.activeElement.dataset.mode : null;
     box.textContent = '';
-    MODES.forEach(function (m) {
+    modes.forEach(function (m) {
       var b = el('button', m[1]); b.type = 'button'; b.dataset.mode = m[0];
-      b.setAttribute('aria-pressed', filter.mode === m[0] ? 'true' : 'false');
+      b.setAttribute('aria-pressed', state.mode === m[0] ? 'true' : 'false');
       b.appendChild(el('span', String(n[m[0]]), 'n'));
       b.addEventListener('click', function () {
-        filter.mode = m[0]; prefs.filter = m[0]; savePrefs(); renderFilters(); renderAccounts(true);
+        state.mode = m[0]; after(m[0]);
         var again = box.querySelector('[data-mode="' + m[0] + '"]'); if (again) again.focus();
       });
       box.appendChild(b);
     });
     if (had) { var f = box.querySelector('[data-mode="' + had + '"]'); if (f) f.focus(); }
+  }
+  function renderFilters() {
+    renderSeg('#acc-filter', MODES, counts(), filter, function (m) {
+      prefs.filter = m; savePrefs(); renderFilters(); renderAccounts(true);
+    });
+  }
+  function renderHostFilters() {
+    renderSeg('#host-filter', HMODES, hostCounts(), hostFilter, function (m) {
+      prefs.hostFilter = m; savePrefs(); renderHostFilters(); renderHosts(true);
+    });
   }
 
   function renderStats() {
@@ -697,16 +791,20 @@
     hostsCache.forEach(function (h) { sess += h.sessions.length; if (h.needsReload) reload++; });
     var n = counts(), attn = n.low + n.err + reload + (h0() ? 1 : 0) + pendingCount;
     function h0() { return hostsCache.some(function (h) { return h.swapBlocked; }); }
-    $('#st-acc').textContent = String(accountsCache.length);
+    // The tab labels carry the two totals, so the Overview panel stays about state.
+    $('#tab-accounts-n').textContent = String(accountsCache.length);
+    $('#tab-hosts-n').textContent = String(hostsCache.length);
     var hs = $('#st-host'); hs.textContent = String(online); hs.appendChild(el('small', ' / ' + hostsCache.length));
     $('#st-sess').textContent = String(sess);
+    $('#st-low').textContent = String(n.low);
     $('#st-attn').textContent = String(attn);
     $('#st-attn-box').className = 'stat' + (attn ? (n.err ? ' hot' : ' alert') : '');
   }
 
   function renderAccounts(force) {
     var list = accountsCache;
-    $('#acc-count').textContent = list.length ? (filter.mode !== 'all' || filter.q ? list.filter(matches).length + ' of ' + list.length : String(list.length)) : '';
+    var narrowed = filter.mode !== 'all' || filter.q;
+    $('#acc-count').textContent = list.length && narrowed ? 'Showing ' + list.filter(matches).length + ' of ' + list.length : '';
     if (editing && $('#accounts .rename')) return; // keep an open rename
     if (!force && !changed('acc', [list, filter]) && !$('#accounts .empty')) return;
     sig.acc = JSON.stringify([list, filter]);
@@ -745,11 +843,22 @@
     if (h.swapBlocked) line.appendChild(chip('Swaps blocked', 'bad', 'bad'));
     c.appendChild(line);
 
-    var d = el('details', undefined, 'sess');
-    d.open = !!pref(sessKey(h), false);
-    d.addEventListener('toggle', function () { if (d.open !== !!pref(sessKey(h), false)) { prefs[sessKey(h)] = d.open; savePrefs(); } });
-    d.appendChild(el('summary', h.sessions.length + ' session(s)'));
-    if (h.sessions.length) {
+    // Sessions collapse, but a restart command must never start out hidden: a host with a stale
+    // session opens by default, and the closed summary still says how many need one. With no
+    // sessions there is nothing to disclose, so the count is a plain line rather than a dead
+    // control.
+    var stale = h.sessions.filter(function (s) { return s.needsReload; }).length;
+    var label = h.sessions.length + (h.sessions.length === 1 ? ' session' : ' sessions');
+    if (!h.sessions.length) {
+      c.appendChild(el('div', label, 'mut sub'));
+    } else {
+      var d = el('details', undefined, 'sess'), dflt = stale > 0;
+      d.open = !!pref(sessKey(h), dflt);
+      d.addEventListener('toggle', function () { if (d.open !== !!pref(sessKey(h), dflt)) { prefs[sessKey(h)] = d.open; savePrefs(); } });
+      var sm = el('summary');
+      sm.appendChild(el('span', label));
+      if (stale) sm.appendChild(chip(stale === 1 ? '1 needs reload' : stale + ' need reload', 'warn', 'warn'));
+      d.appendChild(sm);
       var ul = el('ul');
       h.sessions.forEach(function (s) {
         var li = el('li'); li.appendChild(el('span', (s.cwd || 'pid ' + s.pid)));
@@ -759,8 +868,8 @@
         ul.appendChild(li);
       });
       d.appendChild(ul);
+      c.appendChild(d);
     }
-    c.appendChild(d);
 
     var sw = el('div', undefined, 'swap');
     var pick = el('select'); pick.setAttribute('aria-label', 'Account for ' + h.name);
@@ -797,42 +906,32 @@
     return c;
   }
 
-  function hostNav(list) {
-    var ul = $('#hostnav'); ul.textContent = '';
-    if (!list.length) { ul.appendChild(el('li', 'No hosts yet.', 'mut')); return; }
-    list.forEach(function (h) {
-      var li = el('li'), b = el('button'); b.type = 'button';
-      b.setAttribute('aria-label', h.name + ', ' + (h.online ? 'online' : 'offline') + ', show host');
-      b.appendChild(el('span', undefined, 'dot' + (h.online ? '' : ' off')));
-      b.appendChild(el('span', h.name, 'nm'));
-      var act = (accountsCache.filter(function (a) { return a.id === h.activeAccount; })[0] || {}).label;
-      b.appendChild(el('span', h.activeAccount ? (act || '?') : 'No active account', 'as'));
-      b.addEventListener('click', function () {
-        openFold('hosts');
-        var cards = document.querySelectorAll('#hosts .card'), target = null;
-        Array.prototype.forEach.call(cards, function (c) { if (c.dataset.host === h.hostId) target = c; });
-        if (target) { target.scrollIntoView({ block: 'center' }); target.focus({ preventScroll: true }); }
-      });
-      li.appendChild(b); ul.appendChild(li);
-    });
+  function renderHosts(force) {
+    var list = hostsCache;
+    var narrowed = hostFilter.mode !== 'all' || hostFilter.q;
+    $('#host-count').textContent = list.length && narrowed ? 'Showing ' + list.filter(hostMatches).length + ' of ' + list.length : '';
+    if (confirming && $('#hosts .confirm')) return; // keep an open confirm
+    if (!force && !changed('host', [list, accountsCache, hostFilter]) && !$('#hosts .empty')) return;
+    sig.host = JSON.stringify([list, accountsCache, hostFilter]);
+    var box = $('#hosts'); box.textContent = '';
+    if (!list.length) {
+      box.appendChild(el('p', 'No hosts enrolled. Generate an enrolment code and run the agent on a machine.', 'empty'));
+      return;
+    }
+    var shown = list.filter(hostMatches);
+    if (!shown.length) box.appendChild(el('p', 'No hosts match this filter.', 'empty'));
+    shown.forEach(function (h) { box.appendChild(hostCard(h)); });
   }
 
   function loadHosts() {
     return call('GET', '/api/hosts').then(function (list) {
       hostsCache = list;
-      $('#host-count').textContent = list.length ? String(list.length) : '';
       ['#import-host', '#add-host'].forEach(function (id) {
         var sel = $(id), keep = sel.value; sel.textContent = '';
         list.forEach(function (h) { var o = el('option', h.name); o.value = h.hostId; sel.appendChild(o); });
         if (keep) sel.value = keep;
       });
-      renderStats();
-      if (changed('hostnav', [list, accountsCache])) hostNav(list);
-      if (confirming && $('#hosts .confirm')) return; // keep an open confirm
-      if (!changed('host', [list, accountsCache]) && !$('#hosts .empty')) return;
-      var box = $('#hosts'); box.textContent = '';
-      if (!list.length) box.appendChild(el('p', 'No hosts enrolled. Generate an enrolment code and run the agent on a machine.', 'empty'));
-      list.forEach(function (h) { box.appendChild(hostCard(h)); });
+      renderStats(); renderHostFilters(); renderHosts(false);
     });
   }
 
@@ -866,6 +965,7 @@
   }
 
   $('#acc-q').addEventListener('input', function (ev) { filter.q = ev.target.value.trim(); renderAccounts(true); });
+  $('#host-q').addEventListener('input', function (ev) { hostFilter.q = ev.target.value.trim(); renderHosts(true); });
 
   $('#import-form').addEventListener('submit', function (ev) {
     ev.preventDefault(); say('');

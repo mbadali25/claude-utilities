@@ -299,8 +299,9 @@ func TestUIHasAddAccountPanel(t *testing.T) {
 			t.Errorf("index.html uses %s", bad)
 		}
 	}
-	// localStorage holds layout preferences only (folded panels, the account filter), under one key,
-	// and every access sits in a try/catch. Nothing else may touch it.
+	// localStorage holds layout preferences only (the selected tab, the account and host filters,
+	// which hosts show their sessions), under one key, and every access sits in a try/catch.
+	// Nothing else may touch it.
 	if n := strings.Count(p, "localStorage"); n != 2 || !strings.Contains(p, "PREF_KEY = 'cs.ui.v1'") ||
 		strings.Count(p, "localStorage.getItem(PREF_KEY)") != 1 || strings.Count(p, "localStorage.setItem(PREF_KEY,") != 1 {
 		t.Errorf("index.html uses localStorage beyond the one layout-preference key (%d uses)", n)
