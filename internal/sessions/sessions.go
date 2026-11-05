@@ -1,8 +1,11 @@
 // Package sessions finds live Claude Code sessions on this host.
 //
-// Windows reads ~/.claude/sessions/<pid>.json (spike S3) and keeps a record only
-// while the pid is alive and its process start time matches procStart.
-// The Linux scan is NOT implemented: the spike never observed a live Linux session.
+// Both platforms read ~/.claude/sessions/<pid>.json (spike S3) and keep a record
+// only while the pid is alive and its process start time matches procStart.
+// Windows compares procStart against the process creation FILETIME. Linux reads
+// /proc/<pid>/stat for the starttime and also requires the process to look like
+// Claude Code; the Linux procStart format is unverified, so see procAlive for
+// what an unparseable value means. Other platforms return ErrNotImplemented.
 package sessions
 
 import (
@@ -18,7 +21,7 @@ import (
 	"claude-utilities/internal/proto"
 )
 
-// ErrNotImplemented is returned by Scan on platforms without a proven scan.
+// ErrNotImplemented is returned by Scan on platforms other than Windows and Linux.
 var ErrNotImplemented = errors.New("sessions: scan not implemented on this OS")
 
 // record is one session file. procStart is kept for liveness checks only.

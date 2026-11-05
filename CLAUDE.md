@@ -37,7 +37,7 @@ The server (`cmd/server`) is one TLS listener: `/ws` for agents, everything else
 - Keep `CLAUDESWAP_STATE_DIR` and `CLAUDE_CONFIG_DIR` identical at `enrol` and `run`; the logon task passes no environment, so a state dir set only at enrol makes `run` report a missing `agent.json` (see `agent-run.log`).
 - Import dedupes by the identity string: a login already stored is refused (`ErrAlreadyStored`), and a host with no `oauthAccount` cannot import.
 - Windows Defender may flag unsigned Go test binaries; a vanished or blocked `*.test.exe` is that, not a test failure.
-- Session discovery is implemented for Windows only (`~/.claude/sessions/<pid>.json`); the Linux scan is not.
+- Session discovery reads `~/.claude/sessions/<pid>.json` on Windows and Linux. Linux liveness comes from `/proc/<pid>/stat` plus a claude marker in `comm` or `cmdline`; the Linux `procStart` format is unverified, so a value that is not a decimal clock-tick count is ignored rather than treated as dead. Other platforms return `ErrNotImplemented`.
 
 ## Scope discipline
 - Fix the ticket, not what you notice nearby. Unrelated problems go in
