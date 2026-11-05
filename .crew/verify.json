@@ -18,6 +18,13 @@
       "reach": "local",
       "why": "a syntax error in a harness script makes every gate report a failure that is not in the code. reach: local - bash -n parses only." },
 
+    { "id": "gitattributes-eol",
+      "paths": [".gitattributes", "_verify/cases/gitattributes-check.sh"],
+      "run": ["bash _verify/cases/gitattributes-check.sh"],
+      "seconds": 2,
+      "reach": "local",
+      "why": ".gitattributes pins *.go and *.sh to LF so CRLF checkouts do not break gofmt or bash. The script fails when git check-attr no longer reports eol=lf for them, or gofmt -l cmd internal prints anything. reach: local - reads git attributes and source on disk." },
+
     { "id": "docs-and-config",
       "paths": ["README.md", "SECURITY.md", ".editorconfig", ".github/**", "AGENTS.md", "CLAUDE.md", "docs/**", ".claude/**", ".crew/**", ".work/**", ".gitignore", ".graphifyignore", "graphify-out/**"],
       "run": [],

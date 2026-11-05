@@ -16,8 +16,8 @@ For Codex and any agent that reads AGENTS.md. Claude Code does not load it (CLAU
 - `bash -n _verify/smoke.sh`
 - `bash -n _verify/run-all.sh`
 - `bash -n _verify/cases/go-checks.sh`
-- `[ -n "${CLAUDE_PLUGIN_ROOT:-}" ] || exit 77; python3 "$CLAUDE_PLUGIN_ROOT/hooks/scripts/crew_instructions.py" agents --check --root .`
-- `$CLAUDE_PLUGIN_ROOT` is the crew plugin's install directory (the one holding `hooks/scripts/`): set it outside Claude Code, or say those commands did not run.
+- `bash _verify/cases/gitattributes-check.sh`
+- ...and 1 more in `.crew/verify.json`.
 
 ## Hard rules
 <!-- crew:keep:start -->
