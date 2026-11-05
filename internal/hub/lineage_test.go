@@ -203,3 +203,28 @@ func TestHostViewShowsSwappedAccountDespiteStaleHeartbeat(t *testing.T) {
 		t.Fatalf("view after stale heartbeat: %+v", v)
 	}
 }
+
+// A completed swap tells the usage poller which account just landed, once; a no-op swap does not.
+func TestSwapTellsTheOnSwapHookOnlyForARealSwap(t *testing.T) {
+	f := newFixture(t)
+	f.seedLineage()
+	a, _, id := f.enrol("box")
+	f.reg.SwapIn("A", id)
+	s := f.newScript("id-a", `{"refreshToken":"rt-a","accessToken":"a0"}`)
+	s.serve(a)
+	var got []string
+	f.h.SetOnSwap(func(acct string) { got = append(got, acct) })
+
+	if _, err := f.h.Swap(context.Background(), id, "A"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("no-op swap reported %v", got)
+	}
+	if _, err := f.h.Swap(context.Background(), id, "B"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "B" {
+		t.Fatalf("real swap reported %v, want [B]", got)
+	}
+}

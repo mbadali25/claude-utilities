@@ -34,7 +34,6 @@ import (
 const (
 	keyEnv       = "CLAUDESWAP_KEY"
 	passwordEnv  = "CLAUDESWAP_ADMIN_PASSWORD"
-	usagePoll    = 5 * time.Minute
 	shutdownWait = 5 * time.Second
 )
 
@@ -196,7 +195,7 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 	reg := ownership.New()
 	h := hub.New(v, reg, filepath.Join(dataDir, "hosts.json"), log)
 	// Without a refresher (spike S2 deferred) an expired token shows as "unauthorized" in the UI.
-	poller := usage.NewPoller(&http.Client{Timeout: 20 * time.Second}, usagePoll)
+	poller := usage.NewPoller(&http.Client{Timeout: 20 * time.Second}, usage.DefaultConfig())
 
 	// The tunnel supervisor, only with --tunnels. It is started after the vault passphrase has
 	// been accepted, because the keyring is unlocked with the same one, and stopped before the
@@ -226,6 +225,9 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 	// report, so the vault copy (refreshed by swap write-back) is the only source. The accounts are
 	// set before the listener starts, so an admin's Refresh cannot arrive before the source exists.
 	poller.SetAccounts(v.List)
+	// A host holding an account live, or a swap that just landed one, puts it on the short schedule.
+	poller.SetHeld(func(id string) bool { return !reg.OwnerOf(id).Server })
+	h.SetOnSwap(poller.NoteSwap)
 	go poller.Run(ctx, nil)
 
 	mux := http.NewServeMux()
