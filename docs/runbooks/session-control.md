@@ -9,9 +9,12 @@ feature lives inside: nothing outside a running Claude Code session can make it 
 credentials. Session control does not change that. It gives the operator a way to *ask* for the
 three things that help after a swap, and an honest answer when asking is not possible.
 
-Spike evidence: Claude Code **2.1.318**, build sha `ca1fa9de`, read on 2026-11-05. The findings
-come from reading the binary and the docs, not from a live two-account test. Re-check after a
-Claude Code update.
+Spike evidence: Claude Code **2.1.318**, build sha `ca1fa9de`, read on 2026-11-05. Spike 1 read the
+binary and the docs. Spike 2 read the bundle again **and drove frames into a throwaway session it
+started itself**, which corrected three things spike 1 had inferred — see
+[What spike 2 corrected](#what-spike-2-corrected). Nothing was ever sent into a session holding
+somebody's work. Re-check after a Claude Code update: every offset and every claim below is
+specific to this build.
 
 ## The three commands, the composite, and the scope
 
@@ -55,8 +58,13 @@ restart-type command cannot be added without every confirm gate picking it up.
 | `unsupported` | No proven mechanism can do this; the reason code says why, and the hint often carries the command an operator can run instead. |
 
 Reason codes are short and machine-readable: `unsupported-requires-restart`,
-`unsupported-inbox-unproven`, `no-mechanism`, `unknown-command`, `bad-session-id`, `no-name`,
-`queue-full`, `queue-write-failed`, `agent-offline`, `timeout`, `bad-reply`.
+`unsupported-no-bridge`, `unsupported-no-inbox`, `unsupported-inbox-no-change`,
+`inbox-send-failed`, `no-mechanism`, `unknown-command`, `bad-session-id`, `no-name`, `queue-full`,
+`queue-write-failed`, `agent-offline`, `timeout`, `bad-reply`.
+
+`unsupported-inbox-unproven` is **gone.** The frame is no longer unproven, so a code that said so
+would be a lie in the other direction; what used to answer with it now answers `no-mechanism`
+(`remote_control_enable`) or one of the three specific inbox codes (`rename_remote`).
 
 ## Mechanisms, and what each command actually uses
 
@@ -66,34 +74,53 @@ claiming a success nobody can see.
 
 | Command | Mechanism used | Best status it can reach |
 |---|---|---|
-| `reload_plugins` | `hook-queue` | `delivered` |
-| `remote_control_enable` | `relaunch` | `unsupported` |
-| `rename_remote` | `relaunch` | `unsupported` |
+| `reload_plugins` | `hook-queue`, and **nothing else is registered for it** | `delivered` |
+| `remote_control_enable` | `relaunch` (`inbox` first when the flag is on, declining `no-mechanism`) | `unsupported` |
+| `rename_remote`, flag **off** | `relaunch` | `unsupported` |
+| `rename_remote`, flag **on** | `inbox`, with `relaunch` behind it as the fallback | `delivered` |
 | `restart_sessions` | `relaunch`, and **nothing else is registered for it** | `unsupported` |
-| any of the first three, with the experimental flag on | `inbox` is tried first, declines, and the above still answers | unchanged |
 
-The experimental inbox is deliberately **not** registered for `restart_sessions`, even when the flag
-is on: none of the handlers it exposes stops a session, and offering it would imply a kill path that
-does not exist.
+Two registrations are deliberate absences, and both are load-bearing:
+
+- The inbox is **not** registered for `reload_plugins`, flag or no flag. Its user-message path
+  sets `skipSlashCommands`, so `/reload-plugins` arrives as literal text: it adds a visible user
+  turn to somebody's conversation and costs an API call without running the command. That is
+  strictly worse than `hook-queue`, which at least asks for the right thing at no cost. Proven
+  live: injecting `{"type":"user","message":{"content":"/reload-plugins"}}` logged
+  `Routed user message to queue (priority=now): /reload-plugins` and then attempted an API
+  request, with no `local_command_run` and no command executed.
+- The inbox is **not** registered for `restart_sessions`. Its whole accepted surface is a rename
+  plus six notification actions, none of which stops a session, and offering it would imply a kill
+  path that does not and must not exist.
 
 ### relaunch — reports the command, changes nothing
 
-Remote Control cannot be enabled on a running session from outside by any public channel, and the
-remote-visible title is **latched once when the bridge binds**: `/rename` does not re-latch it
-(spike E). A relaunch is the only thing that sets both, so this mechanism returns
+Remote Control cannot be enabled on a running session from outside by any public channel, and a
+session with **no bridge bound** has nothing a rename could push a title to. A relaunch is the only
+thing that fixes either, so this mechanism returns
 `unsupported` / `unsupported-requires-restart` plus the exact command for an operator to run:
 
 ```
 claude --resume <sessionId> --remote-control <name>
 ```
 
-`--resume <id>` and `--remote-control <name>` do combine: the spike's probe failed at session
-lookup, not at argument parsing (spike A3). For the session to come back with Remote Control
+`--resume <id>` and `--remote-control <name>` do combine (spike A3). Spike 2 ran the resume half
+offline against its own throwaway and confirmed two things: the **session id is preserved
+identically** across `--resume`, and `/rename` on a resumed session costs **no API call**
+(`num_turns: 0`, `duration_api_ms: 0`, 58 ms). For the session to come back with Remote Control
 already on by default, `remoteControlAtStartup: true` must be set at **user scope** — repo-scoped
 settings cannot enable Remote Control (spike F).
 
+**For `rename_remote` this is the FALLBACK, not the mechanism.** It answers when no bridge is
+bound, and when the inbox flag is off. See [inbox](#inbox--the-rename-mechanism-off-by-default).
+
 The mechanism **never starts or stops a process.** Killing a session to relaunch it would throw
 away whatever the operator was doing in it. It only reports the string.
+
+What a relaunch costs the person in that terminal is not the transcript — `--resume` reloads it —
+but the **live** process state: scrollback, anything queued or mid-turn, in-session `/add-dir` and
+permission-mode changes, and running subagents. That is why it is the last resort for a rename and
+not the first.
 
 Two safety details in that string:
 
@@ -126,31 +153,183 @@ would be a lie, which is why no code path produces one.
   instruction least (a fresh session already picked up the new credentials). It is installed anyway
   so a resumed session picks up anything still queued.
 
-### inbox — experimental, off by default, and unsupported even when on
+### inbox — the rename mechanism, off by default
 
-The per-session message inbox is the one true outside channel the spike found: on Windows a named
-pipe at `\\.\pipe\LOCAL\cc-msg-<32hex>`, named by `messagingSocketPath` in
-`~/.claude/sessions/<pid>.json`, with the peer auth key published beside it as
-`<pid>.<64hex>.key`. The module registers exactly the handlers this feature would want —
-`onEnqueue`, `onRename`, `onEnableRemoteControl` — and the telemetry event
-`uds_enable_remote_control` proves that enabling Remote Control over it is a real, instrumented
-path (spike C).
+The per-session message inbox is the one channel from outside that reaches a **running** session:
+on Windows a named pipe at `\\.\pipe\LOCAL\cc-msg-<32hex>`, off Windows a unix socket, in both
+cases named by `messagingSocketPath` in `~/.claude/sessions/<pid>.json`, with the peer auth key
+published beside it as `<pid>.<64hex>.key`.
 
-It is still **unsupported**, and set `CLAUDESWAP_EXPERIMENTAL_INBOX=1` on the agent only changes
-which mechanism is *tried first*; it still declines and the honest answer still comes back.
+It is **off unless `CLAUDESWAP_EXPERIMENTAL_INBOX=1` is set on the agent**, and it is off on every
+host today — Matthew has not enabled it. With the flag off, nothing in this program connects to a
+session's socket at all. With the flag on it is **real, not a stub**, and it does exactly one
+thing: rename.
 
-What is known: messages are JSON objects `{type, session_id?, ...}` with `type` one of `control`,
-`user`, `notification`, `in_process_teammate`; a `session_id` mismatch is dropped with
-`[uds-messaging] Dropping <type> message: session_id mismatch`. What is **not** known, and is the
-TODO in `internal/agent/control.go`: the framing (length-prefixed or newline-delimited), which field
-selects `onEnqueue` versus `onRename` versus `onEnableRemoteControl`, how the published key becomes
-an authentication value, and whether the GrowthBook gate that silences the inbox
-(`cross-session messaging gate off`) is even on for this account. The spike could not start a
-sandbox session to send into, so the wire frame was never exercised.
+#### The wire protocol
 
-Prove all of that against a session you own, with the key read from that session's own key file,
-before this returns anything but `unsupported`. **Never guess a frame at a session holding somebody
-else's work.**
+```
+connect  \\.\pipe\LOCAL\cc-msg-<32hex>
+send     {"type":"auth","token":"<peerToken>"}\n
+send     {"type":"control","session_id":"<that session's OWN id>","action":"rename","name":"<name>"}\n
+close
+```
+
+Every part of that is load-bearing:
+
+- **NDJSON.** One JSON object per line, `\n`-terminated, no length prefix. A line over the
+  server's limit drops the connection.
+- **The auth line is first, and is mandatory on Windows** (the server takes `requireAuth` from the
+  platform). A control line on an unauthenticated connection is dropped and the connection closed:
+  `Dropped a 'control' line from a connection that did not authenticate; closing it`. A wrong
+  token gets `Dropped a bad auth frame…`, so the token is genuinely checked.
+- **The token is the `peerToken`** in that session's **own** `<pid>.<64hex>.key` file, a 32
+  lowercase-hex value. `childToken` is never written to disk. The key file is 0400 and bounded at
+  4096 bytes.
+- **A connection that sends no complete line within 30 s is closed** (`firstLineDeadlineMs`), so
+  both lines go out in one write and the connection is closed immediately after.
+- **`session_id` is ALWAYS set.** The server drops a frame whose `session_id` is not its own
+  (`Dropping control message: session_id mismatch (got …, expected …)`). That drop is the
+  interlock this whole feature leans on: a misdirected frame is a logged no-op in somebody else's
+  session rather than a rename of it. This agent additionally refuses to send at all unless the
+  session file's own `sessionId` is the one the hub asked about — the interlock is the net, not the
+  plan.
+
+Claude Code documents the shape itself. A session's own debug log prints, at inbox start:
+`[uds-messaging] Inject messages (auth line REQUIRED here; a pipe is not reachable via
+socat/AF_UNIX): node -e "…{type:'auth',token:…}+'\n'+…"`. The recipe above is the vendor's, not
+an inference.
+
+#### Why a rename reaches claude.ai at all
+
+Every non-`auto` rename runs `Jvn`, and `Jvn` ends in `gJo`, which ends in
+`bridge.titleWriter.update(bridgeSessionId, name, …)` — a host-to-bridge title push, with no
+restart and no re-bind. The inbox's `onRename` handler calls
+`Jvn(name, "peer", storage, /*userInitiated*/ false, false, credentials)`, so a rename frame lands
+in exactly that path.
+
+The only thing that stops the push is the `Tk` gate, and every disjunct of `Tk` is a
+**transcript/history-suppression** condition: a conversation foreign to the bound bridge session, a
+`noHistoryBackfill` session, a precautionary-suppression sid, a known-tainted sid. **None of them
+is "a bridge is bound."** The one to watch is `noHistoryBackfill`, which is set for
+remote-created sessions: a session **created from claude.ai** may be suppressed where one started
+in a terminal and later bridged is not. That is in [Not verified](#not-verified).
+
+#### The ceiling is `delivered`, and that is not going to change
+
+The push is `…titleWriter.update(…).catch(()=>{})`. **The result is discarded.** Nothing on the
+host can see whether the title on claude.ai changed, and the authoritative remote title can only
+be read with the account's own token against a claude.ai endpoint, which is out of scope. So:
+
+> **No code path returns `done` for `rename_remote`.** `internal/agent/inbox.go` says so in a
+> comment and `TestInboxRenameNeverClaimsDone` holds it. The mechanism changed; the ceiling
+> did not.
+
+#### Verification: read `name`, and only `name`
+
+After the frame goes out, the agent re-reads the session file's **`name`** for a bounded 500 ms. A
+changed `name` proves the handler ran — the local half. The remote half is unobservable, so the UI
+says the ask reached the session and never that the remote name is fixed.
+
+> **Never wait for `nameSource: "peer"`.** `Jvn` passes through `BBe`, which records
+> `recordSource === "collision" ? "collision" : "user"`. A rename whose *source* is `"peer"` is
+> therefore written to the session file as `nameSource: "user"` (or `"collision"`), **never**
+> `"peer"`. Code that waited for `"peer"` as proof would read every success as a failure.
+> `TestInboxRenameVerifiesTheNameAndNeverWaitsForPeerNameSource` holds this. A collision takes a
+> uniquifying suffix, so a name that *starts with* the one asked for counts as taken.
+
+If `name` did not change, the agent declines (`unsupported-inbox-no-change`) and the relaunch
+fallback answers. It does not retry, and it does not claim anything.
+
+#### A key file does not prove a live session
+
+A **cleanly exited** session unlinks its own socket and key file. A session **killed** with
+`taskkill /F` leaves its `<pid>.<64hex>.key` behind, orphaned, for a pid that no longer exists —
+and pids get reused. Dialling on the strength of the file existing would eventually mean dialling a
+pipe whose name has been handed to a different session.
+
+Claude Code models this itself: its own lookup takes `requireLiveOwner` and answers `dead-owner`
+when the owning pid is gone or its `procStart` no longer matches, and it sweeps stale key files.
+The agent does the same check **before it connects to anything**:
+
+- the pid must be a live session process whose recorded start time matches, via the same
+  `sessions.Alive` gate the host report already keeps a session on;
+- the key's own `procStartFt` (and `procStart`, when present) must match that live pid too — this
+  is the check that catches the orphan;
+- the key's `pidDomain` must agree with the session file's when both carry one, since the same
+  process wrote both.
+
+This host's own pid domain is **not** reconstructed: its format (`win32:<hostname>`) would be a
+guess, and a guessed check is worse than a stated gap. `TestInboxRenameRefusesADeadOwnerWithoutDialling`
+asserts every one of these refuses *without dialling*.
+
+#### What the inbox cannot do — proven absent, not merely unproven
+
+- **It cannot enable Remote Control.** `onEnableRemoteControl` is **dead code**: its setter has
+  exactly one occurrence in the whole binary — its own definition — and the dispatcher never reads
+  the field. Live, `action:"enable_remote_control"` logs
+  `[uds-messaging] Unhandled control action: enable_remote_control`. The
+  `uds_enable_remote_control` telemetry string exists in the binary **with no reachable call
+  site**, so spike 1's inference from it ("enabling RC over this socket is a real, instrumented
+  path") does not hold for 2.1.318 and has been removed from this runbook. The inbox answers
+  `no-mechanism`, and `relaunch` behind it still gives the operator the command that works.
+- **It cannot run a slash command.** See the deliberate absence under
+  [Mechanisms](#mechanisms-and-what-each-command-actually-uses).
+- **It cannot stop a session.** Nothing can; see
+  [The restart action](#the-restart-action-copy-only-by-decision).
+
+#### Transport: no dependency was added
+
+A Windows named pipe is not reachable through `net.Dial`, and this program takes **no dependency**
+to reach one — `go-winio` was considered and not added. It is not needed: a pipe client is opened
+with `CreateFile` exactly as a file is, and `os.OpenFile` *is* `CreateFile`. Verified by hand on
+2026-11-05 on go1.27.3 windows/amd64 against a real named-pipe server: open, both NDJSON lines in
+one write, close, and the server read both lines intact.
+
+There is **no unit test for `dialInbox` on Windows**, because what the standard library lacks is
+the ability to *serve* a named pipe, not to dial one. What is tested instead:
+
+- the path shape, exhaustively — `dialInbox` matches the whole path against
+  `^\\\\\.\\pipe\\LOCAL\\cc-msg-[0-9a-f]{32}$` and refuses anything else before touching the
+  filesystem, because the path arrives out of a file on disk
+  (`TestWindowsDialRefusesAnythingThatIsNotASessionPipe`);
+- the frames, over a **real socket** with a **fake** inbox server that reimplements the three
+  dispatcher rules (auth first, token checked, `session_id` interlock) — `inbox_socket_test.go`.
+  It uses a unix socket because the standard library can listen on one on every platform this
+  program builds for, Windows included.
+
+Off Windows the path is a unix socket and the dial is `net.DialTimeout("unix", …)`. **The Linux
+socket path shape is unverified** — the spike only ever saw Windows sessions publish one — so the
+only checks made there are the ones that hold for any unix socket: an absolute path, and a base
+name beginning `cc-msg-`.
+
+Nothing in this path logs the name, the identity or the token. The token never leaves the frame
+buffer: it is not logged, not put in a hint, not wrapped into an error and not returned to the hub
+(`TestInboxNeverLeaksThePeerToken`).
+
+### The order "Fix name" tries, and why
+
+Non-destructive first. The relaunch is last, and it is the only step that costs the person in that
+terminal anything.
+
+**Step 0 — precondition, free.** Read the target's `sessions/<pid>.json`. No `bridgeSessionId`
+means no bridge to retitle, so skip to step 3 and say so (`unsupported-no-bridge`). Prove the key's
+owner is the live pid in the same pass; nothing is dialled before that holds.
+
+**Step 1 — the inbox rename.** Auth line from that session's own key file, then the rename frame
+with that session's own `session_id`. Reachable status: **`delivered`**. Cost if it silently fails:
+nothing. No process is touched, no user turn is added, no API call is made.
+
+**Step 2 — re-read and report; do not re-send.** Check `name`, only `name`, briefly. Changed means
+the handler ran. Unchanged is reported plainly (`unsupported-inbox-no-change`) rather than retried.
+
+**Step 3 — relaunch, behind the confirm that names the sessions.** The only thing that both
+re-binds the bridge and sets the title, and the only option with no bridge bound.
+
+**Deliberately not in the order:** enqueueing slash-command text (it does not run the command, and
+it injects a visible user turn and an API call into somebody's conversation — strictly worse than
+`hook-queue`); an inbox "enable remote control" (no such action exists); and toggling
+`/remote-control` off and on to "re-latch" (it mints a new `bridgeSessionId`, so it would appear
+remotely as a new session, and it is untested).
 
 ## The restart action: copy-only by decision
 
@@ -215,10 +394,12 @@ this whole feature is built to avoid.
 Both are recorded elsewhere in this runbook and repeated here because the restart action is where
 they bite:
 
-- **A remote-control bridge's title is latched once, when the bridge binds.** `/rename` does not
-  re-latch it (spike E), which is why a rename of a running session can only ever answer with a
-  relaunch, and why the relaunch command carries the name. See
-  [relaunch](#relaunch--reports-the-command-changes-nothing).
+- **A rename of a running session needs a bridge bound to it.** The title push returns early
+  without a `bridgeSessionId`, so a session with no bridge cannot be given a remote title by any
+  channel — a relaunch is the only answer, and that is why the relaunch command carries the name.
+  (A bridge-bound session is a different case: see
+  [inbox](#inbox--the-rename-mechanism-off-by-default).) The title is **not** latched at bind; see
+  [What spike 2 corrected](#what-spike-2-corrected).
 - **What a credential swap does to an already-connected bridge is UNPROVEN.** Whether rewriting
   `claudeAiOauth` under a session with a live bridge tears the bridge down, keeps the old account's
   connection, or reconnects as the new account has never been tested; it needs a logged-in
@@ -341,13 +522,15 @@ control that raised it. After an ask the poll speeds up to 3 seconds for a minut
    `reload_plugins` instruction and returns two honest `unsupported-requires-restart` answers with
    the relaunch command.
 3. The relaunch command is the one that actually fixes the session: it comes back with the new
-   login, with Remote Control bound and with its name latched. The queued `reload_plugins` is a
-   convenience for a session the operator is not restarting yet.
+   login, with Remote Control bound and with its name given at bind. The queued `reload_plugins`
+   is a convenience for a session the operator is not restarting yet.
 4. The hub forgets a session's needs-reload flag when the session ends, so a relaunched session
    stops being listed.
 
-A `rename_remote` on its own is worth asking for only to record the intent: it always comes back
-`unsupported`, because the bridge title cannot be changed after bind.
+A `rename_remote` on its own is worth asking for. With the inbox flag off it comes back
+`unsupported` with the relaunch command, which records the intent and hands over the fix. With the
+flag on, a bridge-bound session can be renamed where it stands, reaching `delivered` with no
+restart and no API turn — which is the cheap half of what a relaunch would have given.
 
 ## Installing and removing the hook
 
@@ -417,15 +600,82 @@ Do not run `agent hooks install` against a real `~/.claude` while testing. The t
 - **Credentials.** Nothing in this path reads, writes or carries a credential block. A command
   never touches `.credentials.json`.
 
+## What spike 2 corrected
+
+Three claims in earlier versions of this runbook were wrong for 2.1.318. They are recorded here
+rather than quietly deleted, because the next person to read the bundle will meet the same code and
+needs to know which reading won.
+
+**1. "The remote-visible title is latched once when the bridge binds; `/rename` does not re-latch
+it."** Stated in three places. **Wrong.** Every non-`auto` rename runs `Jvn` → `gJo` →
+`bridge.titleWriter.update(bridgeSessionId, name)`. The `Tk` gate that can stop it keys on
+**transcript/history suppression**, not on bridge presence, so an ordinary host-started session
+with a bridge bound pushes the new title. All three statements are rewritten.
+
+Spike 1's **finding E** is not deleted, because it is a real finding read in the **opposite
+direction**. `Cdn()` builds a `{subtype:"rename_session", title}` *control_request* and `_dn` logs
+`tengu_device_bind_title_latched` / `[deviceBind] rename_session after bound create failed`. That
+is the **bridge naming the host at bound-create** — remote to host, once, at bind. It is not a
+latch that blocks later **host to bridge** pushes. The telemetry string carrying the word "latched"
+is what made the direction easy to invert.
+
+**2. "The telemetry event `uds_enable_remote_control` proves that enabling Remote Control over the
+inbox is a real, instrumented path."** **Wrong.** The string exists in the binary; the call site
+does not. `onEnableRemoteControl`'s setter has one whole-binary occurrence — its own definition —
+and the dispatcher never reads the field. A session asked for the action logs
+`Unhandled control action: enable_remote_control`. A telemetry string is evidence that somebody
+once planned a path, not that one exists. The claim is removed, and the UI no longer implies a
+mechanism.
+
+**3. The inbox's open TODO list** — "the framing (length-prefixed or newline-delimited), which
+field selects `onEnqueue` versus `onRename` versus `onEnableRemoteControl`, how the published key
+becomes an authentication value, whether the GrowthBook gate is even on for this account" — is
+**answered**, with one correction: there is no field that selects `onEnableRemoteControl`, because
+nothing can select it. The gate is **on** on this machine; the throwaway's inbox bound without
+coaxing.
+
+One thing spike 1 got right and spike 2 narrowed: the accepted surface. It is `type:"user"` plus
+`type:"control"` with one of seven `action` values. `notification` and `in_process_teammate`, named
+in spike 1, are **not** handled — they fall through to
+`Received unhandled message type: notification`.
+
 ## Not verified
 
-- No live canary. No running, logged-in session was asked to do any of this and watched. The
-  statuses reflect what the mechanisms can honestly claim, not an observed outcome.
+- **Whether the bridge title on claude.ai actually changes.** This is the one that matters most and
+  it is **not** verified here. What is proven is the code path (`onRename` → `Jvn` → `gJo` →
+  `titleWriter.update`) and that the frame is accepted and dispatched by a live session. The step
+  from `titleWriter.update` to a changed title on claude.ai rests on reading the bundle. A separate
+  spike is testing it live. Until that lands, nothing in the UI or the docs may say the remote
+  title changed — which is also why the ceiling is `delivered`, and why the status would stay
+  `delivered` even if the push were observable, since `.catch(()=>{})` discards it.
+- Whether `Tk`'s `noHistoryBackfill` disjunct suppresses the push for sessions **created from
+  claude.ai**, as opposed to started in a terminal and then bridged. The bridge is constructed with
+  `noHistoryBackfill: j && Oe?.uncertaintyOnly !== true`, which is set for remote-created sessions,
+  so this is a real possibility and not a theoretical one.
+- **A possible revert race.** `fqe` registers a `[jobStateNameSync]` watcher alongside the rename
+  handler. It watches the job's `state.json` and re-applies the name it finds there. If job state
+  still holds the old name, that watcher may re-apply it *after* a peer rename lands. One extra
+  observation in the same logged-in run, not a separate test.
+- `dialInbox` on Windows has no unit test; the standard library cannot serve a named pipe. The
+  shape check and the frames are tested, and the open was proven by hand — see
+  [Transport](#transport-no-dependency-was-added).
+- The **Linux** inbox socket path shape, and the Linux transport end to end. No Linux session was
+  observed publishing one.
+- Which `entrypoint` values construct the interactive class that registers `onRename`. `cli` does
+  and `sdk-cli` does not (a print-mode session left the handler null, which is why the throwaway's
+  own name never changed). Anything else is **unknown**; treat `entrypoint` as three-valued, attempt
+  the rename and report what the session file shows, rather than refusing up front.
+- The `/remote-control` toggle, entirely. Driving it needs an interactive signed-in session. Note
+  that a disconnect/reconnect mints a **new** `bridgeSessionId`, so it is a re-bind, not a
+  re-latch: anything watching the old bridge session would see a new entry rather than a renamed
+  one.
+- No live canary against a session holding real work. No running, logged-in session of Matthew's
+  was asked to do any of this and watched. The statuses reflect what the mechanisms can honestly
+  claim, not an observed outcome on his sessions.
 - Whether a hook's `additionalContext` reliably gets a model to run `/reload-plugins`. The
   instruction is delivered; compliance is the model's.
 - Whether the installed hook entries fire exactly as expected in a real session. The entry shape,
   the marker, the backup and the idempotence are covered by tests; the firing is not.
-- The inbox wire frame, end to end — see the mechanism section above.
 - Whether rewriting `claudeAiOauth` under a session with an already-connected bridge tears the
   bridge down, keeps the old account's connection, or reconnects as the new account. Needs a
   logged-in two-account test. **Treat the effect of a swap on a live bridge as unknown**; the
