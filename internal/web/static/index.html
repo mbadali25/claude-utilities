@@ -519,7 +519,8 @@
     <div class="row wrap">
       <button type="button" class="btn primary" id="ctl-repair-go">Apply to all needs-reload sessions</button>
       <button type="button" class="btn" id="ctl-restart-all">Restart sessions</button>
-      <span class="sub">Asks each one to reload plugins and reports the restart it still needs. Nothing is killed.</span>
+      <span class="sub">Apply asks each one to reload its plugins and reports the restart it still
+        needs; Restart names the sessions and hands over the commands. Neither kills anything.</span>
     </div>
   </div>
   <p class="panel-meta count" id="host-count"></p>
@@ -1439,8 +1440,12 @@
   // Sessions marked restarted in THIS BROWSER only. It is a note, never a claim: the hub forgets
   // a session's needs-reload flag when the session ends, and nothing here may assert that for it.
   var restartedLocal = {};
-  function sessKey(h, s) { return h.hostId + '|' + s.pid + ':' + (s.id || ''); }
-  function restartMarked(h, s) { return !!restartedLocal[sessKey(h, s)]; }
+  // NOT sessKey: that name is already taken by the per-host disclosure preference above, and a
+  // second declaration of it in this scope silently replaced it, so every host card threw.
+  // The pid is in the key as well as the id, because a session can report an empty id and two of
+  // those on one host would otherwise share a mark (the hub keys its own buckets the same way).
+  function restartKey(h, s) { return h.hostId + '|' + s.pid + ':' + (s.id || ''); }
+  function restartMarked(h, s) { return !!restartedLocal[restartKey(h, s)]; }
 
   // restartTargets collects what one restart ask would reach, in the order the page shows them.
   // stale:true is the estate-wide ask (every host, needs-reload only); a hostId is one host.
@@ -1498,7 +1503,7 @@
   // no server state changes, and the session keeps being listed until it really ends. Saying so
   // on the control is the whole point - a silent dismissal would read as a restart.
   function markRestartedLocally(targets) {
-    targets.forEach(function (t) { restartedLocal[sessKey(t.host, t.sess)] = true; });
+    targets.forEach(function (t) { restartedLocal[restartKey(t.host, t.sess)] = true; });
     renderRepair(); renderHosts();
   }
   $('#ctl-restart-mark').addEventListener('click', function () {
@@ -1859,7 +1864,7 @@
       // Only what the operator must act on gets a chip of its own; everything else collapses to
       // one neutral tally, or a shut disclosure wears seven chips and says nothing.
       if (cst.failed) sm.appendChild(chip(cst.failed + ' failed', 'bad', 'bad'));
-      if (cst.unsupported) sm.appendChild(chip(cst.unsupported + ' need a restart', 'warn', 'warn'));
+      if (cst.unsupported) sm.appendChild(chip(cst.unsupported + ' unsupported', 'warn', 'warn'));
       var sent = (cst.queued || 0) + (cst.delivered || 0) + (cst.done || 0);
       if (sent) sm.appendChild(chip(sent + (sent === 1 ? ' ask sent' : ' asks sent'), '', 'info'));
       d.appendChild(sm);

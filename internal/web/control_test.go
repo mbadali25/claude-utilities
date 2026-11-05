@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -339,6 +340,31 @@ func TestRestartConfirmDialogListsTheSessionsItWouldRestart(t *testing.T) {
 	for _, bad := range []string{"'terminate'", "'kill'", "confirmToken", "confirm_token"} {
 		if strings.Contains(p, bad) {
 			t.Errorf("index.html carries %q: the restart action is copy-only", bad)
+		}
+	}
+}
+
+// A second `function sessKey` in the page's one scope silently replaced the per-host disclosure
+// key, and every host card threw on the first render - a whole tab blank, with nothing in the Go
+// tests or the linter to catch it. Nothing in this page may declare the same top-level function
+// name twice.
+func TestPageDeclaresNoFunctionNameTwice(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+
+	// Exactly two spaces of indent is the page's one shared scope, the body of its IIFE. A helper
+	// nested inside another function is indented further and has a scope of its own, so two of
+	// those may share a name (`mk` does) without replacing anything.
+	seen := map[string]int{}
+	for _, m := range regexp.MustCompile(`(?m)^  function ([A-Za-z_$][\w$]*)\s*\(`).FindAllStringSubmatch(p, -1) {
+		seen[m[1]]++
+	}
+	if len(seen) < 20 {
+		t.Fatalf("only %d function declarations found; the pattern no longer matches the page", len(seen))
+	}
+	for name, n := range seen {
+		if n > 1 {
+			t.Errorf("function %s is declared %d times; the later one replaces the earlier", name, n)
 		}
 	}
 }
