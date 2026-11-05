@@ -133,7 +133,8 @@ func windowsUser() (string, error) {
 type runner func(name string, args ...string) ([]byte, error)
 
 func execRunner(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).CombinedOutput()
+	cmd := exec.Command(name, args...) // #nosec G204 -- name/args come from fixed callers (icacls, schtasks), never user input
+	return cmd.CombinedOutput()
 }
 
 // Install registers the agent for the current user.
@@ -160,7 +161,7 @@ func installFor(goos, exe, stateDir string, run runner, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "wrote %s\nnext: systemctl --user daemon-reload && systemctl --user enable --now %s\nto keep it running when logged out: loginctl enable-linger $USER\n", path, unitName)
+	_, _ = fmt.Fprintf(out, "wrote %s\nnext: systemctl --user daemon-reload && systemctl --user enable --now %s\nto keep it running when logged out: loginctl enable-linger $USER\n", path, unitName)
 	return nil
 }
 
@@ -186,7 +187,7 @@ func installTask(exe, stateDir string, run runner, out io.Writer) error {
 	if o, err := run("schtasks", SchtasksCreateArgs(exe, user)...); err != nil {
 		return fmt.Errorf("install: schtasks: %w: %s", err, strings.TrimSpace(string(o)))
 	}
-	fmt.Fprintf(out, "registered scheduled task %s (starts at next logon)\nstart it now: schtasks /Run /TN %s\n", taskName, taskName)
+	_, _ = fmt.Fprintf(out, "registered scheduled task %s (starts at next logon)\nstart it now: schtasks /Run /TN %s\n", taskName, taskName)
 	return nil
 }
 
@@ -195,11 +196,11 @@ func installUnit(home, exe, stateDir string) (string, error) {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return "", fmt.Errorf("install: state dir: %w", err)
 	}
-	if err := os.Chmod(stateDir, 0o700); err != nil {
+	if err := os.Chmod(stateDir, 0o700); err != nil { // #nosec G302 -- directory needs the owner execute bit; 0o700 is owner-only
 		return "", fmt.Errorf("install: state dir mode: %w", err)
 	}
 	dir := filepath.Join(home, ".config", "systemd", "user")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", fmt.Errorf("install: unit dir: %w", err)
 	}
 	path := filepath.Join(dir, unitName)
@@ -207,19 +208,19 @@ func installUnit(home, exe, stateDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("install: write unit: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.WriteString(RenderSystemdUserUnit(exe, stateDir)); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return "", fmt.Errorf("install: write unit: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return "", fmt.Errorf("install: write unit: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		return "", fmt.Errorf("install: write unit: %w", err)
 	}
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
 		return "", fmt.Errorf("install: write unit: %w", err)
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {

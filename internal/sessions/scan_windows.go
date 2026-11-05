@@ -5,6 +5,7 @@ package sessions
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -31,11 +32,14 @@ func processAlive(pid int, procStart string) bool {
 	if err != nil {
 		return false
 	}
+	if pid <= 0 || int64(pid) > math.MaxUint32 {
+		return false
+	}
 	h, err := syscall.OpenProcess(syscall.PROCESS_QUERY_INFORMATION, false, uint32(pid))
 	if err != nil {
 		return false
 	}
-	defer syscall.CloseHandle(h)
+	defer func() { _ = syscall.CloseHandle(h) }()
 	var creation, exit, kernel, user syscall.Filetime
 	if err := syscall.GetProcessTimes(h, &creation, &exit, &kernel, &user); err != nil {
 		return false

@@ -175,7 +175,7 @@ func findOAuth(entries []entry) (json.RawMessage, bool) {
 
 // ReadBlock returns the raw claudeAiOauth value, or ErrNoBlock if absent.
 func ReadBlock(path string) (json.RawMessage, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return nil, fmt.Errorf("credfile: read: %w", err)
 	}
@@ -250,17 +250,17 @@ func acquire(path string) (release func(), err error) {
 	lock := path + lockSuffix
 	token := newToken()
 	for attempt := 0; attempt < 3; attempt++ {
-		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		f, err := os.OpenFile(filepath.Clean(lock), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			_, werr := f.WriteString(token)
 			cerr := f.Close()
 			if e := errors.Join(werr, cerr); e != nil {
-				os.Remove(lock)
+				removeQuiet(lock)
 				return nil, fmt.Errorf("credfile: lock: %w", e)
 			}
 			return func() {
-				if data, rerr := os.ReadFile(lock); rerr == nil && string(data) == token {
-					os.Remove(lock)
+				if data, rerr := os.ReadFile(filepath.Clean(lock)); rerr == nil && string(data) == token {
+					removeQuiet(lock)
 				}
 			}, nil
 		}
@@ -285,25 +285,25 @@ func acquire(path string) (release func(), err error) {
 // when another reclaimer holds the guard.
 func reclaimStale(lock string) bool {
 	guard := lock + reclaimSuffix
-	g, err := os.OpenFile(guard, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	g, err := os.OpenFile(filepath.Clean(guard), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		// A guard left by a crashed reclaimer would block forever: age it out.
 		if st, serr := os.Stat(guard); serr == nil && time.Since(st.ModTime()) >= staleLockAge {
-			os.Remove(guard)
+			removeQuiet(guard)
 		}
 		return false
 	}
-	g.Close()
-	defer os.Remove(guard)
+	_ = g.Close()
+	defer removeQuiet(guard)
 	// Re-check under the guard: the lock may have been replaced by a fresh one.
 	if st, serr := os.Stat(lock); serr == nil && time.Since(st.ModTime()) >= staleLockAge {
-		os.Remove(lock)
+		removeQuiet(lock)
 	}
 	return true
 }
 
 func hashFile(path string) ([sha256.Size]byte, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Clean(path))
 	if errors.Is(err, os.ErrNotExist) {
 		return sha256.Sum256(nil), nil
 	}
@@ -376,7 +376,7 @@ func Restore(path, backup string) error {
 	if st, lerr := os.Lstat(ba); lerr != nil || !st.Mode().IsRegular() {
 		return errors.New("credfile: backup is not a regular file")
 	}
-	data, err := os.ReadFile(ba)
+	data, err := os.ReadFile(filepath.Clean(ba))
 	if err != nil {
 		return fmt.Errorf("credfile: read backup: %w", err)
 	}
@@ -410,6 +410,10 @@ func requireRealDir(dir string) error {
 	return nil
 }
 
+// removeQuiet deletes a file on a best-effort cleanup path: the caller is already
+// returning its own error or the file is optional, so a failed delete is not actionable.
+func removeQuiet(p string) { _ = os.Remove(p) }
+
 // removeStaleTemps deletes leftover temp files (they may hold live tokens) from
 // a crash between writeTemp and rename. Called under the swap lock; only temps
 // older than staleLockAge go, so a concurrent writer is never affected.
@@ -417,7 +421,7 @@ func removeStaleTemps(dir string) {
 	matches, _ := filepath.Glob(filepath.Join(dir, tempPattern))
 	for _, m := range matches {
 		if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() && time.Since(st.ModTime()) >= staleLockAge {
-			os.Remove(m)
+			removeQuiet(m)
 		}
 	}
 }
@@ -434,7 +438,7 @@ func swap(path string, block json.RawMessage, withBackup bool) (backup string, e
 	defer release()
 	removeStaleTemps(filepath.Dir(path))
 
-	original, err := os.ReadFile(path)
+	original, err := os.ReadFile(filepath.Clean(path))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("credfile: read: %w", err)
 	}
@@ -456,7 +460,7 @@ func swap(path string, block json.RawMessage, withBackup bool) (backup string, e
 	// failed attempts do not evict real history from the capped set.
 	abort := func(e error) (string, error) {
 		if backup != "" {
-			os.Remove(backup)
+			removeQuiet(backup)
 		}
 		return "", e
 	}
@@ -472,15 +476,15 @@ func swap(path string, block json.RawMessage, withBackup bool) (backup string, e
 	beforeRenameFn()
 	after, herr := hashFile(path)
 	if herr != nil {
-		os.Remove(tmp)
+		removeQuiet(tmp)
 		return abort(fmt.Errorf("credfile: re-read: %w", herr))
 	}
 	if after != before {
-		os.Remove(tmp)
+		removeQuiet(tmp)
 		return abort(ErrChangedDuringSwap)
 	}
 	if err := renameFn(tmp, path); err != nil {
-		os.Remove(tmp)
+		removeQuiet(tmp)
 		return backup, fmt.Errorf("credfile: rename: %w", err)
 	}
 	syncDir(filepath.Dir(path))
@@ -495,13 +499,13 @@ func writeTemp(dir string, data []byte, mode os.FileMode) (string, error) {
 	name := f.Name()
 	// Lock the ACL down before any token bytes are written (Windows).
 	if err := restrictACL(name, false); err != nil {
-		f.Close()
-		os.Remove(name)
+		_ = f.Close()
+		removeQuiet(name)
 		return "", err
 	}
 	fail := func(e error) (string, error) {
-		f.Close()
-		os.Remove(name)
+		_ = f.Close()
+		removeQuiet(name)
 		return "", fmt.Errorf("credfile: write temp: %w", e)
 	}
 	if _, err := f.Write(data); err != nil {
@@ -514,7 +518,7 @@ func writeTemp(dir string, data []byte, mode os.FileMode) (string, error) {
 		return fail(err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(name)
+		removeQuiet(name)
 		return "", fmt.Errorf("credfile: close temp: %w", err)
 	}
 	return name, nil
@@ -534,7 +538,7 @@ func writeBackup(dir string, prev json.RawMessage) (string, error) {
 	}
 	// MkdirAll does not tighten a pre-existing directory; backups hold old refresh tokens.
 	if !isWindows {
-		if err := os.Chmod(bdir, 0o700); err != nil {
+		if err := os.Chmod(bdir, 0o700); err != nil { // #nosec G302 -- directory needs the owner execute bit; 0o700 is owner-only
 			return "", fmt.Errorf("credfile: backup dir mode: %w", err)
 		}
 	}
@@ -545,13 +549,13 @@ func writeBackup(dir string, prev json.RawMessage) (string, error) {
 	created := false
 	name := filepath.Join(bdir, nowFn().UTC().Format(backupStamp)+backupExt)
 	for i := 1; i <= maxBackupCollisions; i++ {
-		f, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		f, err := os.OpenFile(filepath.Clean(name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			_, werr := f.Write(data)
 			serr := f.Sync()
 			cerr := f.Close()
 			if err := errors.Join(werr, serr, cerr); err != nil {
-				os.Remove(name)
+				removeQuiet(name)
 				return "", fmt.Errorf("credfile: write backup: %w", err)
 			}
 			created = true
@@ -590,7 +594,7 @@ func pruneBackups(bdir, keep string) {
 		if names[0] == keep {
 			i = 1
 		}
-		os.Remove(filepath.Join(bdir, names[i]))
+		removeQuiet(filepath.Join(bdir, names[i]))
 		names = append(names[:i], names[i+1:]...)
 	}
 }

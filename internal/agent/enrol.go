@@ -104,7 +104,7 @@ func enrol(ctx context.Context, o enrolOpts, serverURL, pin, code string, out io
 	if err != nil {
 		return Config{}, err
 	}
-	defer ws.CloseNow()
+	defer func() { _ = ws.CloseNow() }()
 	rctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -144,7 +144,7 @@ func enrol(ctx context.Context, o enrolOpts, serverURL, pin, code string, out io
 		case <-ctx.Done():
 			return Config{}, ctx.Err()
 		case <-timeout:
-			fmt.Fprintln(out, "Enrolment timed out: no one approved this host within 10 minutes.")
+			_, _ = fmt.Fprintln(out, "Enrolment timed out: no one approved this host within 10 minutes.")
 			log.Warn("enrolment timed out", "action", "enrol", "result", "timeout")
 			return Config{}, ErrApprovalTimeout
 		case f := <-frames:
@@ -160,8 +160,8 @@ func enrol(ctx context.Context, o enrolOpts, serverURL, pin, code string, out io
 				if p.Fingerprint != fp {
 					return Config{}, ErrFingerprintMismatch
 				}
-				fmt.Fprintf(out, "Fingerprint: %s\n", fp)
-				fmt.Fprintf(out, "Match it, then approve this host in the web UI (expires %s).\n", p.ExpiresAt.Local().Format(time.RFC3339))
+				_, _ = fmt.Fprintf(out, "Fingerprint: %s\n", fp)
+				_, _ = fmt.Fprintf(out, "Match it, then approve this host in the web UI (expires %s).\n", p.ExpiresAt.Local().Format(time.RFC3339))
 				log.Info("waiting for approval", "action", "enrol", "result", "pending", "fingerprint", fp)
 			case proto.TypeApproved:
 				var ap proto.Approved
@@ -173,7 +173,7 @@ func enrol(ctx context.Context, o enrolOpts, serverURL, pin, code string, out io
 					return Config{}, err
 				}
 				_ = os.Remove(deniedPath(o))
-				fmt.Fprintln(out, "Enrolled. Start the agent with: agent run")
+				_, _ = fmt.Fprintln(out, "Enrolled. Start the agent with: agent run")
 				log.Info("enrolled", "action", "enrol", "result", "approved")
 				return cfg, nil
 			case proto.TypeDenied:
@@ -224,7 +224,7 @@ func denied(o enrolOpts, log *slog.Logger, out io.Writer, d proto.Denied, target
 	if reason == "" {
 		reason = "no reason given"
 	}
-	fmt.Fprintf(out, "Denied: %s\n", reason)
+	_, _ = fmt.Fprintf(out, "Denied: %s\n", reason)
 	log.Warn("enrolment denied", "action", "enrol", "result", "denied", "reason", reason)
 	if d.RetryAfter > 0 {
 		wait := min(d.RetryAfter, maxRetryAfter)
@@ -236,7 +236,7 @@ func denied(o enrolOpts, log *slog.Logger, out io.Writer, d proto.Denied, target
 				}
 			}
 		}
-		fmt.Fprintf(out, "Do not retry for %s.\n", wait.Round(time.Second))
+		_, _ = fmt.Fprintf(out, "Do not retry for %s.\n", wait.Round(time.Second))
 	}
 	return fmt.Errorf("%w: %s", ErrDenied, reason)
 }

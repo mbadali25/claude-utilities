@@ -88,7 +88,7 @@ func scanDir(dir string, alive func(pid int, procStart string) bool) ([]proto.Se
 		if e.IsDir() || !strings.HasSuffix(name, ".json") || strings.Count(name, ".") != 1 {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(dir, name))
+		raw, err := os.ReadFile(filepath.Clean(filepath.Join(dir, name)))
 		if err != nil {
 			continue
 		}

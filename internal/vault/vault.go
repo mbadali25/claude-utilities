@@ -72,7 +72,7 @@ func Open(path, keyEnv string) (*Vault, error) {
 	if pass == "" {
 		return nil, fmt.Errorf("%w: set environment variable %s", ErrNoKey, keyEnv)
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("vault: read: %w", err)
 	}
@@ -224,8 +224,8 @@ func (v *Vault) save() error {
 	}
 	name := tmp.Name()
 	fail := func(err error) error {
-		tmp.Close()
-		os.Remove(name)
+		_ = tmp.Close()
+		removeQuiet(name)
 		return fmt.Errorf("vault: write: %w", err)
 	}
 	if err := tmp.Chmod(0o600); err != nil && !isWindowsChmodQuirk(err) {
@@ -242,16 +242,20 @@ func (v *Vault) save() error {
 		return fail(err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(name)
+		removeQuiet(name)
 		return fmt.Errorf("vault: close: %w", err)
 	}
 	if err := renameFn(name, v.path); err != nil {
-		os.Remove(name)
+		removeQuiet(name)
 		return fmt.Errorf("vault: rename: %w", err)
 	}
 	credfile.SyncDir(dir)
 	return nil
 }
+
+// removeQuiet deletes a temp file on a failure path that already returns its own
+// error, so a failed delete is not actionable.
+func removeQuiet(p string) { _ = os.Remove(p) }
 
 // isWindowsChmodQuirk tolerates Chmod being unsupported on a platform.
 func isWindowsChmodQuirk(err error) bool { return errors.Is(err, errors.ErrUnsupported) }

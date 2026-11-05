@@ -3,7 +3,6 @@
 package vault
 
 import (
-	"fmt"
 	"os/exec"
 	"os/user"
 	"path/filepath"
@@ -32,7 +31,7 @@ func TestVaultFileOwnerOnlyACL(t *testing.T) {
 		}
 		n++
 		if !strings.Contains(l, u.Username) && !strings.Contains(l, u.Uid) {
-			t.Fatal(fmt.Sprintf("non-owner ACE: %s", strings.TrimSpace(l)))
+			t.Fatalf("non-owner ACE: %s", strings.TrimSpace(l))
 		}
 	}
 	if n != 1 {

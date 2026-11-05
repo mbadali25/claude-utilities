@@ -25,7 +25,7 @@ func restrictACL(path string, dir bool) error {
 	if dir {
 		grant = "*" + u.Uid + ":(OI)(CI)F"
 	}
-	if err := exec.Command("icacls", path, "/inheritance:r", "/grant:r", grant).Run(); err != nil {
+	if err := exec.Command("icacls", path, "/inheritance:r", "/grant:r", grant).Run(); err != nil { // #nosec G204 -- fixed binary; path is a file this package just created
 		return errors.New("credfile: set owner-only ACL failed")
 	}
 	return nil

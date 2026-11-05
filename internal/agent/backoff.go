@@ -24,6 +24,6 @@ func NextDelay(attempt int) time.Duration {
 	if attempt < 6 {
 		d = min(baseDelay<<uint(attempt), maxDelay)
 	}
-	f := jitterFloor + rand.Float64()*(1-jitterFloor)
+	f := jitterFloor + rand.Float64()*(1-jitterFloor) // #nosec G404 -- reconnect jitter, not a security value
 	return time.Duration(float64(d) * f)
 }

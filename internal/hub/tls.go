@@ -117,7 +117,7 @@ func writePrivate(path string, b []byte) (err error) {
 	if err = credfile.RestrictFile(tmp); err != nil {
 		return fmt.Errorf("hub: restrict %s: %w", base, err)
 	}
-	f, err = os.OpenFile(tmp, os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err = os.OpenFile(filepath.Clean(tmp), os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("hub: write %s: %w", base, err)
 	}
@@ -138,11 +138,11 @@ func writePrivate(path string, b []byte) (err error) {
 }
 
 func loadFingerprint(certFile, keyFile string) (string, bool) {
-	certPEM, err := os.ReadFile(certFile)
+	certPEM, err := os.ReadFile(filepath.Clean(certFile))
 	if err != nil {
 		return "", false
 	}
-	keyPEM, err := os.ReadFile(keyFile)
+	keyPEM, err := os.ReadFile(filepath.Clean(keyFile))
 	if err != nil {
 		return "", false
 	}

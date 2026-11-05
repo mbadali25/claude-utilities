@@ -95,7 +95,7 @@ func Fetch(ctx context.Context, d Doer, accessToken string) (Usage, error) {
 	if err != nil {
 		return Usage{}, errUnavailable // never wrap: transport text may echo headers
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
 		e := &RateLimitError{}

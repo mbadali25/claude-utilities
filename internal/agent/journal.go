@@ -115,7 +115,7 @@ func findBackup(credsPath, recorded, prevHash string) (string, bool) {
 		if err != nil || !st.Mode().IsRegular() {
 			return false
 		}
-		data, err := os.ReadFile(p)
+		data, err := os.ReadFile(filepath.Clean(p))
 		return err == nil && hashBlock(data) == prevHash
 	}
 	if recorded != "" && matches(recorded) {
@@ -161,7 +161,7 @@ func writePrivate(path string, b []byte) (err error) {
 	if err = credfile.RestrictFile(tmp); err != nil {
 		return fmt.Errorf("agent: restrict %s: %w", base, err)
 	}
-	f, err = os.OpenFile(tmp, os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err = os.OpenFile(filepath.Clean(tmp), os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("agent: write %s: %w", base, err)
 	}

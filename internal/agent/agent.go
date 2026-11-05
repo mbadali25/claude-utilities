@@ -11,7 +11,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -133,7 +132,7 @@ func SaveConfig(c Config) error {
 
 // LoadConfig reads <stateDir>/agent.json.
 func LoadConfig(stateDir string) (Config, error) {
-	data, err := os.ReadFile(filepath.Join(stateDir, configName))
+	data, err := os.ReadFile(filepath.Clean(filepath.Join(stateDir, configName)))
 	if err != nil {
 		return Config{}, fmt.Errorf("agent: read config: %w", err)
 	}
@@ -172,13 +171,13 @@ func dialPinned(ctx context.Context, serverURL, pin string) (*websocket.Conn, er
 	}
 	cfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
-		// The pin replaces chain verification; VerifyPeerCertificate below is mandatory.
+		// The pin replaces chain verification; VerifyConnection below is mandatory (it also runs on resumed sessions).
 		InsecureSkipVerify: true, //nolint:gosec
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if len(raw) == 0 {
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
 				return ErrPinMismatch
 			}
-			sum := sha256.Sum256(raw[0])
+			sum := sha256.Sum256(cs.PeerCertificates[0].Raw)
 			if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(want)) != 1 {
 				return ErrPinMismatch
 			}
@@ -308,7 +307,7 @@ func (a *agent) session(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer ws.CloseNow()
+	defer func() { _ = ws.CloseNow() }()
 	s := &sess{ws: ws}
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -553,7 +552,7 @@ func readIdentity(path string) string {
 	if path == "" {
 		return ""
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return ""
 	}
