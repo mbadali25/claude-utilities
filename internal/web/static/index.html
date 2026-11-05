@@ -437,6 +437,9 @@
   <!-- Cards start closed, so this row carries the two ways to see more: open them, or ask the
        usage endpoint for fresher numbers. The poll is rate limited on the server; a refused
        account says so on its own card. -->
+  <!-- The tab names this panel on screen; the heading is for the outline, so the ten cards' own
+       headings hang off a section heading rather than straight off the page title. -->
+  <h2 class="sr" id="acc-panel-h">Accounts</h2>
   <div class="acc-tools">
     <button type="button" class="btn sm" id="acc-expand-all">Expand all</button>
     <button type="button" class="btn sm" id="acc-collapse-all">Collapse all</button>
@@ -957,13 +960,15 @@
   }
   // One sentence for the live region, and one line on the cards that have something to say. A
   // refused poll is the only outcome a card's own data cannot show, so it says so on the card.
+  // The note carries no countdown: it outlives the wait it would name - the card is re-rendered
+  // every 30s and nothing resets the figure - and a frozen "try again in 14s" is worse than no
+  // figure at all. An unknown id gets no note, because it has no card to put one on.
   function report(rows) {
     var n = {};
     rows.forEach(function (r) {
       n[r.status] = (n[r.status] || 0) + 1;
-      if (r.status === 'rate_limited') notes[r.id] = { text: 'Polled too recently; try again in ' + (r.retryAfterSec || 1) + 's.' };
+      if (r.status === 'rate_limited') notes[r.id] = { text: 'Polled too recently; try again shortly.' };
       else if (r.status === 'error') notes[r.id] = { text: 'The poll failed: ' + (r.error || 'unavailable') + '.', bad: true };
-      else if (r.status === 'unknown_id') notes[r.id] = { text: 'This account is no longer stored.', bad: true };
       else delete notes[r.id];
     });
     var parts = [];
@@ -1109,8 +1114,17 @@
     var shown = list.filter(matches);
     if (!shown.length) box.appendChild(el('p', 'No accounts match this filter.', 'empty'));
     shown.forEach(function (a) { box.appendChild(accountCard(a)); });
-    if (had) { var again = document.getElementById(had); if (again) again.focus(); }
+    // markBusy first: it disables the buttons of accounts mid-refresh, and focusing a disabled
+    // button drops the focus to the body. One mid-refresh falls back to its card's header.
     markBusy();
+    if (had) {
+      var again = document.getElementById(had);
+      if (again && again.disabled) {
+        var card = again.closest ? again.closest('.card.acct') : null;
+        again = card ? card.querySelector('.acct-dis') : null;
+      }
+      if (again) again.focus();
+    }
   }
 
   function loadAccounts() {

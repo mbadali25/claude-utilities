@@ -28,6 +28,8 @@ func TestAccountsPanelHasTheExpandCollapseAndRefreshControls(t *testing.T) {
 		`id="acc-expand-all"`, `id="acc-collapse-all"`, `id="acc-refresh-all"`,
 		`id="acc-refresh-status"`, `role="status"`, `aria-atomic="true"`,
 		`class="spin"`, `id="acc-count"`, `id="accounts"`,
+		// The cards' h3 headings need a section heading above them, not the page title.
+		`<h2 class="sr" id="acc-panel-h">Accounts</h2>`,
 	} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("accounts panel is missing %s", want)
@@ -86,7 +88,7 @@ func TestRefreshUIPostsToTheRefreshRouteAndReportsPerAccount(t *testing.T) {
 	p := page(r, r.login())
 	for _, want := range []string{
 		`call('POST', '/api/usage/refresh', { account: id || '' })`,
-		`'rate_limited'`, `'unknown_id'`, `retryAfterSec`,
+		`'rate_limited'`, `'unknown_id'`,
 		`b.setAttribute('aria-busy', 'true')`,
 		`'acct-note'`, `.acct-note.bad { color:var(--bad); }`,
 	} {
@@ -100,6 +102,11 @@ func TestRefreshUIPostsToTheRefreshRouteAndReportsPerAccount(t *testing.T) {
 	}
 	if !strings.Contains(p, `'Refreshing all...'`) || !strings.Contains(p, `'Refreshing...'`) {
 		t.Fatal("a busy control must say so in words")
+	}
+	// A card's note outlives the wait it would name - nothing re-renders it on a timer - so it
+	// must not carry the server's retryAfterSec as a countdown.
+	if strings.Contains(p, "try again in ' + ") {
+		t.Fatal("the refusal note must not name a wait that cannot tick down")
 	}
 }
 
