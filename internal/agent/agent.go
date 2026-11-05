@@ -244,7 +244,7 @@ func newAgent(c Config, log *slog.Logger) *agent {
 	lg := log.With("component", "agent")
 	a := &agent{
 		cfg: c, log: lg, hostName: name, heartbeat: HeartbeatInterval,
-		delay: NextDelay, identity: newIdentityProbe().run,
+		delay: delayFor(c.ServerURL), identity: newIdentityProbe().run,
 		identityEvery: identityRefresh, tick: realTicker, hup: hupSignal,
 		scan: sessions.Scan, readBack: credfile.ReadBlock,
 		replace: credfile.ReplaceWith,
@@ -258,7 +258,8 @@ func newAgent(c Config, log *slog.Logger) *agent {
 }
 
 // Run connects, reports and serves swap requests until ctx ends. It redials with NextDelay
-// backoff after any drop, and finishes or rolls back an interrupted swap first.
+// backoff after any drop - NextDelayLoopback when the server URL is loopback, since the dial then
+// fails locally and instantly - and finishes or rolls back an interrupted swap first.
 func Run(ctx context.Context, c Config) error {
 	if c.Token == "" {
 		return ErrNotEnrolled
