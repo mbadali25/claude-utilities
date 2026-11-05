@@ -180,13 +180,22 @@ func (v *Vault) Relabel(id, label string) error {
 	return nil
 }
 
-// Delete removes an account and persists. Deleting an unknown id is a no-op.
+// Delete removes an account and persists. It is the one call that destroys a stored login, so the
+// file's previous bytes are copied to vault.bin.bak first: the copy is the same sealed envelope, so
+// the same passphrase opens it, and an operator who deletes the wrong account can put it back.
+//
+// An unknown id is ErrNotFound and writes nothing - not the vault, not the backup - so a caller can
+// answer 404 without racing a pre-check against the store. A failed write leaves the account in
+// place; only the backup copy is then newer, which costs nothing.
 func (v *Vault) Delete(id string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	prev, ok := v.accounts[id]
 	if !ok {
-		return nil
+		return ErrNotFound
+	}
+	if err := v.file.backup(); err != nil {
+		return err
 	}
 	delete(v.accounts, id)
 	if err := v.save(); err != nil {

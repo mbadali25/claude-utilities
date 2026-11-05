@@ -80,6 +80,9 @@ func openSealed(path, magicStr, keyEnv string) (*sealed, []byte, error) {
 	return s, plain, nil
 }
 
+// bakSuffix names the one-deep recovery copy kept beside a sealed file before a destructive write.
+const bakSuffix = ".bak"
+
 // write seals plain with a fresh nonce and replaces the file atomically, owner-only.
 func (s *sealed) write(magicStr string, plain []byte) error {
 	nonce := make([]byte, nonceLen)
@@ -91,8 +94,31 @@ func (s *sealed) write(magicStr string, plain []byte) error {
 	buf.Write(header)
 	buf.Write(nonce)
 	buf.Write(s.aead.Seal(nil, nonce, plain, header))
+	return replaceFile(s.path, buf.Bytes())
+}
 
-	dir := filepath.Dir(s.path)
+// backup copies the file's current bytes to path+".bak" before a caller destroys them. It is the
+// same sealed envelope, header and all, so the same passphrase opens the copy; nothing is decrypted
+// here. A file that does not exist yet, or is empty, has nothing to preserve and is not an error.
+//
+// One generation deep on purpose: the point is to survive the delete the operator regrets on the
+// spot, not to be an archive. A second delete overwrites the copy.
+func (s *sealed) backup() error {
+	data, err := os.ReadFile(filepath.Clean(s.path))
+	if errors.Is(err, os.ErrNotExist) || len(data) == 0 {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("vault: backup read: %w", err)
+	}
+	return replaceFile(s.path+bakSuffix, data)
+}
+
+// replaceFile writes data to a temp file in dst's directory, owner-only, and renames it over dst.
+// Both the sealed write and the backup copy go through here, so the mode, the Windows ACL and the
+// directory sync cannot drift apart between them.
+func replaceFile(dst string, data []byte) error {
+	dir := filepath.Dir(dst)
 	tmp, err := os.CreateTemp(dir, ".vault-*.tmp")
 	if err != nil {
 		return fmt.Errorf("vault: temp: %w", err)
@@ -110,7 +136,7 @@ func (s *sealed) write(magicStr string, plain []byte) error {
 	if err := credfile.RestrictFile(name); err != nil {
 		return fail(err)
 	}
-	if _, err := tmp.Write(buf.Bytes()); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		return fail(err)
 	}
 	if err := tmp.Sync(); err != nil {
@@ -120,7 +146,7 @@ func (s *sealed) write(magicStr string, plain []byte) error {
 		removeQuiet(name)
 		return fmt.Errorf("vault: close: %w", err)
 	}
-	if err := renameFn(name, s.path); err != nil {
+	if err := renameFn(name, dst); err != nil {
 		removeQuiet(name)
 		return fmt.Errorf("vault: rename: %w", err)
 	}
