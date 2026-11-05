@@ -28,7 +28,7 @@ func ownerOnlyACL(t *testing.T, path string) {
 			continue
 		}
 		n++
-		if !strings.Contains(l, u.Username) && !strings.Contains(l, u.Uid) {
+		if !aceNamesUser(l, u) {
 			t.Fatalf("%s: non-owner ACE: %s", path, strings.TrimSpace(l))
 		}
 	}
@@ -58,4 +58,12 @@ func TestDeleteBackupOwnerOnlyACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	ownerOnlyACL(t, p+bakSuffix)
+}
+
+// aceNamesUser reports whether an icacls ACE line names u. icacls prints the account name, which for
+// a well-known account (a CI runner under NT AUTHORITY\SYSTEM) need not equal user.Current().Username,
+// so the short name after the backslash is matched too.
+func aceNamesUser(line string, u *user.User) bool {
+	short := u.Username[strings.LastIndex(u.Username, `\`)+1:]
+	return strings.Contains(line, u.Username) || strings.Contains(line, u.Uid) || strings.Contains(line, `\`+short+":")
 }

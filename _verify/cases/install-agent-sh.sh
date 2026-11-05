@@ -30,7 +30,7 @@ ok() { echo "ok   $*"; }
 # fall through into the failure branch (which `A && ok || fail` allows).
 check() { local label="$1"; shift; if "$@"; then ok "$label"; else fail "$label"; fi; }
 refute() { local label="$1"; shift; if "$@"; then fail "$label"; else ok "$label"; fi; }
-# shellcheck disable=SC2329  # called indirectly, as the command argument of check
+# shellcheck disable=SC2317,SC2329  # (SC2317 on shellcheck < 0.11) called indirectly, as the command argument of check
 mode_is() { [ "$(stat -c '%a' "$1" 2>/dev/null || echo '?')" = "$2" ]; }
 
 TMP="$(mktemp -d)" || { echo "cannot create a temp dir"; exit 77; }
