@@ -16,7 +16,9 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +34,7 @@ const (
 	maxSessions      = 64
 	maxLoginFailures = 10
 	loginWindow      = time.Minute
+	maxTrackedIPs    = 1024
 	maxBody          = 4 << 10
 	maxLabel         = 64
 	maxFingerprint   = 128
@@ -59,8 +62,11 @@ type usageAPI interface {
 	Last(accountID string) (usage.Usage, bool)
 }
 
-// Handler returns the admin UI and API. adminPassword must be non-empty.
+// Handler returns the admin UI and API. It panics if adminPassword is empty.
 func Handler(h *hub.Hub, v *vault.Vault, p *usage.Poller, adminPassword string) http.Handler {
+	if adminPassword == "" {
+		panic("web: adminPassword must be non-empty")
+	}
 	return newHandler(h, v, p, adminPassword, time.Now)
 }
 
@@ -78,11 +84,11 @@ type server struct {
 
 	mu       sync.Mutex
 	sessions map[string]sess
-	failures []time.Time
+	failures map[string][]time.Time // per source IP
 }
 
 func newHandler(h hubAPI, v *vault.Vault, u usageAPI, password string, now func() time.Time) http.Handler {
-	s := &server{hub: h, vault: v, usage: u, pwSum: sha256.Sum256([]byte(password)), now: now, sessions: map[string]sess{}}
+	s := &server{hub: h, vault: v, usage: u, pwSum: sha256.Sum256([]byte(password)), now: now, sessions: map[string]sess{}, failures: map[string][]time.Time{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
 	mux.HandleFunc("POST /login", s.login)
@@ -95,7 +101,21 @@ func newHandler(h hubAPI, v *vault.Vault, u usageAPI, password string, now func(
 	mux.HandleFunc("POST /api/import", s.authPost(s.importLogin))
 	mux.HandleFunc("POST /api/pending/{fp}/allow", s.authPost(s.allow))
 	mux.HandleFunc("POST /api/pending/{fp}/deny", s.authPost(s.deny))
-	return headers(mux)
+	return headers(s.apiGate(mux))
+}
+
+// apiGate answers 401 for any /api/ request without a session, whatever its method, so a
+// wrong-method probe learns nothing about the routes.
+func (s *server) apiGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if _, ok := s.session(r); !ok {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func headers(next http.Handler) http.Handler {
@@ -224,17 +244,28 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, d)
 }
 
-// tooManyFailures records a failed attempt window check. Callers hold s.mu.
-func (s *server) recentFailuresLocked() int {
+// recentFailuresLocked prunes and counts one source's failures in the window. Callers hold s.mu.
+func (s *server) recentFailuresLocked(ip string) int {
 	cut := s.now().Add(-loginWindow)
-	keep := s.failures[:0]
-	for _, t := range s.failures {
+	keep := s.failures[ip][:0]
+	for _, t := range s.failures[ip] {
 		if t.After(cut) {
 			keep = append(keep, t)
 		}
 	}
-	s.failures = keep
+	if len(keep) == 0 {
+		delete(s.failures, ip)
+	} else {
+		s.failures[ip] = keep
+	}
 	return len(keep)
+}
+
+func clientIP(r *http.Request) string {
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return h
+	}
+	return r.RemoteAddr
 }
 
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
@@ -244,17 +275,20 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	got := sha256.Sum256([]byte(r.PostFormValue("password")))
+	ip := clientIP(r)
 	s.mu.Lock()
-	if s.recentFailuresLocked() >= maxLoginFailures {
+	if s.recentFailuresLocked(ip) >= maxLoginFailures {
 		s.mu.Unlock()
-		log.Printf("web: login refused reason=%q", "too many failures")
+		log.Printf("web: login refused reason=%q source=%q", "too many failures", ip)
 		s.render(w, http.StatusTooManyRequests, pageData{Error: "Too many failed attempts. Wait a minute."})
 		return
 	}
 	if subtle.ConstantTimeCompare(got[:], s.pwSum[:]) != 1 {
-		s.failures = append(s.failures, s.now())
+		if len(s.failures) < maxTrackedIPs || s.failures[ip] != nil {
+			s.failures[ip] = append(s.failures[ip], s.now())
+		}
 		s.mu.Unlock()
-		log.Printf("web: login failed reason=%q", "wrong password")
+		log.Printf("web: login failed reason=%q source=%q", "wrong password", ip)
 		s.render(w, http.StatusUnauthorized, pageData{Error: "Wrong password."})
 		return
 	}
@@ -393,7 +427,12 @@ func hubError(w http.ResponseWriter, err error) {
 	case errors.Is(err, hub.ErrSwapOutcomeUnknown):
 		writeErr(w, http.StatusBadGateway, err.Error())
 	default:
-		writeErr(w, http.StatusBadGateway, err.Error())
+		log.Printf("web: hub error reason=%q", logx.Redact(err.Error()))
+		if strings.HasPrefix(err.Error(), "hub: ") { // hub-authored, already redacted at the source
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeErr(w, http.StatusBadGateway, "the request failed; see the server log")
 	}
 }
 
@@ -431,9 +470,16 @@ func (s *server) importLogin(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &in) {
 		return
 	}
+	in.Label = strings.TrimSpace(in.Label)
 	if in.Host == "" || in.Label == "" || len(in.Label) > maxLabel {
 		writeErr(w, http.StatusBadRequest, "host and a label of 1-64 characters are required")
 		return
+	}
+	for _, a := range s.vault.ListPublic() {
+		if strings.EqualFold(a.Label, in.Label) {
+			writeErr(w, http.StatusConflict, "an account with that label already exists")
+			return
+		}
 	}
 	a, err := s.hub.Import(r.Context(), in.Host, in.Label)
 	if err != nil {

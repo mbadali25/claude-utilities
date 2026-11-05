@@ -91,15 +91,9 @@ func serve(ctx context.Context, listen, dataDir, password string, errOut io.Writ
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go h.Run(ctx)
-	go poller.Run(ctx, func() []vault.Account {
-		var own []vault.Account
-		for _, a := range v.List() {
-			if reg.OwnerOf(a.ID).Server {
-				own = append(own, a)
-			}
-		}
-		return own
-	}, nil)
+	// Poll every stored account, including ones a host currently holds: the agent sends no usage
+	// report, so the vault copy (refreshed by swap write-back) is the only source.
+	go poller.Run(ctx, v.List, nil)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.ServeWS)

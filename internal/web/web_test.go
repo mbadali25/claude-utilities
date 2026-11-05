@@ -109,6 +109,7 @@ type rig struct {
 	fh    *fakeHub
 	v     *vault.Vault
 	usage fakeUsage
+	now   time.Time
 }
 
 func newRig(t *testing.T) *rig {
@@ -118,8 +119,8 @@ func newRig(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &rig{t: t, fh: &fakeHub{}, v: v, usage: fakeUsage{}}
-	r.h = newHandler(r.fh, v, r.usage, adminPW, func() time.Time { return fixedNow })
+	r := &rig{t: t, fh: &fakeHub{}, v: v, usage: fakeUsage{}, now: fixedNow}
+	r.h = newHandler(r.fh, v, r.usage, adminPW, func() time.Time { return r.now })
 	return r
 }
 
@@ -611,6 +612,115 @@ func TestCSRFTokenRotatesPerSession(t *testing.T) {
 	// session A's CSRF token is not valid in session B.
 	if w := r.do("POST", "/api/swap", `{"host":"h","account":"a"}`, b, a.csrf); w.Code != http.StatusForbidden {
 		t.Fatalf("cross-session csrf accepted: %d", w.Code)
+	}
+}
+
+func (r *rig) loginFrom(addr, pw string) *httptest.ResponseRecorder {
+	r.t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(url.Values{"password": {pw}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = addr
+	w := httptest.NewRecorder()
+	r.h.ServeHTTP(w, req)
+	return w
+}
+
+func TestLoginLockoutIsPerSourceIP(t *testing.T) {
+	r := newRig(t)
+	for i := 0; i < maxLoginFailures; i++ {
+		r.loginFrom("10.0.0.9:1111", "wrong")
+	}
+	if w := r.loginFrom("10.0.0.9:2222", adminPW); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("attacker status %d, want 429", w.Code)
+	}
+	if w := r.loginFrom("10.0.0.5:3333", adminPW); w.Code != http.StatusSeeOther {
+		t.Fatalf("admin on another IP status %d, want 303", w.Code)
+	}
+	r.now = r.now.Add(loginWindow + time.Second)
+	if w := r.loginFrom("10.0.0.9:4444", adminPW); w.Code != http.StatusSeeOther {
+		t.Fatalf("after the window status %d, want 303", w.Code)
+	}
+}
+
+func TestHandlerRejectsEmptyPassword(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Handler accepted an empty admin password")
+		}
+	}()
+	Handler(nil, nil, nil, "")
+}
+
+func TestWrongMethodOnAPIWithoutSessionIs401(t *testing.T) {
+	r := newRig(t)
+	for _, rt := range [][2]string{{"GET", "/api/swap"}, {"POST", "/api/accounts"}, {"GET", "/api/nope"}} {
+		if w := r.do(rt[0], rt[1], "", nil, ""); w.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s = %d, want 401", rt[0], rt[1], w.Code)
+		}
+	}
+}
+
+func TestSessionExpires(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	if w := r.do("GET", "/api/accounts", "", s, ""); w.Code != 200 {
+		t.Fatalf("fresh session %d", w.Code)
+	}
+	r.now = r.now.Add(sessionTTL)
+	if w := r.do("GET", "/api/accounts", "", s, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("expired session %d, want 401", w.Code)
+	}
+}
+
+func TestSessionCapEvictsSoonestToExpire(t *testing.T) {
+	r := newRig(t)
+	first := r.login()
+	for i := 0; i < maxSessions; i++ {
+		r.now = r.now.Add(time.Second)
+		r.loginFrom("10.1.0.1:1", adminPW)
+	}
+	if w := r.do("GET", "/api/accounts", "", first, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("evicted cookie replay %d, want 401", w.Code)
+	}
+}
+
+func TestImportLabelValidation(t *testing.T) {
+	r := newRig(t)
+	called := false
+	r.fh.importFn = func(host, label string) (vault.Account, error) {
+		called = true
+		return vault.Account{ID: "n", Label: label, Identity: "uuid-n", Block: json.RawMessage(`{"accessToken":"` + blockSecret + `"}`)}, nil
+	}
+	r.seed("a1", "Personal")
+	s := r.login()
+	for name, body := range map[string]string{
+		"whitespace": `{"host":"h1","label":"   "}`,
+		"too long":   `{"host":"h1","label":"` + strings.Repeat("x", maxLabel+1) + `"}`,
+		"empty":      `{"host":"h1","label":""}`,
+	} {
+		if w := r.do("POST", "/api/import", body, s, s.csrf); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", name, w.Code)
+		}
+	}
+	if w := r.do("POST", "/api/import", `{"host":"h1","label":" personal "}`, s, s.csrf); w.Code != http.StatusConflict {
+		t.Errorf("duplicate label status %d, want 409", w.Code)
+	}
+	if called {
+		t.Fatal("hub.Import ran for an invalid label")
+	}
+	w := r.do("POST", "/api/import", `{"host":"h1","label":"  work  "}`, s, s.csrf)
+	if w.Code != http.StatusCreated || strings.Contains(w.Body.String(), blockSecret) || strings.Contains(w.Body.String(), "Block") {
+		t.Fatalf("status %d body %s", w.Code, w.Body)
+	}
+}
+
+func TestUnknownHubErrorIsGenericBadGateway(t *testing.T) {
+	r := newRig(t)
+	r.fh.swapErr = errors.New("boom detail-that-stays-in-the-log")
+	s := r.login()
+	w := r.do("POST", "/api/swap", `{"host":"h","account":"a"}`, s, s.csrf)
+	if w.Code != http.StatusBadGateway || strings.Contains(w.Body.String(), "detail-that-stays") {
+		t.Fatalf("status %d body %s", w.Code, w.Body)
 	}
 }
 
