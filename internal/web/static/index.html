@@ -862,7 +862,10 @@
     head.appendChild(heading);
     if (s.status) {
       var st = chip(String(s.status).slice(0, STATUS_CAP));
-      st.setAttribute('aria-label', 'Status: ' + String(s.status).slice(0, STATUS_CAP));
+      // "busy" on its own does not say what it describes, and the other chips do. The label
+      // is hidden text rather than aria-label: a span carries no role, and aria-label on a
+      // role-less element is not reliably exposed.
+      st.insertBefore(el('span', 'Status: ', 'sr'), st.firstChild);
       head.appendChild(st);
     }
     if (s.remoteControl) head.appendChild(chip('Remote control', undefined, 'info'));
