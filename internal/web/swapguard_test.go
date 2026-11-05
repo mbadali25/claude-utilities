@@ -90,8 +90,8 @@ func TestPageCarriesTheStaleAndRefusalCopy(t *testing.T) {
 	for _, want := range []string{
 		`'Stored login is ' + a.copyAgeHours + ' h old.`,
 		`acct-note warn stale-copy`,
-		`' (sign in again)'`,
-		`' (stored login ' + a.copyAgeHours + ' h old)'`,
+		`' (refused)'`,
+		`' (' + a.copyAgeHours + ' h old)'`,
 		`'Sign in again first: Anthropic refused the stored login for '`,
 		`go.disabled = !!w`,
 		`'cwarn'`,

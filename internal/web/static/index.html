@@ -2382,11 +2382,13 @@
     // A refused login and an old stored copy are named in the option itself, so the choice is made
     // knowing it. Neither is hidden: the server decides what is allowed.
     accountsCache.forEach(function (a) {
-      var t = a.label;
+      // The suffix is short because the closed select is narrow on a host card; the title says it in full.
+      var t = a.label, full = '';
       if (a.id === h.activeAccount) t += ' (current)';
-      else if (a.error === 'unauthorized') t += ' (sign in again)';
-      else if (a.stale && a.copyAgeHours != null) t += ' (stored login ' + a.copyAgeHours + ' h old)';
+      else if (a.error === 'unauthorized') { t += ' (refused)'; full = 'Anthropic refused the stored login: sign in again first'; }
+      else if (a.stale && a.copyAgeHours != null) { t += ' (' + a.copyAgeHours + ' h old)'; full = 'Stored login is ' + a.copyAgeHours + ' h old'; }
       var o = el('option', t);
+      if (full) o.title = full;
       o.value = a.id; pick.appendChild(o);
     });
     // The open selection is the first account the host does not hold, preferring one that can be
@@ -2497,10 +2499,10 @@
     var parts = [], warn = false;
     ((j && j.warnings) || []).forEach(function (w) {
       warn = true;
-      if (w.code === 'stale_copy') parts.push('The stored login was ' + w.ageHours + ' h old; if the host comes up signed out, sign in again.');
-      else if (w.code === 'holder_offline') parts.push('Offline host ' + w.host + ' last held this login and may still use it, so one of the two can be signed out.');
+      if (w.code === 'stale_copy') parts.push('Stored login was ' + w.ageHours + ' h old: sign in again if the host comes up signed out.');
+      else if (w.code === 'holder_offline') parts.push(w.host + ' is offline and may still hold this login.');
     });
-    if (j && j.home === 'home_moved') { warn = true; parts.push('Wrote to the live home; the path recorded at enrolment points to a different home.'); }
+    if (j && j.home === 'home_moved') { warn = true; parts.push('Wrote to the live home (the recorded path differs).'); }
     else if (j && j.home === 'live_home') parts.push('Wrote to the live home.');
     return { text: parts.join(' '), warn: warn };
   }
