@@ -563,6 +563,7 @@ type hostJSON struct {
 	HostID        string        `json:"hostId"`
 	Name          string        `json:"name"`
 	OS            string        `json:"os"`
+	RunAs         string        `json:"runAs,omitempty"`
 	Online        bool          `json:"online"`
 	ActiveAccount string        `json:"activeAccount"`
 	NeedsReload   bool          `json:"needsReload"`
@@ -574,7 +575,7 @@ func (s *server) hosts(w http.ResponseWriter, _ *http.Request) {
 	hs := s.hub.Hosts()
 	out := make([]hostJSON, 0, len(hs))
 	for _, h := range hs {
-		j := hostJSON{HostID: h.HostID, Name: h.Name, OS: h.OS, Online: h.Online, ActiveAccount: h.ActiveAccount,
+		j := hostJSON{HostID: h.HostID, Name: h.Name, OS: h.OS, RunAs: h.RunAs, Online: h.Online, ActiveAccount: h.ActiveAccount,
 			SwapBlocked: h.SwapBlocked, Sessions: make([]sessionJSON, 0, len(h.Sessions))}
 		for _, x := range h.Sessions {
 			j.Sessions = append(j.Sessions, sessionJSON{PID: x.PID, ID: x.ID, Name: x.Name,
