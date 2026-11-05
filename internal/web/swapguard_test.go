@@ -80,6 +80,31 @@ func TestSwapSuccessWithoutWarningsHasEmptyList(t *testing.T) {
 	}
 }
 
+// The page cannot run script in a Go test, so this pins the pieces the screenshots then show:
+// the amber note on the card, the option suffixes, the disabled-with-reason for a refused login,
+// the confirm caution, and the result line's cautions. The behaviour itself is covered by the
+// browser run (docs/runbooks/claude-swap-e2e.md).
+func TestPageCarriesTheStaleAndRefusalCopy(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+	for _, want := range []string{
+		`'Stored login is ' + a.copyAgeHours + ' h old.`,
+		`acct-note warn stale-copy`,
+		`' (sign in again)'`,
+		`' (stored login ' + a.copyAgeHours + ' h old)'`,
+		`'Sign in again first: Anthropic refused the stored login for '`,
+		`go.disabled = !!w`,
+		`'cwarn'`,
+		`function swapNotes(j)`,
+		`home_moved`,
+		`.swapmsg.warn`,
+	} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("page is missing %q", want)
+		}
+	}
+}
+
 func TestAccountsReportCopyAgeAndStaleFlag(t *testing.T) {
 	r := newRig(t)
 	s := r.login()
