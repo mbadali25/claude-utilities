@@ -30,6 +30,26 @@
 
 .EXAMPLE
   powershell -NoProfile -File scripts\install-tunnels-task.ps1 -Uninstall
+
+.NOTES
+  THIS TASK IS THE INTERIM SUPERVISOR. The server supervises the same tunnels
+  itself when it is started with --tunnels, and that is where the work goes now:
+  the key lives encrypted in the keyring instead of on disk at
+  ~\.ssh\id_ed25519_claudeswap, and the Tunnels tab shows each host's state.
+
+  Do not run both. Two supervisors dial the same -R 127.0.0.1:8443 and the
+  second forward is refused, so the app sits in forward_refused and this task
+  wins silently. Unregister this task BEFORE starting the server with
+  --tunnels; the move is written out in docs/runbooks/linux-agent-install.md,
+  "Moving to the app-managed supervisor".
+
+  Re-install this task only to roll back. Nothing here is removed by the move,
+  so -Uninstall then a later plain run restores the old arrangement, with one
+  caveat: -Uninstall deletes tunnels.json, which the app's import reads. Import
+  the host list into the app first, or keep a copy.
+
+  Re-run the installer after editing claude-swap-tunnels.ps1: the task runs the
+  copy beside the config, not the file in this repository.
 #>
 [CmdletBinding()]
 param(

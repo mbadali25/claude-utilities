@@ -79,7 +79,7 @@ func newRefreshRig(t *testing.T, labels ...string) *refreshRig {
 	p := usage.NewPoller(d, time.Hour)
 	p.SetAccounts(v.List)
 	r := &rig{t: t, fh: &fakeHub{}, v: v, pw: &fakePW{pw: adminPW}, now: fixedNow}
-	r.h = newHandler(r.fh, v, p, r.pw, func() time.Time { return r.now })
+	r.h = newHandler(r.fh, v, p, r.pw, nil, func() time.Time { return r.now })
 	for i, label := range labels {
 		err := v.Put(vault.Account{ID: string(rune('a' + i)), Label: label, Identity: "uuid-" + label,
 			Updated: fixedNow, Block: json.RawMessage(`{"accessToken":"` + blockSecret + `"}`)})
