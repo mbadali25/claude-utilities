@@ -198,6 +198,8 @@
   .sname.nameless { font-weight:550; color:var(--mut); }
   .smeta { color:var(--mut); display:flex; gap:6px; align-items:baseline; flex-wrap:wrap; min-width:0; }
   .smeta .scwd { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  /* A remote-control name is a name, not a path, so it keeps the body font. */
+  .smeta .srem { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .swap { display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-top:1px solid var(--line); padding-top:12px; min-height:56px; }
   /* 120px basis: select, Swap and Revoke share one row in a 300px card instead of Revoke wrapping alone. */
   .swap select { flex:1 1 120px; min-width:0; }
@@ -878,7 +880,7 @@
     // A remote-control name is a separate field from the session's own name. Claude Code
     // writes none today, so this line normally does not appear.
     if (s.remoteName) {
-      var rn = el('span', 'remote: ' + s.remoteName, 'scwd');
+      var rn = el('span', 'remote: ' + s.remoteName, 'srem');
       rn.title = s.remoteName;
       meta.appendChild(rn);
     }
