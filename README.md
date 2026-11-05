@@ -5,7 +5,6 @@ Go utilities for Claude Code. The first one is **claude-swap**: a LAN server plu
 ## Build
 
 ```
-go build ./...
 GOOS=linux go build -o claude-swap-agent ./cmd/agent
 ```
 
@@ -33,8 +32,9 @@ The agent prints a fingerprint when it first connects. Open the server UI, match
 
 `install.Install(exe, stateDir)` is a Go function, not a command. There is no CLI for it yet; the agent's `install` subcommand is not written, so the install flow cannot be run end to end today. `cmd/agent` does not exist, so nothing reads `CLAUDESWAP_STATE_DIR` yet; the agent must read it (open item: agent run mode and how it finds the server are unresolved in the design).
 
-- Windows: creates the state directory with an owner-only ACL (`icacls /inheritance:r`), then registers `ClaudeSwapAgent` from a task XML via `schtasks /Create /F /XML`. The task runs at logon as `DOMAIN\user` in the interactive session (no password), sets `CLAUDESWAP_STATE_DIR` through a `cmd /c set ...` wrapper, has no execution time limit, keeps running on battery, and restarts on failure (every minute, up to 999 times). The paths must not contain `"` `%` `&` `^` `!` `<` `>` or `|`. The state directory is locked to the current user, so SYSTEM and Administrators lose access to it (back it up as that user). Tests cover the XML and the command sequence with a fake runner; schtasks and icacls have not been run against a real Windows host.
-- Linux: writes `~/.config/systemd/user/claude-swap-agent.service` (`Restart=always`, starts after `network-online.target`, sets `CLAUDESWAP_STATE_DIR`) and creates the state directory with mode 0700. The install refuses a state directory that is a symlink or junction when it checks (a race between the check and the chmod is not prevented) or that contains a line break. Run `loginctl enable-linger $USER` so it keeps running after you log out.
+- Windows: creates the state directory and, when it is new or empty, locks it to the current user (`icacls /inheritance:r`; an existing non-empty directory keeps its ACL). Then registers `ClaudeSwapAgent` with `schtasks /Create /SC ONLOGON /TN ClaudeSwapAgent /RU <user> /TR "<exe> run"`. It starts at the next logon; run `schtasks /Run /TN ClaudeSwapAgent` to start it now. `schtasks` fails if the task already exists; delete it first with `schtasks /Delete /TN ClaudeSwapAgent`. The exe must be an absolute path to an existing file. schtasks and icacls have not been run against a real Windows host; tests use a fake runner.
+- Linux: writes `~/.config/systemd/user/claude-swap-agent.service` (`Restart=always`, a start limit of 10 per 300 s, sets `CLAUDESWAP_STATE_DIR`) and creates the state directory with mode 0700. A user unit cannot wait for `network-online.target`, so the agent must retry its own connection. The install refuses a state directory that is a symlink or junction when it checks (a race between the check and the chmod is not prevented) or that contains a line break. Run `loginctl enable-linger $USER` so it keeps running after you log out.
+
 ## Caveats
 
 - A swap replaces only the `claudeAiOauth` block. `mcpOAuth` stays as it was, so MCP logins may still belong to the previous account.

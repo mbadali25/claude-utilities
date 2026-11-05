@@ -10,12 +10,25 @@ import (
 	"testing"
 )
 
+// fakeExe creates a real file so checkExe accepts it.
+func fakeExe(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(p, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func TestRenderSystemdUnitHasRestartAlways(t *testing.T) {
 	u := RenderSystemdUserUnit("/opt/claude swap/agent", "/home/u/.local/state/claude-swap")
-	for _, want := range []string{"Restart=always", "[Install]", "WantedBy=default.target", `ExecStart="/opt/claude swap/agent" run`} {
+	for _, want := range []string{"Restart=always", "[Install]", "WantedBy=default.target", `ExecStart="/opt/claude swap/agent" run`, "StartLimitIntervalSec=", "StartLimitBurst="} {
 		if !strings.Contains(u, want) {
 			t.Errorf("unit missing %q:\n%s", want, u)
 		}
+	}
+	if strings.Contains(u, "network-online") {
+		t.Errorf("a user unit cannot order on network-online.target:\n%s", u)
 	}
 }
 
@@ -35,13 +48,53 @@ func TestRenderUnitEscapesSpecifiersAndQuotes(t *testing.T) {
 	}
 }
 
-func TestAbsExe(t *testing.T) {
-	got, err := absExe("agent")
-	if err != nil || !filepath.IsAbs(got) {
-		t.Fatalf("got %q, %v", got, err)
+func TestEnvironmentKeepsDollarLiteral(t *testing.T) {
+	u := RenderSystemdUserUnit("/a", "/s/$HOME/x")
+	if !strings.Contains(u, `Environment="CLAUDESWAP_STATE_DIR=/s/$HOME/x"`) {
+		t.Errorf("Environment= must not double '$':\n%s", u)
 	}
-	if _, err := absExe(`C:\a"b.exe`); err == nil {
-		t.Error("want error for quote in path")
+}
+
+func TestRenderUnitNeverContainsToken(t *testing.T) {
+	u := strings.ToLower(RenderSystemdUserUnit("/usr/bin/claude-swap-agent", "/home/u/.local/state/claude-swap"))
+	a := strings.ToLower(strings.Join(SchtasksCreateArgs(`C:\a\agent.exe`, `CORP\bob`), " "))
+	for name, s := range map[string]string{"unit": u, "schtasks": a} {
+		for _, bad := range []string{"token", "secret", "password", "bearer", "sk-ant", "oauth"} {
+			if strings.Contains(s, bad) {
+				t.Errorf("%s contains %q:\n%s", name, bad, s)
+			}
+		}
+	}
+	if strings.Contains(a, "/rp") {
+		t.Errorf("args must not carry a password: %s", a)
+	}
+}
+
+func TestSchtasksArgsQuoteExePathWithSpaces(t *testing.T) {
+	a := SchtasksCreateArgs(`C:\Program Files\claude swap\agent.exe`, `CORP\bob`)
+	want := []string{"/Create", "/SC", "ONLOGON", "/TN", "ClaudeSwapAgent", "/RU", `CORP\bob`, "/TR", `"C:\Program Files\claude swap\agent.exe" run`}
+	if strings.Join(a, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("got %q\nwant %q", a, want)
+	}
+	if got := SchtasksCreateArgs(`C:\a"b\x.exe`, "u")[8]; got != `"C:\a\"b\x.exe" run` {
+		t.Errorf("embedded quote not escaped: %s", got)
+	}
+}
+
+func TestCheckExe(t *testing.T) {
+	good := fakeExe(t)
+	if err := checkExe(good); err != nil {
+		t.Errorf("unexpected: %v", err)
+	}
+	for name, p := range map[string]string{
+		"relative":  "agent",
+		"missing":   filepath.Join(t.TempDir(), "nope"),
+		"directory": t.TempDir(),
+		"newline":   good + "\nx",
+	} {
+		if checkExe(p) == nil {
+			t.Errorf("%s: want error for %q", name, p)
+		}
 	}
 }
 
@@ -85,96 +138,9 @@ func TestWindowsUser(t *testing.T) {
 	}
 }
 
-func TestEnvironmentKeepsDollarLiteral(t *testing.T) {
-	u := RenderSystemdUserUnit("/a", "/s/$HOME/x")
-	if !strings.Contains(u, `Environment="CLAUDESWAP_STATE_DIR=/s/$HOME/x"`) {
-		t.Errorf("Environment= must not double '$':\n%s", u)
-	}
-}
-
-func TestRenderUnitNeverContainsToken(t *testing.T) {
-	for name, s := range map[string]string{
-		"unit": RenderSystemdUserUnit("/usr/bin/claude-swap-agent", "/home/u/.local/state/claude-swap"),
-		"task": RenderTaskXML(`C:\a\agent.exe`, `C:\state`, `CORP\bob`),
-	} {
-		low := strings.ToLower(strings.ReplaceAll(s, "InteractiveToken", ""))
-		for _, bad := range []string{"token", "secret", "password", "bearer", "sk-ant", "oauth", "@"} {
-			if strings.Contains(low, bad) {
-				t.Errorf("%s contains %q:\n%s", name, bad, s)
-			}
-		}
-	}
-}
-
-func TestSchtasksArgsUseXMLAndNoPassword(t *testing.T) {
-	a := strings.Join(SchtasksCreateArgs(`C:\t.xml`), " ")
-	if a != `/Create /F /TN ClaudeSwapAgent /XML C:\t.xml` {
-		t.Errorf("got %s", a)
-	}
-	if strings.Contains(a, "/RP") {
-		t.Errorf("args must not carry a password: %s", a)
-	}
-}
-
-func TestSchtasksArgsQuoteExePathWithSpaces(t *testing.T) {
-	// The task is registered from XML, so the exe path is quoted in the
-	// <Arguments> command line, not in the schtasks switches.
-	x := RenderTaskXML(`C:\Program Files (x86)\claude swap\agent.exe`, `C:\s`, `CORP\bob`)
-	want := `&amp;&amp; &#34;C:\Program Files (x86)\claude swap\agent.exe&#34; run`
-	if !strings.Contains(x, want) {
-		t.Errorf("exe path not quoted:\n%s", x)
-	}
-	if a := SchtasksCreateArgs(`C:\Temp Dir\t.xml`); a[len(a)-1] != `C:\Temp Dir\t.xml` {
-		t.Errorf("xml path must be one argument: %v", a)
-	}
-}
-
-func TestCheckWindowsPathRejectsShellMetachars(t *testing.T) {
-	for _, bad := range []string{`C:\a"b`, `C:\100%`, `C:\a&b`, `C:\a^b`, `C:\a!b`, `C:\a|b`, `C:\a<b`, `C:\a>b`} {
-		if checkWindowsPath("p", bad) == nil {
-			t.Errorf("want error for %q", bad)
-		}
-	}
-	if err := checkWindowsPath("p", `C:\Program Files (x86)\claude swap`); err != nil {
-		t.Errorf("unexpected: %v", err)
-	}
-}
-
-func TestIsLinkCoversJunctions(t *testing.T) {
-	if !isLink(os.ModeSymlink) || !isLink(os.ModeIrregular|os.ModeDir) || isLink(os.ModeDir) {
+func TestIsLinkCoversJunctionsNotOtherReparsePoints(t *testing.T) {
+	if !isLink(os.ModeSymlink) || !isLink(os.ModeIrregular|os.ModeDir) || isLink(os.ModeDir) || isLink(0) {
 		t.Error("isLink misclassifies modes")
-	}
-}
-
-func TestUnitWaitsForNetwork(t *testing.T) {
-	u := RenderSystemdUserUnit("/a", "/s")
-	for _, want := range []string{"After=network-online.target", "Wants=network-online.target"} {
-		if !strings.Contains(u, want) {
-			t.Errorf("unit missing %q", want)
-		}
-	}
-}
-
-func TestTaskXMLSettingsAndEnv(t *testing.T) {
-	x := RenderTaskXML(`C:\Program Files\swap\agent.exe`, `C:\Users\a&b\state`, `CORP\bob`)
-	for _, want := range []string{
-		"<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
-		"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
-		"<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
-		"<RestartOnFailure>",
-		"<LogonType>InteractiveToken</LogonType>",
-		"<UserId>CORP\\bob</UserId>",
-		`set &#34;CLAUDESWAP_STATE_DIR=C:\Users\a&amp;b\state&#34; &amp;&amp; &#34;C:\Program Files\swap\agent.exe&#34; run`,
-	} {
-		if !strings.Contains(x, want) {
-			t.Errorf("task xml missing %q:\n%s", want, x)
-		}
-	}
-}
-
-func TestUTF16LE(t *testing.T) {
-	if got := utf16LE("a"); !bytes.Equal(got, []byte{0xFF, 0xFE, 'a', 0}) {
-		t.Errorf("got %v", got)
 	}
 }
 
@@ -202,7 +168,7 @@ func TestInstallLinuxPrintsNextSteps(t *testing.T) {
 	var out bytes.Buffer
 	ran := false
 	run := func(string, ...string) ([]byte, error) { ran = true; return nil, nil }
-	if err := installFor("linux", "/usr/bin/agent", filepath.Join(t.TempDir(), "st"), run, &out); err != nil {
+	if err := installFor("linux", fakeExe(t), filepath.Join(t.TempDir(), "st"), run, &out); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"systemctl --user daemon-reload", "enable --now claude-swap-agent.service", "loginctl enable-linger"} {
@@ -215,36 +181,58 @@ func TestInstallLinuxPrintsNextSteps(t *testing.T) {
 	}
 }
 
+func TestInstallRejectsMissingOrRelativeExe(t *testing.T) {
+	run := func(string, ...string) ([]byte, error) { t.Error("must not run"); return nil, nil }
+	for _, exe := range []string{"agent.exe", filepath.Join(t.TempDir(), "missing")} {
+		if err := installFor("windows", exe, filepath.Join(t.TempDir(), "st"), run, &bytes.Buffer{}); err == nil {
+			t.Errorf("want error for %q", exe)
+		}
+	}
+}
+
 func TestInstallWindowsRunsIcaclsThenSchtasks(t *testing.T) {
 	t.Setenv("USERNAME", "bob")
 	t.Setenv("USERDOMAIN", "CORP")
 	state := filepath.Join(t.TempDir(), "st")
+	exe := fakeExe(t)
 	var calls []string
 	run := func(name string, args ...string) ([]byte, error) {
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		return nil, nil
 	}
 	var out bytes.Buffer
-	if err := installFor("windows", "agent.exe", state, run, &out); err != nil {
+	if err := installFor("windows", exe, state, run, &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 2 || !strings.HasPrefix(calls[0], "icacls "+state+" /inheritance:r /grant:r CORP\\bob:(OI)(CI)F") || !strings.HasPrefix(calls[1], "schtasks /Create /F /TN ClaudeSwapAgent /XML ") {
+	if len(calls) != 2 || !strings.HasPrefix(calls[0], "icacls "+state+" /inheritance:r /grant:r CORP\\bob:(OI)(CI)F") || !strings.HasPrefix(calls[1], "schtasks /Create /SC ONLOGON /TN ClaudeSwapAgent /RU CORP\\bob /TR ") {
 		t.Errorf("calls: %v", calls)
 	}
-	if _, err := os.Stat(state); err != nil {
-		t.Errorf("state dir not created: %v", err)
+	if !strings.Contains(out.String(), "schtasks /Run /TN ClaudeSwapAgent") {
+		t.Errorf("output missing run hint:\n%s", out.String())
 	}
 }
 
-func TestInstallWindowsReportsFailureAndRejectsPercent(t *testing.T) {
+func TestInstallWindowsSkipsIcaclsOnNonEmptyDir(t *testing.T) {
+	t.Setenv("USERNAME", "bob")
+	state := t.TempDir()
+	if err := os.WriteFile(filepath.Join(state, "keep"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	run := func(name string, args ...string) ([]byte, error) { calls = append(calls, name); return nil, nil }
+	if err := installFor("windows", fakeExe(t), state, run, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0] != "schtasks" {
+		t.Errorf("calls: %v", calls)
+	}
+}
+
+func TestInstallWindowsReportsFailure(t *testing.T) {
 	t.Setenv("USERNAME", "bob")
 	fail := func(string, ...string) ([]byte, error) { return []byte("denied"), errors.New("exit 1") }
-	err := installFor("windows", "agent.exe", filepath.Join(t.TempDir(), "st"), fail, &bytes.Buffer{})
+	err := installFor("windows", fakeExe(t), filepath.Join(t.TempDir(), "st"), fail, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Errorf("want icacls error with output, got %v", err)
-	}
-	ok := func(string, ...string) ([]byte, error) { return nil, nil }
-	if err := installFor("windows", "agent.exe", filepath.Join(t.TempDir(), "100%"), ok, &bytes.Buffer{}); err == nil {
-		t.Error("want error for percent in state dir")
 	}
 }
