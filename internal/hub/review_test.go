@@ -211,6 +211,15 @@ func TestAllowPersistFailureKeepsEntryForRetry(t *testing.T) {
 	}
 }
 
+func TestHostViewSurfacesSwapBlocked(t *testing.T) {
+	f := newFixture(t)
+	a, _, _ := f.enrol("box")
+	a.send(proto.TypeReport, "", proto.Report{SwapBlocked: true})
+	eventually(t, func() bool { return f.h.Hosts()[0].SwapBlocked })
+	a.send(proto.TypeReport, "", proto.Report{})
+	eventually(t, func() bool { return !f.h.Hosts()[0].SwapBlocked })
+}
+
 // A report is an agent-supplied claim; it must never make the reporter the owner of a server-owned account.
 func TestReportedIdentityDoesNotPromoteToOwner(t *testing.T) {
 	f := newFixture(t)

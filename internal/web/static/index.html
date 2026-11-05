@@ -125,6 +125,7 @@
         tr.appendChild(el('td', h.activeAccount ? ((accounts.filter(function (a) { return a.id === h.activeAccount; })[0] || {}).label || '?') : '-'));
         var td = el('td', h.sessions.length + ' session(s) ');
         if (h.needsReload) td.appendChild(el('span', 'Needs reload', 'badge'));
+        if (h.swapBlocked) td.appendChild(el('span', 'Swaps blocked', 'badge err'));
         tr.appendChild(td);
         var form = el('td'); var pick = el('select'); pick.setAttribute('aria-label', 'Account for ' + h.name);
         accounts.forEach(function (a) { var o = el('option', a.label); o.value = a.id; pick.appendChild(o); });

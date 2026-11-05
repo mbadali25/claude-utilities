@@ -345,6 +345,26 @@ func TestHostsShowNeedsReloadBadge(t *testing.T) {
 	}
 }
 
+func TestHostsShowSwapBlockedBadge(t *testing.T) {
+	r := newRig(t)
+	r.fh.hosts = []hub.HostView{{HostID: "h1", Name: "box", Online: true, SwapBlocked: true}, {HostID: "h2", Name: "ok", Online: true}}
+	s := r.login()
+	var hosts []struct {
+		HostID      string `json:"hostId"`
+		SwapBlocked bool   `json:"swapBlocked"`
+	}
+	w := r.do("GET", "/api/hosts", "", s, "")
+	if err := json.Unmarshal(w.Body.Bytes(), &hosts); err != nil || len(hosts) != 2 {
+		t.Fatalf("%v %s", err, w.Body)
+	}
+	if !hosts[0].SwapBlocked || hosts[1].SwapBlocked {
+		t.Fatalf("hosts %s", w.Body)
+	}
+	if !strings.Contains(page(r, s), "Swaps blocked") {
+		t.Fatal("page lacks the Swaps blocked badge label")
+	}
+}
+
 func TestUsageShowsLastKnownWithAgeOnError(t *testing.T) {
 	r := newRig(t)
 	r.seed("a1", "personal")

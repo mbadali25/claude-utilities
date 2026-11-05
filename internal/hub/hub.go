@@ -473,7 +473,9 @@ type HostView struct {
 	HostID, Name, OS string
 	Online           bool
 	ActiveAccount    string
-	Sessions         []SessionView
+	// SwapBlocked mirrors the agent's report: an unfinished earlier swap blocks every new one.
+	SwapBlocked bool
+	Sessions    []SessionView
 }
 
 // Hosts lists enrolled, unrevoked hosts ordered by name.
@@ -487,7 +489,7 @@ func (h *Hub) Hosts() []HostView {
 		if ho.Revoked {
 			continue
 		}
-		v := HostView{HostID: ho.ID, Name: ho.Name, OS: ho.OS, Online: ho.c != nil, Sessions: []SessionView{}}
+		v := HostView{HostID: ho.ID, Name: ho.Name, OS: ho.OS, Online: ho.c != nil, SwapBlocked: ho.report.SwapBlocked, Sessions: []SessionView{}}
 		for _, a := range accts {
 			if ho.identity != "" && a.Identity == ho.identity {
 				v.ActiveAccount = a.ID
