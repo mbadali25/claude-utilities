@@ -302,12 +302,28 @@ func (q *queue) enqueue(task CommandTask) error {
 		return errQueueFull
 	}
 	keep := make([]queueEntry, 0, len(f.Entries)+1)
+	have := false
 	for _, e := range f.Entries {
-		// One pending instruction per command per session: a repeat replaces it rather than
-		// asking the model twice for the same thing.
-		if e.CommandID != task.CommandID && e.Command != task.Command {
+		switch {
+		case e.DeliveredAt != nil:
+			// A delivered entry is not pending any more, and dropping it would throw away the
+			// notice the next report owes the hub - which would make the hub time a command out
+			// as failed although it was delivered. confirmReported is the only thing that may
+			// remove one.
+			keep = append(keep, e)
+			have = have || e.CommandID == task.CommandID
+		case e.CommandID == task.CommandID || e.Command == task.Command:
+			// One PENDING instruction per command per session: a repeat replaces it rather than
+			// asking the model twice for the same thing.
+		default:
 			keep = append(keep, e)
 		}
+	}
+	if have {
+		// This very command has already been delivered; queueing it again would ask twice and
+		// report twice. Write back whatever pending duplicates were folded away and stop.
+		f.Entries = keep
+		return q.write(f)
 	}
 	if len(keep) >= maxQueueEntries {
 		return errQueueFull

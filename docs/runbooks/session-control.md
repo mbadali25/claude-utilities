@@ -163,7 +163,9 @@ rejected.
 ```
 
 `requestId` is an optional idempotency key (at most 64 characters): repeating a request with the
-same key returns the first request's view instead of dispatching again.
+same key returns the first request's view instead of dispatching again. **It is not permanent.** A
+key is forgotten with its request, 15 minutes after the request finished, so a retry after that
+dispatches a fresh one. Mint a new key per operator action rather than reusing one.
 
 `202 Accepted` with every target queued — the verdicts arrive asynchronously:
 
@@ -246,6 +248,10 @@ What it touches, and what it does not:
   program has never heard of — is decoded, re-encoded and left alone.
 - It is idempotent: running `install` three times leaves one entry per event.
 - The previous file is kept as `settings.json.claudeswap-backup` before each edit.
+- The rewrite also makes `settings.json` **owner-only** (0600, or an owner-only ACL on Windows),
+  because it goes through the same private-write path as the agent's own state. That is a
+  tightening, not a loosening, but it is a change: a tool that expected the file to be
+  group-readable would stop reading it. The backup carries the old content, not the old mode.
 - `uninstall` prunes an event list it empties and the `hooks` object if that empties, and a file
   with none of this program's entries is not rewritten at all.
 - A `settings.json` that cannot be parsed is **refused**, not rewritten: a rewrite would lose

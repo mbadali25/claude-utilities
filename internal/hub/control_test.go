@@ -183,6 +183,53 @@ func TestRepairExpandsToThreeStepsNamedAfterTheSession(t *testing.T) {
 	}
 }
 
+// The name to latch is the session's own name, never the stale remote title the operator is
+// replacing: naming a session after its latched title would be a no-op by construction.
+func TestRepairNamesTheSessionAfterItsOwnNameNotItsRemoteName(t *testing.T) {
+	f := newFixture(t)
+	a, _, hostID := f.enrol("box")
+	s := sess("s-1", "alpha", 11)
+	s.RemoteName = "stale latched title"
+	f.report(a, hostID, proto.Report{Sessions: []proto.Session{s}})
+
+	v, err := f.h.Command(context.Background(), CommandRequest{
+		Command: proto.CmdRepair, Scope: ScopeHost, HostID: hostID, Confirm: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqs := a.answerCommands(3, proto.CommandRes{Status: proto.StatusUnsupported, Code: proto.CodeRequiresRestart})
+	if reqs[2].Name != "alpha" {
+		t.Fatalf("rename name = %q, want the session's own name", reqs[2].Name)
+	}
+	f.waitStatus(v.ID, func(x CommandView) bool { return x.Counts.Unsupported == 3 })
+}
+
+// Two sessions with no id on one host must not share a command bucket, or each would show the
+// other's commands in the state poll.
+func TestIdlessSessionsDoNotShareACommandBucket(t *testing.T) {
+	f := newFixture(t)
+	a, _, hostID := f.enrol("box")
+	f.report(a, hostID, proto.Report{Sessions: []proto.Session{sess("", "a", 11), sess("", "b", 12)}})
+
+	v, err := f.h.Command(context.Background(), CommandRequest{
+		Command: proto.CmdReloadPlugins, Scope: ScopeHost, HostID: hostID, Confirm: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Counts.Total != 2 {
+		t.Fatalf("counts = %+v", v.Counts)
+	}
+	a.answerCommands(2, proto.CommandRes{Status: proto.StatusFailed, Code: proto.CodeBadSessionID})
+	f.waitStatus(v.ID, func(x CommandView) bool { return x.Counts.Failed == 2 })
+	for _, hv := range f.h.Hosts() {
+		for _, sv := range hv.Sessions {
+			if len(sv.Commands) != 1 {
+				t.Fatalf("pid %d has %d commands, want its own one", sv.PID, len(sv.Commands))
+			}
+		}
+	}
+}
+
 func TestRepairFailsARenameWithNoName(t *testing.T) {
 	f := newFixture(t)
 	a, _, hostID := f.enrol("box")

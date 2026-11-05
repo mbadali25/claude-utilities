@@ -249,6 +249,64 @@ func TestDeliverMarksAndReportsOnce(t *testing.T) {
 	}
 }
 
+// A second request for the same command must not discard a delivered-but-unreported entry: the
+// hub would then time that command out as failed although it was delivered.
+func TestQueueingAgainKeepsADeliveredNotice(t *testing.T) {
+	ctl, _ := newTestControl(t, false)
+	if res := ctl.ex.run(CommandTask{CommandID: "c1", Command: proto.CmdReloadPlugins, SessionID: testSession}); res.Status != proto.StatusQueued {
+		t.Fatalf("first: %+v", res)
+	}
+	if _, err := ctl.q.deliver(testSession); err != nil { // the hook runs
+		t.Fatal(err)
+	}
+	// Before the next report goes out, the operator asks again.
+	if res := ctl.ex.run(CommandTask{CommandID: "c2", Command: proto.CmdReloadPlugins, SessionID: testSession}); res.Status != proto.StatusQueued {
+		t.Fatalf("second: %+v", res)
+	}
+	got := ctl.q.delivered()
+	if len(got) != 1 || got[0].CommandID != "c1" {
+		t.Fatalf("delivered = %+v, want c1 still pending a report", got)
+	}
+	// c2 is queued and undelivered, so the file holds both.
+	f, err := ctl.q.read(testSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Entries) != 2 {
+		t.Fatalf("entries = %+v", f.Entries)
+	}
+	// Once c1 is confirmed it goes, and c2 is untouched.
+	ctl.q.confirmReported(got)
+	f, err = ctl.q.read(testSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Entries) != 1 || f.Entries[0].CommandID != "c2" {
+		t.Fatalf("entries = %+v", f.Entries)
+	}
+}
+
+// Re-queueing a command id that is already delivered must not ask the model twice or report twice.
+func TestQueueingADeliveredCommandIDAgainIsANoop(t *testing.T) {
+	ctl, _ := newTestControl(t, false)
+	task := CommandTask{CommandID: "c1", Command: proto.CmdReloadPlugins, SessionID: testSession}
+	ctl.ex.run(task)
+	if _, err := ctl.q.deliver(testSession); err != nil {
+		t.Fatal(err)
+	}
+	ctl.ex.run(task)
+	f, err := ctl.q.read(testSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Entries) != 1 || f.Entries[0].DeliveredAt == nil {
+		t.Fatalf("entries = %+v", f.Entries)
+	}
+	if got := ctl.q.delivered(); len(got) != 1 {
+		t.Fatalf("delivered = %+v", got)
+	}
+}
+
 func TestDeliveredIsBoundedByTheReportLimit(t *testing.T) {
 	dir := t.TempDir()
 	q := newQueue(dir, fixedClock())

@@ -309,8 +309,11 @@ func (h *Hub) matchSessionsLocked(req CommandRequest) ([]sessionTarget, map[stri
 			if _, stale := ho.reloadIDs[sessionKey(s)]; req.OnlyNeedsReload && !stale {
 				continue
 			}
+			// The name to latch is the session's OWN name, as `/rename` set it. RemoteName is
+			// the stale latched title the operator is trying to replace, so naming a session
+			// after it would be a no-op by construction the day Claude Code starts writing it.
 			out = append(out, sessionTarget{hostID: id, sessionID: s.ID, pid: s.PID,
-				name: proto.CleanRemoteName(firstNonEmpty(s.RemoteName, s.Name))})
+				name: proto.CleanRemoteName(s.Name)})
 			conns[id] = ho.c
 		}
 	}
@@ -326,13 +329,6 @@ func (h *Hub) matchSessionsLocked(req CommandRequest) ([]sessionTarget, map[stri
 		return nil, nil, ErrNoCommandTargets
 	}
 	return out, conns, nil
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // Command fans one operator request out to the sessions it names and returns the request's view
@@ -393,7 +389,7 @@ func (h *Hub) Command(ctx context.Context, req CommandRequest) (CommandView, err
 			}
 			b.targets = append(b.targets, t)
 			h.cmdByID[tid] = t
-			key := m.hostID + "|" + m.sessionID
+			key := cmdSessionKey(m.hostID, m.pid, m.sessionID)
 			list := append(h.cmdBySession[key], t)
 			if len(list) > maxSessionCommands {
 				list = list[len(list)-maxSessionCommands:]
@@ -534,7 +530,7 @@ func (h *Hub) pruneCommandsLocked() {
 func (h *Hub) forgetCommandLocked(id string, b *cmdBatch) {
 	for _, t := range b.targets {
 		delete(h.cmdByID, t.id)
-		key := t.hostID + "|" + t.sessionID
+		key := cmdSessionKey(t.hostID, t.pid, t.sessionID)
 		keep := h.cmdBySession[key][:0]
 		for _, x := range h.cmdBySession[key] {
 			if x != t {
@@ -586,9 +582,16 @@ func (h *Hub) Commands(limit int) []CommandView {
 	return out
 }
 
+// cmdSessionKey identifies one session's command bucket. It carries the pid as well as the id,
+// because a session can report an empty id (sessions.NeedsReload allows for it) and two of those
+// on one host would otherwise share a bucket and show each other's commands.
+func cmdSessionKey(hostID string, pid int, sessionID string) string {
+	return fmt.Sprintf("%s|%d:%s", hostID, pid, sessionID)
+}
+
 // sessionCommandsLocked returns one session's recent targets, oldest first. Callers hold h.mu.
-func (h *Hub) sessionCommandsLocked(hostID, sessionID string) []CommandTargetView {
-	list := h.cmdBySession[hostID+"|"+sessionID]
+func (h *Hub) sessionCommandsLocked(hostID string, s proto.Session) []CommandTargetView {
+	list := h.cmdBySession[cmdSessionKey(hostID, s.PID, s.ID)]
 	if len(list) == 0 {
 		return nil
 	}

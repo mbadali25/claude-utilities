@@ -627,7 +627,7 @@ func (h *Hub) Hosts() []HostView {
 		for _, s := range ho.report.Sessions {
 			_, stale := ho.reloadIDs[sessionKey(s)]
 			v.Sessions = append(v.Sessions, SessionView{Session: s, NeedsReload: stale,
-				Commands: h.sessionCommandsLocked(ho.ID, s.ID)})
+				Commands: h.sessionCommandsLocked(ho.ID, s)})
 		}
 		out = append(out, v)
 	}
