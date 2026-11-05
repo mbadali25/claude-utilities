@@ -302,7 +302,10 @@ func TestRefreshedUsageShowsOnTheAccountsEndpoint(t *testing.T) {
 }
 
 // Info and Touch satisfy usageAPI for the map fake: every account is idle on the default schedule.
-func (u fakeUsage) Info(string) usage.Info {
+func (u fakeUsage) Info(id string) usage.Info {
+	if x := u[id]; !x.RetryAt.IsZero() {
+		return usage.Info{Tier: usage.TierBackoff, NextAt: x.RetryAt}
+	}
 	return usage.Info{Tier: usage.TierIdle, Every: 20 * time.Minute}
 }
 func (u fakeUsage) Touch(string) {}
@@ -374,7 +377,7 @@ func TestAccountsReportScheduleAndRetryForAStaleRateLimitedAccount(t *testing.T)
 	if g.Error != "rate limited" || g.SevenDay == nil || g.SevenDay.LeftPct != 95 {
 		t.Fatalf("stale data lost: %+v", g)
 	}
-	if g.RetryInSec == nil || *g.RetryInSec != 450 || g.Tier != "idle" || g.CheckEverySec != 1200 {
+	if g.RetryInSec == nil || *g.RetryInSec != 450 || g.Tier != "backoff" || g.CheckEverySec != 0 {
 		t.Fatalf("schedule: %+v", g)
 	}
 }

@@ -96,6 +96,7 @@ func e2eAccounts(t *testing.T, r *rig) {
 		{"acct-low", "staging", "staging@example.test", 93, 88, 3 * time.Minute, ""},
 		{"acct-out", "burned", "burned@example.test", 100, 100, 5 * time.Minute, ""},
 		{"acct-err", "billing", "billing@example.test", 35, 61, 20 * time.Minute, "rate limited"},
+		{"acct-auth", "legacy", "legacy@example.test", 30, 40, 3 * time.Hour, "unauthorized"},
 		{"acct-stale", "archive", "archive@example.test", 44, 52, 40 * time.Minute, ""},
 		{"acct-nodata", "spare", "spare@example.test", -1, -1, 0, ""},
 		{"acct-half", "research", "research@example.test", 70, -1, 7 * time.Minute, ""},
@@ -115,6 +116,9 @@ func e2eAccounts(t *testing.T, r *rig) {
 		}
 		if s.seven >= 0 {
 			u.SevenDay = usage.Window{UsedPct: s.seven, ResetsAt: fixedNow.Add(72 * time.Hour)}
+		}
+		if s.err == "rate limited" { // a stale card says when the poller will look again
+			u.RetryAt = fixedNow.Add(7 * time.Minute)
 		}
 		r.usage[s.id] = u
 	}

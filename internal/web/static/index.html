@@ -1186,8 +1186,18 @@
   var hostFilter = { mode: pref('hostFilter', 'all'), q: '' };
 
   function pct(w) { return w ? Math.max(0, Math.min(100, Math.round(w.leftPct))) : null; }
+  // A failed poll that left good numbers behind (rate limited, endpoint down) is stale, not broken:
+  // the card keeps its numbers and says since when. Only a login the endpoint refuses, or an
+  // account that has never been read, is a problem.
+  function isStale(a) { return !!(a.error && a.fetchedAt && a.error !== 'unauthorized'); }
+  function clock(iso) { var d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+  function mins(s) { var m = Math.max(1, Math.round(s / 60)); return m < 90 ? m + ' min' : Math.round(m / 60) + ' h'; }
+  function retryLine(a) {
+    var why = a.error === 'rate limited' ? 'rate limited' : a.error;
+    return 'Stale since ' + clock(a.fetchedAt) + ' (' + why + (a.retryInSec != null ? ', retry in ' + mins(a.retryInSec) : '') + ')';
+  }
   function level(a) { // worst state across both windows, for the card's top edge and the filters
-    if (a.error) return 'err';
+    if (a.error && !isStale(a)) return 'err';
     var p5 = pct(a.fiveHour), p7 = pct(a.sevenDay), worst = null;
     [p5, p7].forEach(function (p) { if (p !== null && (worst === null || p < worst)) worst = p; });
     if (worst === null) return 'none';
@@ -1255,6 +1265,7 @@
   // The card's state, in one chip: the error when there is one, otherwise how old the numbers are.
   // It sits in the header, so it is read whether the card is open or closed.
   function statusChip(a) {
+    if (isStale(a)) return chip('Stale since ' + clock(a.fetchedAt), 'warn', 'warn');
     if (a.error) return chip(a.error, 'bad', 'bad');
     if (a.ageSeconds == null) return chip('Not polled', '', 'info');
     if (a.ageSeconds > 900) return chip('Stale, ' + ago(a.ageSeconds), 'warn', 'warn');
@@ -1274,7 +1285,17 @@
     var k = openKey(card.dataset.id);
     if (open) prefs[k] = true; else delete prefs[k];
     savePrefs();
+    if (open) watch(card.dataset.id);
   }
+  // An open card is being looked at: tell the server so it checks that account more often. The
+  // server forgets after a few minutes, so the page renews while the tab is visible. Failures are
+  // ignored; the schedule only gets slower.
+  function watch(id) { call('POST', '/api/usage/watch', { account: id }).catch(function () {}); }
+  function watchOpen() {
+    if (document.hidden) return;
+    Array.prototype.forEach.call(document.querySelectorAll('#accounts .card.acct.open'), function (c) { watch(c.dataset.id); });
+  }
+  setInterval(watchOpen, 240000);
   function setAllOpen(open) {
     var cards = document.querySelectorAll('#accounts .card.acct');
     Array.prototype.forEach.call(cards, function (c) { setOpen(c, open); });
@@ -1322,6 +1343,7 @@
     // at once, against the one in the panel that already says what the round did.
     var n = notes[a.id];
     if (n) c.appendChild(el('p', n.text, 'acct-note' + (n.bad ? ' bad' : '')));
+    else if (isStale(a)) c.appendChild(el('p', retryLine(a), 'acct-note'));
 
     var body = el('div', undefined, 'acct-body'); body.id = bodyID; body.hidden = !open;
     body.appendChild(nameRow(c, a));
@@ -1334,7 +1356,10 @@
     else held.appendChild(chip('Free', '', 'info'));
     body.appendChild(held);
     var foot = el('div', undefined, 'acct-foot');
-    foot.appendChild(el('span', a.ageSeconds == null ? 'Never polled' : 'Polled ' + ago(a.ageSeconds)));
+    var when = a.ageSeconds == null ? 'Never polled' : 'Polled ' + ago(a.ageSeconds);
+    if (a.tier === 'backoff') when += a.retryInSec != null ? '. Next check in ' + mins(a.retryInSec) : '';
+    else if (a.checkEverySec) when += '. Checks every ' + mins(a.checkEverySec);
+    foot.appendChild(el('span', when));
     foot.appendChild(refreshBtn(a));
     body.appendChild(foot);
     c.appendChild(body);
@@ -1377,7 +1402,7 @@
     var n = {};
     rows.forEach(function (r) {
       n[r.status] = (n[r.status] || 0) + 1;
-      if (r.status === 'rate_limited') notes[r.id] = { text: 'Polled too recently; try again shortly.' };
+      if (r.status === 'rate_limited') notes[r.id] = { text: 'Not polled: ' + (r.retryAfterSec > 60 ? 'backing off, next allowed in ' + mins(r.retryAfterSec) : 'polled too recently, try again shortly') + '.' };
       else if (r.status === 'error') notes[r.id] = { text: 'The poll failed: ' + (r.error || 'unavailable') + '.', bad: true };
       else delete notes[r.id];
     });
@@ -2814,6 +2839,7 @@
   }
 
   refresh();
+  setTimeout(watchOpen, 1500);
   setInterval(loadPending, 5000);
   // Never discard an open rename, an open swap confirm, an in-flight ask or an open ask dialog,
   // and never re-render the cards from under a refresh the operator is watching.
