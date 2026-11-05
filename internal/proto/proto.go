@@ -2,10 +2,13 @@
 package proto
 
 import (
+	"crypto/sha256"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"claude-utilities/internal/logx"
@@ -18,6 +21,9 @@ const Version = 1
 
 const (
 	TypeHello     = "hello"
+	TypePending   = "pending"
+	TypeApproved  = "approved"
+	TypeDenied    = "denied"
 	TypeHeartbeat = "heartbeat"
 	TypeReport    = "report"
 	TypeExportReq = "export_req"
@@ -34,10 +40,39 @@ type Envelope struct {
 	Body json.RawMessage `json:"body,omitempty"`
 }
 
+// Hello is the first frame an agent sends. A set Token is a reconnect; a set Code is the
+// pre-approved enrolment path; neither means the agent waits in the pending queue.
 type Hello struct {
 	Token    string `json:"token"`
+	Code     string `json:"code,omitempty"`
 	HostName string `json:"hostName"`
 	OS       string `json:"os"`
+	// Nonce is a per-attempt random value that makes the fingerprint unique to one dial.
+	Nonce string `json:"nonce,omitempty"`
+}
+
+// Pending tells an agent it is queued for owner approval. It carries no account data.
+type Pending struct {
+	Fingerprint string    `json:"fingerprint"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+}
+
+// Approved is the one server-to-agent message that carries a token.
+type Approved struct {
+	Token string `json:"token"`
+}
+
+// Denied tells an agent its enrolment was refused.
+type Denied struct {
+	Reason     string        `json:"reason,omitempty"`
+	RetryAfter time.Duration `json:"retryAfter,omitempty"`
+}
+
+// Fingerprint is 8 lowercase base32 characters of SHA-256 over HostName|OS|Nonce, so the
+// agent and the server compute the same value for the owner to match.
+func Fingerprint(h Hello) string {
+	sum := sha256.Sum256([]byte(h.HostName + "|" + h.OS + "|" + h.Nonce))
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:])[:8])
 }
 
 type Session struct {
@@ -90,11 +125,18 @@ func (e Envelope) LogValue() slog.Value {
 }
 
 func (h Hello) String() string {
-	return fmt.Sprintf("Hello{HostName:%s OS:%s Token:%s}", logx.Redact(h.HostName), logx.Redact(h.OS), mask)
+	return fmt.Sprintf("Hello{HostName:%s OS:%s Token:%s Code:%s}", logx.Redact(h.HostName), logx.Redact(h.OS), mask, mask)
 }
 func (h Hello) GoString() string { return h.String() }
 func (h Hello) LogValue() slog.Value {
-	return slog.GroupValue(slog.String("hostName", logx.Redact(h.HostName)), slog.String("os", logx.Redact(h.OS)), slog.String("token", mask))
+	return slog.GroupValue(slog.String("hostName", logx.Redact(h.HostName)), slog.String("os", logx.Redact(h.OS)),
+		slog.String("token", mask), slog.String("code", mask))
+}
+
+func (a Approved) String() string   { return "Approved{Token:" + mask + "}" }
+func (a Approved) GoString() string { return a.String() }
+func (a Approved) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("token", mask))
 }
 
 func (r ExportRes) String() string {
