@@ -275,6 +275,25 @@
   }
   var G = { ok: 'M2 6.5l2.5 2.5L10 3', bad: 'M3 3l6 6M9 3l-6 6', warn: 'M6 2v5M6 10v.01', info: 'M6 5v4M6 2.5v.01' };
   function chip(text, kind, g) { var c = el('span', undefined, 'chip' + (kind ? ' ' + kind : '')); if (g) c.appendChild(glyph(G[g])); c.appendChild(document.createTextNode(text)); return c; }
+  // Restart line for a stale session: the command plus a copy button. See
+  // docs/runbooks/session-reload.md - no mechanism reloads a running session's login.
+  function restartLine(cmd) {
+    var row = el('div', undefined, 'row wrap');
+    row.appendChild(el('span', 'Restart with', 'mut'));
+    row.appendChild(el('code', cmd, 'code'));
+    var b = el('button', 'Copy', 'btn sm ghost');
+    b.type = 'button';
+    b.addEventListener('click', function () {
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1500); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(cmd).then(done, function () { say('Copy failed; select the command instead.'); });
+        return;
+      }
+      say('Copy is unavailable here; select the command instead.');
+    });
+    row.appendChild(b);
+    return row;
+  }
   function fmtDate(iso) {
     var d = new Date(iso); if (isNaN(d)) return '-';
     return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -398,6 +417,8 @@
       h.sessions.forEach(function (s) {
         var li = el('li'); li.appendChild(el('span', (s.cwd || 'pid ' + s.pid)));
         if (s.needsReload) li.appendChild(chip('Needs reload', 'warn', 'warn'));
+        // Nothing can reload a running session's login, so hand over the restart command.
+        if (s.restartCommand) li.appendChild(restartLine(s.restartCommand));
         ul.appendChild(li);
       });
       d.appendChild(ul);

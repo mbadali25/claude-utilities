@@ -428,6 +428,17 @@ func TestRestartCommandOnlyForNeedsReloadSessions(t *testing.T) {
 	}
 }
 
+func TestPageRendersRestartCommand(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	p := page(r, s)
+	for _, want := range []string{"restartCommand", "Restart"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+}
+
 func TestRestartCommandRejectsUntrustedID(t *testing.T) {
 	// PID, ID and Cwd all arrive from the agent. A command the operator pastes into a shell
 	// must never carry agent-supplied text, so anything but a UUID falls back to --continue.
