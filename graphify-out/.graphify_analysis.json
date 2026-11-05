@@ -1,0 +1,303 @@
+{
+  "communities": {
+    "0": [
+      "go_type_bytes_buffer",
+      "go_type_io_writer",
+      "go_type_log_slog_logger",
+      "go_type_testing_t",
+      "internal_logx_logx_allowlist_test",
+      "internal_logx_logx_allowlist_test_logline",
+      "internal_logx_logx_allowlist_test_testallowlistdropsunknownkeys",
+      "internal_logx_logx_allowlist_test_testallowlistedstringvalueisredactedandcapped",
+      "internal_logx_logx_allowlist_test_testallowlistkeepsknownkeys",
+      "internal_logx_logx_allowlist_test_testallowrejectssecretnames",
+      "internal_logx_logx_allowlist_test_testgroupedsecretdropped",
+      "internal_logx_logx_allowlist_test_testnonprimitiveunderallowedkeydropped",
+      "internal_logx_logx_allowlist_test_testredacturluserinfopemandvendortokens",
+      "internal_logx_logx_new",
+      "internal_logx_logx_review_test_testloggerredactsmapkeysandnestederrors",
+      "internal_logx_logx_review_test_testloggerredactssecretnamedgroupchildren",
+      "internal_logx_logx_test",
+      "internal_logx_logx_test_testloggernilstringerdoesnotpanic",
+      "internal_logx_logx_test_testloggerredactserrorandstringer",
+      "internal_logx_logx_test_testloggerredactskeyfamilies",
+      "internal_logx_logx_test_testloggerredactskeyvariants",
+      "internal_logx_logx_test_testloggerredactsmessageandmixedcasegroupkey",
+      "internal_logx_logx_test_testloggerredactsnestedgroupattr",
+      "internal_logx_logx_test_testloggerredactsrawbytesmapsandstructs",
+      "internal_logx_logx_test_testloggerredactssecretattrs",
+      "internal_logx_logx_test_testredactemail",
+      "internal_logx_logx_test_testredactescapedjsonandotherforms",
+      "internal_logx_logx_test_testredactextraformats",
+      "internal_logx_logx_test_testredactkeepsbenigncodeandmasksoauthcode",
+      "internal_logx_logx_test_testredactmasksbearer",
+      "internal_proto_swapres_test",
+      "internal_proto_swapres_test_testswapresredactsreasonwhenlogged",
+      "logx_stringer",
+      "logx_stringer_string"
+    ],
+    "1": [
+      "go_type_context_context",
+      "go_type_log_slog_attr",
+      "go_type_log_slog_handler",
+      "go_type_log_slog_level",
+      "go_type_log_slog_record",
+      "go_type_regexp_regexp",
+      "internal_logx_logx",
+      "internal_logx_logx_allow",
+      "internal_logx_logx_clean",
+      "internal_logx_logx_err",
+      "internal_logx_logx_isallowed",
+      "internal_logx_logx_jsonvalueend",
+      "internal_logx_logx_kvsecret",
+      "internal_logx_logx_normkey",
+      "internal_logx_logx_redactjson",
+      "internal_logx_logx_safe",
+      "internal_logx_logx_secretkey",
+      "logx_handler",
+      "logx_handler_enabled",
+      "logx_handler_handle",
+      "logx_handler_sanitize",
+      "logx_handler_withattrs",
+      "logx_handler_withgroup"
+    ],
+    "2": [
+      "internal_proto_proto_decode",
+      "internal_proto_proto_encode",
+      "internal_proto_proto_test",
+      "internal_proto_proto_test_testcredentialtypesdonotleakwhenlogged",
+      "internal_proto_proto_test_testdecodebodynullandnonobject",
+      "internal_proto_proto_test_testdecoderejectsemptytype",
+      "internal_proto_proto_test_testdecoderejectsmalformedjson",
+      "internal_proto_proto_test_testdecoderejectsoversize",
+      "internal_proto_proto_test_testdecoderejectswrongversion",
+      "internal_proto_proto_test_testencodedecoderoundtrip",
+      "internal_proto_proto_test_testencodenilbody",
+      "internal_proto_proto_test_testencodeunmarshalablebody",
+      "internal_proto_proto_test_testenvelopeneverleaksbody",
+      "internal_proto_proto_test_testpiifieldsredactedwhenrendered",
+      "internal_proto_proto_test_testreportnilsessionsmarshalsemptyarray",
+      "internal_proto_proto_test_testswapresnevercarriesblock",
+      "internal_proto_proto_test_testswapresonlyokandreason"
+    ],
+    "3": [
+      "claude_workflows_spec_to_landing",
+      "claude_workflows_spec_to_landing_board",
+      "claude_workflows_spec_to_landing_done",
+      "claude_workflows_spec_to_landing_exists_schema",
+      "claude_workflows_spec_to_landing_gate_schema",
+      "claude_workflows_spec_to_landing_impl_schema",
+      "claude_workflows_spec_to_landing_land_schema",
+      "claude_workflows_spec_to_landing_meta",
+      "claude_workflows_spec_to_landing_review_schema",
+      "claude_workflows_spec_to_landing_spec_schema",
+      "claude_workflows_spec_to_landing_tasks_schema"
+    ],
+    "4": [
+      "verify_smoke",
+      "verify_smoke_agent_builds",
+      "verify_smoke_check",
+      "verify_smoke_cleanup",
+      "verify_smoke_gofmt_clean",
+      "verify_smoke_need_go",
+      "verify_smoke_server_builds",
+      "verify_smoke_sh__entry"
+    ],
+    "5": [
+      "internal_logx_logx_redact",
+      "internal_logx_logx_review_test",
+      "internal_logx_logx_review_test_testredactcamelcaseandnestedjson",
+      "internal_logx_logx_review_test_testredactdoesnotmaskcounters",
+      "internal_logx_logx_review_test_testredactkeepssurroundingjsonvalid",
+      "internal_logx_logx_review_test_testredactquotedvalueswithspaces"
+    ],
+    "6": [
+      "go_type_time_time",
+      "internal_proto_proto",
+      "proto_report",
+      "proto_report_marshaljson",
+      "proto_session"
+    ],
+    "7": [
+      "verify_run_all",
+      "verify_run_all_cleanup",
+      "verify_run_all_run",
+      "verify_run_all_sh__entry",
+      "verify_run_all_skip"
+    ],
+    "8": [
+      "go_type_encoding_json_rawmessage",
+      "proto_envelope",
+      "proto_envelope_gostring",
+      "proto_envelope_string"
+    ],
+    "9": [
+      "go_type_log_slog_value",
+      "logx_lv",
+      "logx_lv_logvalue",
+      "proto_envelope_logvalue"
+    ],
+    "10": [
+      "proto_exportres",
+      "proto_exportres_gostring",
+      "proto_exportres_logvalue",
+      "proto_exportres_string"
+    ],
+    "11": [
+      "proto_hello",
+      "proto_hello_gostring",
+      "proto_hello_logvalue",
+      "proto_hello_string"
+    ],
+    "12": [
+      "proto_swapreq",
+      "proto_swapreq_gostring",
+      "proto_swapreq_logvalue",
+      "proto_swapreq_string"
+    ],
+    "13": [
+      "proto_swapres",
+      "proto_swapres_gostring",
+      "proto_swapres_logvalue",
+      "proto_swapres_string"
+    ],
+    "14": [
+      "logx_nilstringer",
+      "logx_nilstringer_string"
+    ],
+    "15": [
+      "pkg_claude_utilities"
+    ]
+  },
+  "cohesion": {
+    "0": 0.1319073083778966,
+    "1": 0.16205533596837945,
+    "2": 0.17647058823529413,
+    "3": 0.18181818181818182,
+    "4": 0.2857142857142857,
+    "5": 0.5333333333333333,
+    "6": 0.5,
+    "7": 0.6,
+    "8": 0.5,
+    "9": 0.5,
+    "10": 0.5,
+    "11": 0.5,
+    "12": 0.5,
+    "13": 0.5,
+    "14": 1.0,
+    "15": 1.0
+  },
+  "gods": [
+    {
+      "id": "internal_logx_logx_redact",
+      "label": "Redact()",
+      "degree": 24
+    },
+    {
+      "id": "internal_logx_logx_new",
+      "label": "New()",
+      "degree": 21
+    },
+    {
+      "id": "internal_proto_proto_decode",
+      "label": "Decode()",
+      "degree": 9
+    },
+    {
+      "id": "internal_logx_logx_allowlist_test_logline",
+      "label": "logLine()",
+      "degree": 8
+    },
+    {
+      "id": "logx_handler",
+      "label": "handler",
+      "degree": 7
+    },
+    {
+      "id": "proto_envelope",
+      "label": "Envelope",
+      "degree": 6
+    },
+    {
+      "id": "internal_logx_logx_err",
+      "label": "Err()",
+      "degree": 5
+    },
+    {
+      "id": "internal_logx_logx_normkey",
+      "label": "normKey()",
+      "degree": 5
+    },
+    {
+      "id": "internal_logx_logx_redactjson",
+      "label": "redactJSON()",
+      "degree": 5
+    },
+    {
+      "id": "internal_logx_logx_clean",
+      "label": "clean()",
+      "degree": 5
+    }
+  ],
+  "surprises": [
+    {
+      "source": "TestAllowRejectsSecretNames()",
+      "target": "Allow()",
+      "source_files": [
+        "internal/logx/logx_allowlist_test.go",
+        "internal/logx/logx.go"
+      ],
+      "confidence": "INFERRED",
+      "relation": "calls",
+      "why": "inferred connection - not explicitly stated in source; bridges separate communities"
+    },
+    {
+      "source": "TestLoggerRedactsErrorAndStringer()",
+      "target": "Err()",
+      "source_files": [
+        "internal/logx/logx_test.go",
+        "internal/logx/logx.go"
+      ],
+      "confidence": "INFERRED",
+      "relation": "calls",
+      "why": "inferred connection - not explicitly stated in source; bridges separate communities"
+    },
+    {
+      "source": "TestRedactURLUserinfoPEMAndVendorTokens()",
+      "target": "Redact()",
+      "source_files": [
+        "internal/logx/logx_allowlist_test.go",
+        "internal/logx/logx.go"
+      ],
+      "confidence": "INFERRED",
+      "relation": "calls",
+      "why": "inferred connection - not explicitly stated in source; bridges separate communities"
+    },
+    {
+      "source": "TestRedactEmail()",
+      "target": "Redact()",
+      "source_files": [
+        "internal/logx/logx_test.go",
+        "internal/logx/logx.go"
+      ],
+      "confidence": "INFERRED",
+      "relation": "calls",
+      "why": "inferred connection - not explicitly stated in source; bridges separate communities"
+    },
+    {
+      "source": "TestRedactEscapedJSONAndOtherForms()",
+      "target": "Redact()",
+      "source_files": [
+        "internal/logx/logx_test.go",
+        "internal/logx/logx.go"
+      ],
+      "confidence": "INFERRED",
+      "relation": "calls",
+      "why": "inferred connection - not explicitly stated in source; bridges separate communities"
+    }
+  ],
+  "tokens": {
+    "input": 0,
+    "output": 0
+  }
+}
