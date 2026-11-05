@@ -436,14 +436,14 @@ func TestRunStopsOnContextCancelAndPollsImmediately(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	updated := make(chan struct{}, 1)
+	p.SetAccounts(func() []vault.Account { return []vault.Account{acct("a", "t")} })
 	go func() {
-		p.Run(ctx, func() []vault.Account { return []vault.Account{acct("a", "t")} },
-			func(string, Usage) {
-				select {
-				case updated <- struct{}{}:
-				default:
-				}
-			})
+		p.Run(ctx, func(string, Usage) {
+			select {
+			case updated <- struct{}{}:
+			default:
+			}
+		})
 		close(done)
 	}()
 	select {

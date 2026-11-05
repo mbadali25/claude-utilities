@@ -197,9 +197,12 @@ type Poller struct {
 	now      func() time.Time
 
 	mu          sync.Mutex
+	accounts    func() []vault.Account
 	last        map[string]Usage
 	fails       map[string]int
 	nextAt      map[string]time.Time
+	manualAt    map[string]time.Time
+	inflight    map[string]*flight
 	refresher   Refresher
 	onRefreshed func(accountID string, block json.RawMessage)
 }
@@ -209,7 +212,26 @@ func NewPoller(d Doer, interval time.Duration) *Poller {
 	return &Poller{
 		d: d, interval: interval, now: time.Now,
 		last: map[string]Usage{}, fails: map[string]int{}, nextAt: map[string]time.Time{},
+		manualAt: map[string]time.Time{}, inflight: map[string]*flight{},
 	}
+}
+
+// SetAccounts names where the poller reads the accounts to poll. The func must return only
+// server-owned accounts. Call it before Run; RefreshNow reports an unknown account until it is set.
+func (p *Poller) SetAccounts(accounts func() []vault.Account) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.accounts = accounts
+}
+
+// accountsFn returns the configured source, or one that yields nothing.
+func (p *Poller) accountsFn() func() []vault.Account {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.accounts == nil {
+		return func() []vault.Account { return nil }
+	}
+	return p.accounts
 }
 
 // SetRefresher enables one refresh-and-retry on 401. onRefreshed receives the
@@ -229,13 +251,13 @@ func (p *Poller) Last(accountID string) (Usage, bool) {
 	return u, ok
 }
 
-// Run polls immediately, then every interval, until ctx ends. The accounts
-// func must return only server-owned accounts.
-func (p *Poller) Run(ctx context.Context, accounts func() []vault.Account, onUpdate func(accountID string, u Usage)) {
+// Run polls immediately, then every interval, until ctx ends. Call SetAccounts first: Run reads the
+// accounts from there, so an on-demand RefreshNow and the schedule always see the same set.
+func (p *Poller) Run(ctx context.Context, onUpdate func(accountID string, u Usage)) {
 	t := time.NewTicker(p.interval)
 	defer t.Stop()
 	for {
-		p.pollOnce(ctx, accounts, onUpdate)
+		p.pollOnce(ctx, p.accountsFn(), onUpdate)
 		select {
 		case <-ctx.Done():
 			return
@@ -324,30 +346,38 @@ func (p *Poller) pollOnce(ctx context.Context, accounts func() []vault.Account, 
 		if !due {
 			continue
 		}
-		u, err := p.fetchAccount(ctx, a)
-		p.mu.Lock()
-		if err == nil {
-			u.FetchedAt = p.now().UTC()
-			p.fails[a.ID] = 0
-			delete(p.nextAt, a.ID)
-		} else {
-			p.fails[a.ID]++
-			var ra time.Duration
-			var rl *RateLimitError
-			if errors.As(err, &rl) {
-				ra = rl.RetryAfter
-			}
-			wait := p.backoff(p.fails[a.ID], ra)
-			p.nextAt[a.ID] = p.now().Add(wait)
-			u = p.last[a.ID] // keep last-known windows and their FetchedAt
-			u.Err = category(err)
-			logger.Warn("poll failed", "action", "poll", "result", "failed", "account", a.ID,
-				"reason", u.Err, "field", SchemaField(err), "durationms", wait.Milliseconds())
-		}
-		p.last[a.ID] = u
-		p.mu.Unlock()
+		u, _ := p.poll(ctx, a, p.enter(a.ID, false))
 		if onUpdate != nil {
 			onUpdate(a.ID, u)
 		}
 	}
+}
+
+// record stores one poll's answer. A success clears the account's backoff; a failure counts against
+// it, keeps the last-known windows with their own FetchedAt, and names the failure category. It
+// returns what was stored, which is what every caller reports.
+func (p *Poller) record(id string, u Usage, err error) Usage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err == nil {
+		u.FetchedAt = p.now().UTC()
+		p.fails[id] = 0
+		delete(p.nextAt, id)
+		p.last[id] = u
+		return u
+	}
+	p.fails[id]++
+	var ra time.Duration
+	var rl *RateLimitError
+	if errors.As(err, &rl) {
+		ra = rl.RetryAfter
+	}
+	wait := p.backoff(p.fails[id], ra)
+	p.nextAt[id] = p.now().Add(wait)
+	u = p.last[id] // keep last-known windows and their FetchedAt
+	u.Err = category(err)
+	logger.Warn("poll failed", "action", "poll", "result", "failed", "account", id,
+		"reason", u.Err, "field", SchemaField(err), "durationms", wait.Milliseconds())
+	p.last[id] = u
+	return u
 }
