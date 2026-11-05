@@ -10,8 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"claude-utilities/internal/ownership"
 	"claude-utilities/internal/proto"
+	"claude-utilities/internal/vault"
 )
 
 const (
@@ -20,6 +23,18 @@ const (
 	newBlock    = `{"claudeAiOauth":{"accessToken":"NEW-ACCESS","refreshToken":"NEW-REFRESH"},"mcpOAuth":{"x":1}}`
 	newIdentity = "new.person@example.invalid"
 )
+
+// trySend is send for a background goroutine: a write that races the fixture's teardown is
+// returned, never fatal, because t.Fatal outside the test goroutine is not allowed.
+func (a *agent) trySend(typ, id string, body any) error {
+	b, err := proto.Encode(typ, id, body)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return a.ws.Write(ctx, websocket.MessageText, b)
+}
 
 // loginAgent drives a fake agent's side of an add-account job.
 type loginAgent struct {
@@ -50,7 +65,7 @@ func (f *fixture) loginAgent(a *agent) *loginAgent {
 			switch env.Type {
 			case proto.TypeLoginStart:
 				if !noURL {
-					a.send(proto.TypeLoginURL, env.ID, proto.LoginURL{URL: url})
+					_ = a.trySend(proto.TypeLoginURL, env.ID, proto.LoginURL{URL: url})
 				}
 			case proto.TypeLoginCode:
 				var lc proto.LoginCode
@@ -58,15 +73,15 @@ func (f *fixture) loginAgent(a *agent) *loginAgent {
 				la.mu.Lock()
 				la.codes = append(la.codes, lc.Code)
 				la.mu.Unlock()
-				a.send(proto.TypeLoginDone, env.ID, done)
+				_ = a.trySend(proto.TypeLoginDone, env.ID, done)
 			case proto.TypeLoginCancel:
 				la.mu.Lock()
 				la.cancels++
 				la.mu.Unlock()
 			case proto.TypeExportReq:
-				a.send(proto.TypeExportRes, env.ID, proto.ExportRes{Identity: "id-a", Block: json.RawMessage(`{"tok":"A-stored"}`)})
+				_ = a.trySend(proto.TypeExportRes, env.ID, proto.ExportRes{Identity: "id-a", Block: json.RawMessage(`{"tok":"A-stored"}`)})
 			case proto.TypeSwapReq:
-				a.send(proto.TypeSwapRes, env.ID, proto.SwapRes{OK: true})
+				_ = a.trySend(proto.TypeSwapRes, env.ID, proto.SwapRes{OK: true})
 			}
 		}
 	}()
@@ -161,6 +176,33 @@ func TestAddAccountDuplicateIdentity(t *testing.T) {
 	}
 	if n := len(f.v.List()); n != 3 {
 		t.Fatalf("vault has %d accounts", n)
+	}
+}
+
+// A sign-in waits up to 10 minutes, so the label AddAccount checked at the start can be taken by an
+// import or a rename before the login comes back. The shared store must refuse it, not store a
+// second account under the same label.
+func TestAddAccountLabelTakenDuringSignIn(t *testing.T) {
+	f := newFixture(t)
+	a, _, host := f.enrol("box")
+	f.loginAgent(a)
+	id, err := f.h.AddAccount(context.Background(), host, "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.waitState(id, AddAwaitingCode)
+	if err := f.v.Put(vault.Account{ID: "Z", Label: "Fresh", Identity: "id-z", Block: json.RawMessage(`{"tok":"Z"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.AddCode(id, addCodeVal); err != nil {
+		t.Fatal(err)
+	}
+	v := f.waitState(id, AddFailed)
+	if !strings.Contains(v.Error, "label already exists") || v.Account != nil {
+		t.Fatalf("view %+v", v)
+	}
+	if n := len(f.v.List()); n != 1 {
+		t.Fatalf("vault holds %d accounts; only the one that claimed the label may exist", n)
 	}
 }
 
