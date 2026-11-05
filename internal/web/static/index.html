@@ -203,10 +203,35 @@
   .swap { display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-top:1px solid var(--line); padding-top:12px; min-height:56px; }
   /* 120px basis: select, Swap and Revoke share one row in a 300px card instead of Revoke wrapping alone. */
   .swap select { flex:1 1 120px; min-width:0; }
-  /* The ghost Copy button sits flush with the command above it, not inset by its own padding. */
-  details.sess li .btn.ghost { margin-left:-10px; }
+  /* The ghost Copy button sits flush with the card's right edge, not inset by its own padding. */
+  details.sess li .btn.ghost { margin-right:-10px; }
   .confirm { display:flex; gap:8px; flex-wrap:wrap; align-items:center; width:100%; }
   .confirm .q { flex:1 1 100%; font-weight:600; }
+
+  /* Session control. An inline message sits under the controls that produced it, never in the
+     page-wide status line, so the error reads where the operator is looking. */
+  .msg { font-size:.85rem; color:var(--bad); }
+  .msg:empty { display:none; }
+  /* The needs-reload callout: the one block that offers the estate-wide repair. It takes the
+     warning edge the account cards use for the same state, not a tint of its own. */
+  .callout { background:var(--surface); border:1px solid var(--line); border-top:4px solid var(--warn);
+             border-radius:var(--r); padding:13px 16px; margin:0 0 16px; display:grid; gap:8px; }
+  .callout h2 { font-size:1rem; }
+  /* Host-wide asks sit on their own rule above the swap row, so "all sessions here" never reads
+     as part of one session. */
+  .ctl { display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-top:1px solid var(--line); padding-top:12px; }
+  .ctl .ctl-h { flex:1 1 100%; font-size:.85rem; color:var(--mut); font-weight:600; }
+  .ctl .msg, .sctl .msg { flex:1 1 100%; }
+  /* Per-session asks and their verdicts, inside the session row. */
+  .sctl { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-top:3px; }
+  .ctl .why, .sctl .why { font-size:.78rem; color:var(--mut); }
+  .cmds { display:grid; gap:4px; margin-top:2px; }
+  .cmd { display:flex; gap:6px; flex-wrap:wrap; align-items:baseline; min-width:0; }
+  .cmds .say { font-size:.78rem; color:var(--mut); }
+  /* The lead line carries the Copy button; the command itself runs full width underneath. */
+  .copyline { display:grid; gap:1px; min-width:0; }
+  .copyline code { overflow-wrap:anywhere; }
+  #ctl-summary:empty, #ctl-name-for:empty { display:none; }
 
   /* Account menu: a disclosure button over a floating menu. A shadow is for what floats. */
   .menuwrap { position:relative; }
@@ -241,7 +266,7 @@
   .fld { display:grid; gap:6px; font-weight:500; }
   .fld input { width:100%; }
   .fld .hint { font-weight:400; font-size:.85rem; color:var(--mut); }
-  #pw-form { display:grid; grid-template-columns:minmax(0,1fr); gap:14px; }
+  #pw-form, #ctl-name-form { display:grid; grid-template-columns:minmax(0,1fr); gap:14px; }
   #pw-msg:empty { display:none; }
 
   /* Import and add-account panels, both inside the Add a Claude account dialog */
@@ -376,7 +401,20 @@
 </section>
 
 <section id="panel-hosts" role="tabpanel" aria-labelledby="tab-hosts" tabindex="0" hidden>
+  <!-- The estate-wide repair. It appears only while a swap has left sessions on an old login,
+       which is when an operator wants it, and it never hides what the ask can and cannot do. -->
+  <!-- A div, not a section: web_test.go reads #panel-hosts up to the first </section>, and a
+       nested one would cut that short. The h2 still names it in the heading outline. -->
+  <div class="callout" id="ctl-repair" role="group" aria-labelledby="ctl-repair-h" hidden>
+    <h2 id="ctl-repair-h">Sessions are still on an old login</h2>
+    <p class="sub" id="ctl-repair-sub"></p>
+    <div class="row wrap">
+      <button type="button" class="btn primary" id="ctl-repair-go">Apply to all needs-reload sessions</button>
+      <span class="sub">Asks each one to reload plugins and reports the restart it still needs. Nothing is killed.</span>
+    </div>
+  </div>
   <p class="panel-meta count" id="host-count"></p>
+  <p class="panel-meta sub" id="ctl-summary" role="status" aria-live="polite"></p>
   <div id="hosts" class="grid"><p class="empty">Loading hosts...</p></div>
 </section>
 </div>
@@ -473,6 +511,49 @@
       <div class="modal-foot">
         <button type="button" class="btn" data-close="pw-dialog">Cancel</button>
         <button type="submit" class="btn primary" id="pw-save">Change password</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<!-- Session control's two dialogs. Both are native <dialog>, so Esc closes them, Tab stays inside
+     and focus returns to the control that opened them. -->
+<dialog class="modal" id="ctl-confirm" aria-labelledby="ctl-confirm-h" aria-describedby="ctl-confirm-body">
+  <div class="modal-head">
+    <h2 id="ctl-confirm-h">Confirm</h2>
+    <button type="button" class="btn sm ghost x" data-close="ctl-confirm" aria-label="Close without asking">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p id="ctl-confirm-body"></p>
+    <p class="mut" id="ctl-confirm-note"></p>
+    <p class="msg" id="ctl-confirm-msg" role="alert"></p>
+    <div class="modal-foot">
+      <button type="button" class="btn" data-close="ctl-confirm">Cancel</button>
+      <button type="button" class="btn primary" id="ctl-confirm-go">Ask the sessions</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog class="modal" id="ctl-name" aria-labelledby="ctl-name-h">
+  <div class="modal-head">
+    <h2 id="ctl-name-h">Fix the remote name</h2>
+    <button type="button" class="btn sm ghost x" data-close="ctl-name" aria-label="Close without asking">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p class="mut" id="ctl-name-for"></p>
+    <form id="ctl-name-form">
+      <label class="fld">Remote name
+        <input id="ctl-name-input" name="name" maxlength="256" required autocomplete="off" spellcheck="false" aria-describedby="ctl-name-hint">
+        <span class="hint" id="ctl-name-hint">256 characters or fewer, and anything past 200 is shortened to 200 when it is applied. The remote title is latched when the bridge binds, so a running session cannot take a new one: the answer will be the restart command that would.</span>
+      </label>
+      <p class="msg" id="ctl-name-msg" role="alert"></p>
+      <div class="modal-foot">
+        <button type="button" class="btn" data-close="ctl-name">Cancel</button>
+        <button type="submit" class="btn primary" id="ctl-name-go">Ask for this name</button>
       </div>
     </form>
   </div>
@@ -602,14 +683,20 @@
   }
   var G = { ok: 'M2 6.5l2.5 2.5L10 3', bad: 'M3 3l6 6M9 3l-6 6', warn: 'M6 2v5M6 10v.01', info: 'M6 5v4M6 2.5v.01' };
   function chip(text, kind, g) { var c = el('span', undefined, 'chip' + (kind ? ' ' + kind : '')); if (g) c.appendChild(glyph(G[g])); c.appendChild(document.createTextNode(text)); return c; }
-  // Restart line for a stale session: the command plus a copy button. See
-  // docs/runbooks/session-reload.md - no mechanism reloads a running session's login.
-  function restartLine(cmd) {
-    var row = el('div', undefined, 'row wrap');
-    row.appendChild(el('span', 'Restart with', 'mut'));
-    row.appendChild(el('code', cmd, 'code'));
+  // A command the operator has to run by hand, with a copy button. Several of these sit on one
+  // page, so each Copy carries its own accessible name. See docs/runbooks/session-reload.md and
+  // docs/runbooks/session-control.md - no mechanism reloads a running session's login, and none
+  // can bind Remote Control or latch a remote title on a running session either.
+  // The lead and the Copy button share the top line and the command runs full width under it:
+  // a command long enough to wrap would otherwise push Copy onto a line of its own, where a
+  // borderless button reads as a stray word.
+  function copyLine(lead, cmd, aria) {
+    var box = el('div', undefined, 'copyline');
+    var row = el('div', undefined, 'row between');
+    row.appendChild(el('span', lead, 'mut'));
     var b = el('button', 'Copy', 'btn sm ghost');
     b.type = 'button';
+    b.setAttribute('aria-label', aria || 'Copy the command');
     b.addEventListener('click', function () {
       var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1500); };
       if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -619,8 +706,11 @@
       say('Copy is unavailable here; select the command instead.');
     });
     row.appendChild(b);
-    return row;
+    box.appendChild(row);
+    box.appendChild(el('code', cmd, 'code'));
+    return box;
   }
+  function restartLine(cmd) { return copyLine('Restart with', cmd, 'Copy the restart command'); }
   function fmtDate(iso) {
     var d = new Date(iso); if (isNaN(d)) return '-';
     return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -848,10 +938,283 @@
   // STATUS_CAP bounds the status word: it is agent-supplied, and a chip is not a place for
   // a paragraph. The name is not capped here - it truncates by CSS and keeps its full title.
   var STATUS_CAP = 24;
+
+  // --- Session control -----------------------------------------------------------------
+  // POST /api/sessions/command asks a running session to do something. The verdicts arrive on
+  // the next /api/hosts poll, inside each session's commands[]; there is no status endpoint.
+  // The wording is the honest one from docs/runbooks/session-control.md: "delivered" means the
+  // instruction reached the session and never that it ran, and Remote Control and the remote
+  // title cannot be set on a running session at all, so those come back "needs restart".
+  var CMD_LABEL = {
+    reload_plugins: 'Reload plugins', remote_control_enable: 'Enable remote',
+    rename_remote: 'Fix name', repair: 'Repair'
+  };
+  var ST = {
+    queued: { word: 'Queued', count: 'queued', kind: '', g: 'info',
+      say: 'Queued: nothing has reached the session yet.' },
+    delivered: { word: 'Delivered', count: 'delivered', kind: 'ok', g: 'ok',
+      say: 'Delivered: the session runs it at its next prompt.' },
+    done: { word: 'Done', count: 'done', kind: 'ok', g: 'ok',
+      say: 'The session ran it.' },
+    failed: { word: 'Failed', count: 'failed', kind: 'bad', g: 'bad',
+      say: 'Failed: nothing was asked of the session.' },
+    unsupported: { word: 'Needs restart', count: 'need a restart', kind: 'warn', g: 'warn',
+      say: 'Needs restart: cannot be done on a running session.' }
+  };
+  // A status word is agent-reported, so an unknown one reads as itself rather than as nothing.
+  function stOf(k) { return ST[k] || { word: String(k || 'unknown').slice(0, STATUS_CAP), count: 'in an unknown state', kind: '', g: 'info', say: '' }; }
+
+  var ctlBusy = {}, lastAsk = null, nameAsk = null, confirmAsk = null;
+  var fastTimer = null, fastUntil = 0;
+  function ctlWorking() { for (var k in ctlBusy) { if (ctlBusy[k]) return true; } return false; }
+  function ctlDialogOpen() { return !!($('#ctl-name').open || $('#ctl-confirm').open); }
+  // One idempotency key per button press. The server forgets it 15 minutes after the request
+  // finishes, so it is only ever reused by retrying that same press.
+  function reqId() { return 'ui-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
+  // Code points, not UTF-16 units: the wire limit is 256 runes (proto.MaxRemoteName).
+  function runeLen(s) {
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      n++;
+      var c = s.charCodeAt(i);
+      if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) i++;
+    }
+    return n;
+  }
+
+  // The chips keep moving after the 202, so the summary line is recomputed from the poll's own
+  // commands[] rather than from the counts in the response. The two can then never disagree.
+  function trackAsk(v) {
+    var ids = {}, sess = {};
+    (v.targets || []).forEach(function (t) { ids[t.id] = true; sess[t.sessionId] = true; });
+    lastAsk = { command: v.command, ids: ids, targets: (v.targets || []).length,
+      sessions: Object.keys(sess).length };
+    startFastPoll(); renderAskSummary();
+  }
+  function renderAskSummary() {
+    var box = $('#ctl-summary');
+    if (!box) return;
+    if (!lastAsk) { box.textContent = ''; return; }
+    var n = {};
+    hostsCache.forEach(function (h) {
+      (h.sessions || []).forEach(function (s) {
+        (s.commands || []).forEach(function (c) { if (lastAsk.ids[c.id]) n[c.status] = (n[c.status] || 0) + 1; });
+      });
+    });
+    var parts = [];
+    ['queued', 'delivered', 'done', 'failed', 'unsupported'].forEach(function (k) {
+      if (n[k]) parts.push(n[k] + ' ' + stOf(k).count);
+    });
+    var sess = lastAsk.sessions;
+    var txt = 'Last ask: ' + (CMD_LABEL[lastAsk.command] || lastAsk.command) + ' on ' + sess +
+      (sess === 1 ? ' session' : ' sessions');
+    if (lastAsk.targets > sess) txt += ', ' + lastAsk.targets + ' commands';
+    box.textContent = txt + '. ' + (parts.length ? parts.join(', ') + '.' : 'No verdict yet.');
+  }
+  // The verdicts land within seconds, so the 30s poll is too slow to watch one. The fast poll
+  // runs for a minute, defers to an open dialog or an in-flight request, then stops itself.
+  function startFastPoll() {
+    fastUntil = Date.now() + 60000;
+    if (fastTimer) return;
+    fastTimer = setInterval(function () {
+      if (Date.now() > fastUntil) { clearInterval(fastTimer); fastTimer = null; return; }
+      if (ctlWorking() || ctlDialogOpen() || editing || confirming) return;
+      loadHosts().catch(function () {});
+    }, 3000);
+  }
+
+  // ask posts one command. The buttons it was fired from go disabled for the round trip and come
+  // back on either answer: a 202 means queued, not done. An error lands in the caller's own
+  // message element, which carries role="alert", never in the page-wide status line.
+  function ask(body, key, msg, btns) {
+    ctlBusy[key] = true;
+    btns.forEach(function (b) { b.disabled = true; });
+    if (msg) msg.textContent = '';
+    body.requestId = reqId();
+    function release() {
+      delete ctlBusy[key];
+      btns.forEach(function (b) { if (b.isConnected) b.disabled = false; });
+    }
+    return call('POST', '/api/sessions/command', body).then(function (v) {
+      release(); trackAsk(v);
+      // After the caller's own then() has closed its dialog, so the reload is not skipped by the
+      // open-dialog guard in renderHosts.
+      setTimeout(function () { loadHosts().catch(function () {}); }, 0);
+      return v;
+    }, function (e) {
+      release();
+      if (msg) msg.textContent = e.message; else say(e.message);
+      throw e;
+    });
+  }
+
+  // The confirm step for an ask that reaches more than one session: it states the count and that
+  // nothing is killed. A native <dialog>, so Esc cancels, Tab stays inside and focus returns.
+  function askConfirm(title, body, note, go) {
+    $('#ctl-confirm-h').textContent = title;
+    $('#ctl-confirm-body').textContent = body;
+    $('#ctl-confirm-note').textContent = note;
+    $('#ctl-confirm-msg').textContent = '';
+    confirmAsk = go;
+    openModal('#ctl-confirm');
+    var b = $('#ctl-confirm-go'); b.disabled = false; b.focus();
+  }
+  $('#ctl-confirm-go').addEventListener('click', function () {
+    var go = confirmAsk, b = $('#ctl-confirm-go');
+    if (!go) return;
+    go($('#ctl-confirm-msg'), [b]).then(function () {
+      confirmAsk = null; $('#ctl-confirm').close();
+    }, function () {});
+  });
+
+  // Fix name. The field is prefilled with the name the session carries now, and the limit is
+  // checked here as well as by maxlength, which counts UTF-16 units rather than runes. 256 is
+  // the field's cap; proto.CleanRemoteName shortens anything past 200 runes when it is applied,
+  // which the hint says rather than losing the tail silently.
+  var MAX_NAME = 256;
+  function openNameDialog(h, s) {
+    nameAsk = { host: h.hostId, session: s.id };
+    $('#ctl-name-for').textContent = 'Session ' + (s.name || ('pid ' + s.pid)) + ' on ' + h.name;
+    var inp = $('#ctl-name-input');
+    inp.value = s.remoteName || s.name || '';
+    $('#ctl-name-msg').textContent = '';
+    $('#ctl-name-go').disabled = false;
+    openModal('#ctl-name');
+    inp.focus(); inp.select();
+  }
+  $('#ctl-name-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var inp = $('#ctl-name-input'), msg = $('#ctl-name-msg'), go = $('#ctl-name-go');
+    var name = inp.value.trim(), n = runeLen(name);
+    if (!n) { msg.textContent = 'Type the name this session should carry.'; inp.focus(); return; }
+    if (n > MAX_NAME) {
+      msg.textContent = 'That name is ' + n + ' characters long; the limit is ' + MAX_NAME + '.';
+      inp.focus(); return;
+    }
+    if (!nameAsk) return;
+    ask({ command: 'rename_remote', scope: 'session', host: nameAsk.host, session: nameAsk.session, name: name },
+      'name/' + nameAsk.host + '/' + nameAsk.session, msg, [go])
+      .then(function () { nameAsk = null; $('#ctl-name').close(); }, function () {});
+  });
+
+  // commandList renders one session's verdicts: a chip whose word carries the state, so colour
+  // only repeats it; the honest sentence for that state; and the relaunch command with a Copy
+  // button when the hint is one. Code, mechanism and hint all arrive from the agent, so each
+  // goes in as text.
+  function commandList(cmds) {
+    var box = el('div', undefined, 'cmds');
+    cmds.forEach(function (c) {
+      var st = stOf(c.status), label = CMD_LABEL[c.command] || c.command;
+      var row = el('div', undefined, 'cmd');
+      row.appendChild(chip(label + ': ' + st.word, st.kind, st.g));
+      if (st.say) row.appendChild(el('span', st.say, 'say'));
+      box.appendChild(row);
+      if (c.hint) {
+        box.appendChild(/^claude /.test(c.hint)
+          ? copyLine('Relaunch with', c.hint, 'Copy the relaunch command for ' + label)
+          : el('div', c.hint, 'say'));
+      }
+    });
+    return box;
+  }
+
+  // The three per-session asks. Each button names its own session, because one page shows many.
+  function sessionControls(h, s) {
+    var box = el('div', undefined, 'sctl'), btns = [];
+    var msg = el('div', '', 'msg'); msg.setAttribute('role', 'alert');
+    var who = s.name || ('pid ' + s.pid), base = h.hostId + '/' + s.id + '/';
+    function mk(text, aria, go) {
+      var b = el('button', text, 'btn sm'); b.type = 'button';
+      b.setAttribute('aria-label', aria);
+      b.addEventListener('click', go);
+      btns.push(b); box.appendChild(b);
+    }
+    mk('Reload plugins', 'Reload plugins in session ' + who, function () {
+      ask({ command: 'reload_plugins', scope: 'session', host: h.hostId, session: s.id },
+        base + 'reload_plugins', msg, btns).catch(function () {});
+    });
+    mk('Enable remote', 'Enable remote control in session ' + who, function () {
+      ask({ command: 'remote_control_enable', scope: 'session', host: h.hostId, session: s.id },
+        base + 'remote_control_enable', msg, btns).catch(function () {});
+    });
+    mk('Fix name', 'Fix the remote name of session ' + who, function () { openNameDialog(h, s); });
+    if (!h.online) {
+      btns.forEach(function (b) { b.disabled = true; });
+      box.appendChild(el('span', 'The host is offline, so nothing can be asked of it.', 'why'));
+    }
+    box.appendChild(msg);
+    return box;
+  }
+
+  // Host-wide asks. Both need confirm:true on the wire, so the dialog is the confirm step the
+  // hub insists on and not a courtesy: it states the count and that no session is killed.
+  function hostControls(h) {
+    var box = el('div', undefined, 'ctl'), n = h.sessions.length, btns = [];
+    box.appendChild(el('div', 'Every session on this host', 'ctl-h'));
+    var msg = el('div', '', 'msg'); msg.setAttribute('role', 'alert');
+    function mk(text, title, question, caveat, cmd) {
+      var b = el('button', text, 'btn sm'); b.type = 'button';
+      b.disabled = !h.online || !n;
+      b.addEventListener('click', function () {
+        askConfirm(title + ' on ' + h.name, question,
+          'This asks ' + n + (n === 1 ? ' session' : ' sessions') + ' on ' + h.name + '. ' + caveat +
+          ' No session is stopped, killed or restarted.',
+          function (dmsg, dbtns) {
+            return ask({ command: cmd, scope: 'host', host: h.hostId, confirm: true },
+              h.hostId + '/host/' + cmd, dmsg, dbtns);
+          });
+      });
+      btns.push(b); box.appendChild(b);
+    }
+    mk('Reload all', 'Reload plugins',
+      'Ask every session on ' + h.name + ' to reload its plugins?',
+      'Each runs it at its next prompt, if it runs it at all.', 'reload_plugins');
+    mk('Enable remote on all', 'Enable remote control',
+      'Ask every session on ' + h.name + ' to bind remote control?',
+      'Remote control cannot be bound on a running session, so each answers with the restart that would.',
+      'remote_control_enable');
+    if (!h.online) box.appendChild(el('span', 'The host is offline.', 'why'));
+    else if (!n) box.appendChild(el('span', 'No sessions are reported here.', 'why'));
+    box.appendChild(msg);
+    return box;
+  }
+
+  // The estate-wide repair: repair with onlyNeedsReload, the ask that fits what a swap leaves
+  // behind. The bar shows only while there is something for it to do.
+  function staleSessions() {
+    var sess = 0, hosts = 0;
+    hostsCache.forEach(function (h) {
+      var n = (h.sessions || []).filter(function (s) { return s.needsReload; }).length;
+      if (n) { sess += n; hosts++; }
+    });
+    return { sessions: sess, hosts: hosts };
+  }
+  function renderRepair() {
+    var c = staleSessions();
+    $('#ctl-repair').hidden = !c.sessions;
+    if (!c.sessions) return;
+    $('#ctl-repair-sub').textContent = c.sessions + (c.sessions === 1 ? ' session on ' : ' sessions on ') +
+      c.hosts + (c.hosts === 1 ? ' host still ' : ' hosts still ') +
+      (c.sessions === 1 ? 'carries' : 'carry') + ' the login from before the swap.';
+  }
+  $('#ctl-repair-go').addEventListener('click', function () {
+    var n = staleSessions().sessions;
+    askConfirm('Apply to all needs-reload sessions',
+      'Ask every session that is still on an old login to repair itself?',
+      'This reaches ' + n + (n === 1 ? ' session' : ' sessions') + ' across every connected host. Each is ' +
+      'asked to reload its plugins, and answers with what it would take to bind remote control and ' +
+      'latch its name. No session is stopped, killed or restarted.',
+      function (dmsg, dbtns) {
+        return ask({ command: 'repair', scope: 'all', onlyNeedsReload: true, confirm: true },
+          'all/repair', dmsg, dbtns);
+      });
+  });
+
   // sessionItem renders one session: its name heading first, then pid and cwd, then the
-  // restart command. Every value goes in through el()/textContent, never innerHTML, because
-  // a name, a cwd and a status all arrive from the agent.
-  function sessionItem(s) {
+  // restart command, then its command verdicts and the controls that ask for more. Every value
+  // goes in through el()/textContent, never innerHTML, because a name, a cwd and a status all
+  // arrive from the agent.
+  function sessionItem(h, s) {
     var li = el('li');
     var head = el('div', undefined, 'srow');
     var named = !!s.name;
@@ -891,6 +1254,9 @@
 
     // Nothing can reload a running session's login, so hand over the restart command.
     if (s.restartCommand) li.appendChild(restartLine(s.restartCommand));
+    // commands is omitted, not empty, when a session has never been asked anything.
+    if (s.commands && s.commands.length) li.appendChild(commandList(s.commands));
+    li.appendChild(sessionControls(h, s));
     return li;
   }
   function hostCard(h) {
@@ -918,21 +1284,34 @@
     // control.
     var stale = h.sessions.filter(function (s) { return s.needsReload; }).length;
     var label = h.sessions.length + (h.sessions.length === 1 ? ' session' : ' sessions');
+    // A command verdict is as much a reason to open the disclosure as a stale login is, and the
+    // closed summary still carries the tally, so a state is never hidden behind a shut control.
+    var cst = {}, cmdTotal = 0;
+    h.sessions.forEach(function (s) {
+      (s.commands || []).forEach(function (x) { cst[x.status] = (cst[x.status] || 0) + 1; cmdTotal++; });
+    });
     if (!h.sessions.length) {
       c.appendChild(el('div', label, 'mut sub'));
     } else {
-      var d = el('details', undefined, 'sess'), dflt = stale > 0;
+      var d = el('details', undefined, 'sess'), dflt = stale > 0 || cmdTotal > 0;
       d.open = !!pref(sessKey(h), dflt);
       d.addEventListener('toggle', function () { if (d.open !== !!pref(sessKey(h), dflt)) { prefs[sessKey(h)] = d.open; savePrefs(); } });
       var sm = el('summary');
       sm.appendChild(el('span', label));
       if (stale) sm.appendChild(chip(stale === 1 ? '1 needs reload' : stale + ' need reload', 'warn', 'warn'));
+      // Only what the operator must act on gets a chip of its own; everything else collapses to
+      // one neutral tally, or a shut disclosure wears seven chips and says nothing.
+      if (cst.failed) sm.appendChild(chip(cst.failed + ' failed', 'bad', 'bad'));
+      if (cst.unsupported) sm.appendChild(chip(cst.unsupported + ' need a restart', 'warn', 'warn'));
+      var sent = (cst.queued || 0) + (cst.delivered || 0) + (cst.done || 0);
+      if (sent) sm.appendChild(chip(sent + (sent === 1 ? ' ask sent' : ' asks sent'), '', 'info'));
       d.appendChild(sm);
       var ul = el('ul');
-      h.sessions.forEach(function (s) { ul.appendChild(sessionItem(s)); });
+      h.sessions.forEach(function (s) { ul.appendChild(sessionItem(h, s)); });
       d.appendChild(ul);
       c.appendChild(d);
     }
+    c.appendChild(hostControls(h));
 
     var sw = el('div', undefined, 'swap');
     var pick = el('select'); pick.setAttribute('aria-label', 'Account for ' + h.name);
@@ -973,7 +1352,11 @@
     var list = hostsCache;
     var narrowed = hostFilter.mode !== 'all' || hostFilter.q;
     $('#host-count').textContent = list.length && narrowed ? 'Showing ' + list.filter(hostMatches).length + ' of ' + list.length : '';
+    renderRepair(); renderAskSummary();
     if (confirming && $('#hosts .confirm')) return; // keep an open confirm
+    // A rebuild would replace the button a request is in flight from, and orphan the opener an
+    // open dialog returns focus to. Both wait; the fast poll picks the verdicts up straight after.
+    if (ctlWorking() || ctlDialogOpen()) return;
     if (!force && !changed('host', [list, accountsCache, hostFilter]) && !$('#hosts .empty')) return;
     sig.host = JSON.stringify([list, accountsCache, hostFilter]);
     var box = $('#hosts'); box.textContent = '';
@@ -1153,7 +1536,8 @@
 
   refresh();
   setInterval(loadPending, 5000);
-  setInterval(function () { if (!editing && !confirming) refresh(); }, 30000); // never discard an open rename or confirm
+  // Never discard an open rename, an open swap confirm, an in-flight ask or an open ask dialog.
+  setInterval(function () { if (!editing && !confirming && !ctlWorking() && !ctlDialogOpen()) refresh(); }, 30000);
 })();
 </script>
 {{end}}

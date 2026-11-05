@@ -1160,12 +1160,12 @@ func TestUIHasAccountMenuHoldingTheSettingsActions(t *testing.T) {
 			t.Errorf("index.html still carries the old bottom-of-page section %q", gone)
 		}
 	}
-	if n := strings.Count(p, "<dialog"); n != 2 {
-		t.Errorf("page has %d dialogs, want the password one and the add-account one", n)
+	if n := strings.Count(p, "<dialog"); n != 4 {
+		t.Errorf("page has %d dialogs, want password, add-account, session-control confirm and fix-name", n)
 	}
 	// A <dialog> must never carry hidden: the page's [hidden]{display:none!important} would beat
 	// showModal() and the dialog could not open at all.
-	for _, id := range []string{"add-dialog", "pw-dialog"} {
+	for _, id := range []string{"add-dialog", "pw-dialog", "ctl-confirm", "ctl-name"} {
 		if strings.Contains(element(t, p, `id="`+id+`"`, ">"), "hidden") {
 			t.Errorf("%s carries hidden, so showModal() cannot show it", id)
 		}

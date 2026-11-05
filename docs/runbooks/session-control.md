@@ -209,6 +209,30 @@ A request's own record stays readable for 15 minutes; the hub keeps at most 64 r
 targets per request, and a target with no verdict after 60 seconds becomes
 `failed` / `timeout`.
 
+## The operator's view
+
+Everything above is driven from the **Hosts** tab of the admin UI
+(`internal/web/static/index.html`), and nowhere else:
+
+- **Per session**, inside the host card's session list: *Reload plugins*, *Enable remote* and
+  *Fix name*. *Fix name* opens a small dialog with a labelled field prefilled from the session's
+  current remote name, capped at 256 characters.
+- **Per host**, on their own rule above the swap row: *Reload all* and *Enable remote on all*.
+  Both go through a confirm dialog that states how many sessions are affected and that no session
+  is stopped, killed or restarted — the UI side of the `confirm: true` the hub insists on.
+- **Estate-wide**: a callout above the host list appears whenever a swap has left sessions on an
+  old login, offering *Apply to all needs-reload sessions*
+  (`repair` + `onlyNeedsReload` + `confirm`) behind the same confirm step.
+
+Each session's verdicts render as chips whose **word** carries the state, so colour only repeats
+it: Queued, Delivered, Done, Failed, Needs restart. Beside each is the honest sentence —
+"Delivered: the session runs it at its next prompt", "Needs restart: cannot be done on a running
+session" — and a relaunch hint gets a Copy button. A counts line under the callout is recomputed
+from the poll's own `commands[]` rather than from the 202's snapshot, so it can never contradict
+the chips beside it. Buttons go disabled for the round trip and come back on either answer,
+because a 202 means queued and not done; a refusal lands in an inline `role="alert"` beside the
+control that raised it. After an ask the poll speeds up to 3 seconds for a minute.
+
 ## How this fits the swap flow
 
 1. A swap replaces the `claudeAiOauth` block. Every session running at that moment is flagged

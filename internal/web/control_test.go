@@ -222,6 +222,140 @@ func TestSessionCommandResponseCarriesNoSecret(t *testing.T) {
 	}
 }
 
+// The Hosts tab is where session control is driven from, so the served page has to carry the
+// whole control surface: the per-session asks, the two host-wide asks behind a confirm step, the
+// estate-wide repair, the live status chips, and the dialogs that keep Esc, the focus trap and
+// focus return for free.
+func TestPageCarriesSessionControlSurface(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+
+	for _, want := range []string{
+		// The one route and every field the hub reads off the body.
+		"/api/sessions/command", "'reload_plugins'", "'remote_control_enable'", "'rename_remote'",
+		"'repair'", "scope: 'session'", "scope: 'host'", "scope: 'all'",
+		"onlyNeedsReload: true", "confirm: true", "requestId",
+		// Status comes off the existing poll, under commands[].
+		"s.commands", "commandList",
+		// The per-session asks, the host-wide pair and the estate-wide repair.
+		"'Reload plugins'", "'Enable remote'", "'Fix name'",
+		"'Reload all'", "'Enable remote on all'", "Apply to all needs-reload sessions",
+		// The regions they live in.
+		`id="ctl-repair"`, `id="ctl-repair-go"`, `id="ctl-repair-sub"`, `id="ctl-summary"`,
+		`id="ctl-confirm"`, `id="ctl-confirm-h"`, `id="ctl-confirm-body"`, `id="ctl-confirm-note"`,
+		`id="ctl-confirm-msg"`, `id="ctl-confirm-go"`,
+		`id="ctl-name"`, `id="ctl-name-form"`, `id="ctl-name-input"`, `id="ctl-name-hint"`,
+		`id="ctl-name-msg"`, `id="ctl-name-go"`, `id="ctl-name-for"`,
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+
+	// Every status the hub can report has a word of its own, so a chip never means something by
+	// colour alone, and the two statuses no mechanism reaches are still rendered honestly.
+	for _, st := range []string{proto.StatusQueued, proto.StatusDelivered, proto.StatusDone,
+		proto.StatusFailed, proto.StatusUnsupported} {
+		if !strings.Contains(p, st+": {") {
+			t.Errorf("the status map has no entry for %q", st)
+		}
+	}
+	for _, want := range []string{
+		"Delivered: the session runs it at its next prompt.",
+		"Needs restart: cannot be done on a running session.",
+		"Queued: nothing has reached the session yet.",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks the honest wording %q", want)
+		}
+	}
+	// A confirm step for anything wider than one session, and it says what is not done.
+	if !strings.Contains(p, "No session is stopped, killed or restarted.") {
+		t.Error("the confirm dialogs do not say that nothing is killed")
+	}
+	// The hint can carry the relaunch command, so it gets a Copy button of its own.
+	if !strings.Contains(p, "Copy the relaunch command for ") {
+		t.Error("a relaunch hint has no labelled Copy button")
+	}
+	// Buttons go disabled for the round trip and come back: a 202 means queued, not done.
+	for _, want := range []string{"b.disabled = true;", "b.disabled = false;"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks %q, so a button cannot be disabled in flight", want)
+		}
+	}
+}
+
+func TestSessionControlRegionsAnnounceAndValidate(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+
+	// The repair bar sits inside the Hosts panel, above the host list, and ships hidden: it is
+	// offered only once a swap has left something for it to do.
+	panel := element(t, p, `id="panel-hosts"`, "</main>")
+	for _, want := range []string{`id="ctl-repair"`, `id="ctl-summary"`, `id="hosts"`} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("the Hosts panel lacks %q", want)
+		}
+	}
+	if i, j := strings.Index(panel, `id="ctl-repair"`), strings.Index(panel, `id="hosts"`); i > j {
+		t.Errorf("the repair bar is below the host list (%d > %d)", i, j)
+	}
+	if !strings.Contains(element(t, p, `id="ctl-repair"`, ">"), "hidden") {
+		t.Error("the repair bar does not ship hidden")
+	}
+
+	// The counts summary is announced, and every inline error region is an alert, so a refusal
+	// reaches a screen reader where the operator is working instead of only in the page status.
+	if sum := element(t, p, `id="ctl-summary"`, ">"); !strings.Contains(sum, `role="status"`) ||
+		!strings.Contains(sum, `aria-live="polite"`) {
+		t.Errorf("the counts summary is not a live region: %q", sum)
+	}
+	for _, id := range []string{"ctl-confirm-msg", "ctl-name-msg"} {
+		if msg := element(t, p, `id="`+id+`"`, ">"); !strings.Contains(msg, `role="alert"`) {
+			t.Errorf("%s is not an alert: %q", id, msg)
+		}
+	}
+	if !strings.Contains(p, `var msg = el('div', '', 'msg'); msg.setAttribute('role', 'alert');`) {
+		t.Error("the per-session and per-host controls carry no inline alert region")
+	}
+
+	// Fix name: a labelled field, prefilled, with the wire limit enforced in runes as well as by
+	// maxlength, which counts UTF-16 units.
+	name := element(t, p, `id="ctl-name"`, "</dialog>")
+	for _, want := range []string{"Remote name", `maxlength="256"`, `aria-describedby="ctl-name-hint"`,
+		`class="fld"`} {
+		if !strings.Contains(name, want) {
+			t.Errorf("the fix-name dialog lacks %q", want)
+		}
+	}
+	for _, want := range []string{"MAX_NAME = 256", "runeLen(name)", "the limit is "} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks the name validation %q", want)
+		}
+	}
+
+	// Both control dialogs are native, so Esc, the focus trap and focus return are the browser's.
+	for _, id := range []string{"ctl-confirm", "ctl-name"} {
+		if !strings.Contains(p, `<dialog class="modal" id="`+id+`"`) {
+			t.Errorf("%s is not a native <dialog>", id)
+		}
+		if !strings.Contains(p, `data-close="`+id+`"`) {
+			t.Errorf("%s has no cancel path", id)
+		}
+	}
+	// A host-wide or estate-wide ask must never fall back to window.confirm: that dialog cannot
+	// state a count and is not styleable.
+	if strings.Contains(p, "confirm('Reload") || strings.Contains(p, "confirm('Apply") {
+		t.Error("a session-control ask uses window.confirm instead of the confirm dialog")
+	}
+	// Nothing in the control path renders agent text as markup.
+	for _, bad := range []string{".innerHTML", "insertAdjacentHTML", "outerHTML"} {
+		if strings.Contains(p, bad) {
+			t.Errorf("index.html assigns HTML (%q): a hint and a name arrive from the agent", bad)
+		}
+	}
+}
+
 // The rate-limit table is bounded, so a spray from many addresses cannot grow it without end.
 func TestSessionCommandRateLimitTableIsBounded(t *testing.T) {
 	now := fixedNow
