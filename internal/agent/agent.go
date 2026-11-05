@@ -333,7 +333,8 @@ func (a *agent) session(ctx context.Context) error {
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	if err := s.send(sctx, proto.TypeHello, "", proto.Hello{Token: a.cfg.Token, HostName: a.hostName, OS: runtime.GOOS}); err != nil {
+	if err := s.send(sctx, proto.TypeHello, "", proto.Hello{Token: a.cfg.Token, HostName: a.hostName,
+		OS: runtime.GOOS, RunAs: runAsUser()}); err != nil {
 		return err
 	}
 	a.log.Info("connected", "action", "connect", "result", "ok")

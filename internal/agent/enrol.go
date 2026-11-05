@@ -97,7 +97,7 @@ func enrol(ctx context.Context, o enrolOpts, serverURL, pin, code string, out io
 	if err != nil {
 		return Config{}, err
 	}
-	hello := proto.Hello{Code: code, HostName: o.HostName, OS: runtime.GOOS, Nonce: nonce}
+	hello := proto.Hello{Code: code, HostName: o.HostName, OS: runtime.GOOS, Nonce: nonce, RunAs: runAsUser()}
 	fp := proto.Fingerprint(hello)
 
 	ws, err := dialPinned(ctx, serverURL, normPinned)

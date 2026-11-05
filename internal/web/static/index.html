@@ -845,7 +845,7 @@
     if (m === 'reload' && !h.needsReload) return false;
     if (m === 'blocked' && !h.swapBlocked) return false;
     if (hostFilter.q) {
-      var hay = (h.name + ' ' + h.os).toLowerCase();
+      var hay = (h.name + ' ' + h.os + ' ' + (h.runAs || '')).toLowerCase();
       if (hay.indexOf(hostFilter.q.toLowerCase()) < 0) return false;
     }
     return true;
@@ -1272,7 +1272,11 @@
     var c = el('article', undefined, 'card'); c.dataset.host = h.hostId; c.tabIndex = -1;
     var top = el('div', undefined, 'row between');
     var t = el('div'); t.style.setProperty('min-width', '0');
-    t.appendChild(el('div', h.name, 'title')); t.appendChild(el('div', h.os, 'sub'));
+    t.appendChild(el('div', h.name, 'title'));
+    // The run-as user belongs with the OS: both say what this host is, not what it is doing, so
+    // it goes on the same subtitle line rather than competing with the account and state row.
+    // Omitted when the agent has not reported one, so the line never reads 'runs as nothing'.
+    t.appendChild(el('div', h.runAs ? h.os + ' · agent runs as ' + h.runAs : h.os, 'sub'));
     top.appendChild(t);
     var state = el('span', undefined, 'row');
     state.appendChild(el('span', undefined, 'dot' + (h.online ? '' : ' off')));

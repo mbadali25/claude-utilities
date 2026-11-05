@@ -102,7 +102,8 @@ func (h *Hub) mintLocked(hello proto.Hello, c *conn) (id, token string, err erro
 	if token, err = newToken(); err != nil {
 		return "", "", err
 	}
-	ho := &host{hostRec: hostRec{ID: id, Name: hello.HostName, OS: hello.OS, Hash: hashToken(token)}, c: c, lastSeen: h.now()}
+	ho := &host{hostRec: hostRec{ID: id, Name: hello.HostName, OS: hello.OS, Hash: hashToken(token)},
+		runAs: hello.RunAs, c: c, lastSeen: h.now()}
 	h.hosts[id] = ho
 	h.byHash[ho.Hash] = id
 	if err = h.saveLocked(); err != nil {
@@ -178,8 +179,13 @@ func (h *Hub) admitToken(c *conn) error {
 	}
 	ho.c, ho.lastSeen = c, h.now()
 	ho.report = proto.Report{}
+	// Every hello refreshes runAs, so `install-agent.sh --reconfigure` on the host shows up
+	// without re-enrolling. An agent too old to send it leaves the field as it was.
+	if c.hello.RunAs != "" {
+		ho.runAs = c.hello.RunAs
+	}
 	c.state, c.hostID = stateEnrolled, ho.ID
-	h.log.Info("agent connected", "action", "connect", "host_id", ho.ID, "result", "ok")
+	h.log.Info("agent connected", "action", "connect", "host_id", ho.ID, "result", "ok", "run_as", c.hello.RunAs)
 	return nil
 }
 

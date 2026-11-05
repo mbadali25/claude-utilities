@@ -151,6 +151,10 @@ type host struct {
 	// login. Keyed by session, not by time, so cross-host clock skew cannot matter. In memory only.
 	reloadIDs map[string]struct{}
 	identity  string // last known live identity (from a report or a successful swap)
+	// runAs is the local account the agent process runs as, from its last hello. Refreshed on
+	// every hello, so a reconfigured host shows its new user without re-enrolling. In memory
+	// only: after a server restart it is empty until the agent dials in again.
+	runAs string
 	// A swap rewrites the login but never ~/.claude.json, so the agent keeps reporting the identity
 	// it had before the swap. swapFrom is that stale identity, swapTarget the account swapped in and
 	// swapIdent its identity; while reports still say swapFrom, the login is swapTarget's. In memory only.
@@ -263,7 +267,7 @@ func New(v *vault.Vault, r *ownership.Registry, tokensPath string, log *slog.Log
 // Authorisation: the exported control methods (Allow, Deny, Revoke, NewEnrolCode, Swap, Pending,
 // Hosts) perform no caller authentication. Every HTTP route that reaches them must authenticate the
 // owner first. ServeWS is unauthenticated by design; the hello gate is its only control. The UI must
-// HTML-escape HostName, OS and SourceIP, which are agent-controlled.
+// HTML-escape HostName, OS, RunAs and SourceIP, which are agent-controlled.
 func (h *Hub) Run(ctx context.Context) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
@@ -296,6 +300,7 @@ func clip(s string) string {
 
 func sanitizeHello(hl proto.Hello) proto.Hello {
 	hl.HostName, hl.OS, hl.Nonce = clip(hl.HostName), clip(hl.OS), clip(hl.Nonce)
+	hl.RunAs = clip(hl.RunAs)
 	if len(hl.Token) > 256 {
 		hl.Token = hl.Token[:256]
 	}
@@ -598,8 +603,12 @@ type SessionView struct {
 // HostView is the UI-safe view of an enrolled host.
 type HostView struct {
 	HostID, Name, OS string
-	Online           bool
-	ActiveAccount    string
+	// RunAs is the local account the agent runs as, from its last hello. Empty for a host that
+	// has not dialled in since the server started, or an agent too old to send it.
+	// Agent-controlled text: the UI must escape it.
+	RunAs         string
+	Online        bool
+	ActiveAccount string
 	// SwapBlocked mirrors the agent's report: an unfinished earlier swap blocks every new one.
 	SwapBlocked bool
 	Sessions    []SessionView
@@ -617,7 +626,8 @@ func (h *Hub) Hosts() []HostView {
 		if ho.Revoked {
 			continue
 		}
-		v := HostView{HostID: ho.ID, Name: ho.Name, OS: ho.OS, Online: ho.c != nil, SwapBlocked: ho.report.SwapBlocked, Sessions: []SessionView{}}
+		v := HostView{HostID: ho.ID, Name: ho.Name, OS: ho.OS, RunAs: ho.runAs, Online: ho.c != nil,
+			SwapBlocked: ho.report.SwapBlocked, Sessions: []SessionView{}}
 		for _, a := range accts {
 			if ho.identity != "" && a.Identity == ho.identity {
 				v.ActiveAccount = a.ID

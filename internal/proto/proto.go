@@ -49,6 +49,11 @@ type Hello struct {
 	OS       string `json:"os"`
 	// Nonce is a per-attempt random value that makes the fingerprint unique to one dial.
 	Nonce string `json:"nonce,omitempty"`
+	// RunAs is the local account the agent process runs as: a username only, never a home
+	// path or a domain secret. It is additive and omitempty, so an older agent that sends
+	// none of it still decodes, and it is deliberately NOT part of Fingerprint: the
+	// fingerprint must stay identical across agent versions for the owner to match it.
+	RunAs string `json:"runAs,omitempty"`
 }
 
 // Pending tells an agent it is queued for owner approval. It carries no account data.
@@ -150,12 +155,12 @@ func (e Envelope) LogValue() slog.Value {
 }
 
 func (h Hello) String() string {
-	return fmt.Sprintf("Hello{HostName:%s OS:%s Token:%s Code:%s}", logx.Redact(h.HostName), logx.Redact(h.OS), mask, mask)
+	return fmt.Sprintf("Hello{HostName:%s OS:%s RunAs:%s Token:%s Code:%s}", logx.Redact(h.HostName), logx.Redact(h.OS), logx.Redact(h.RunAs), mask, mask)
 }
 func (h Hello) GoString() string { return h.String() }
 func (h Hello) LogValue() slog.Value {
 	return slog.GroupValue(slog.String("hostName", logx.Redact(h.HostName)), slog.String("os", logx.Redact(h.OS)),
-		slog.String("token", mask), slog.String("code", mask))
+		slog.String("runAs", logx.Redact(h.RunAs)), slog.String("token", mask), slog.String("code", mask))
 }
 
 func (a Approved) String() string   { return "Approved{Token:" + mask + "}" }

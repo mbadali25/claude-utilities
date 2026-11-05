@@ -39,6 +39,9 @@ var allowed = map[string]bool{
 	"code": true, "action": true, "event": true, "attempt": true, "count": true, "durationms": true,
 	"status": true, "statuscode": true, "pid": true, "sessioncount": true, "version": true,
 	"err": true, "error": true,
+	// "runas" is the local account an agent process runs as: a username, never a credential
+	// and never an email. It is the ONLY key through which a username may be logged.
+	"runas": true,
 }
 
 var allowedMu sync.RWMutex
