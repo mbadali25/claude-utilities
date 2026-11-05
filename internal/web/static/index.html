@@ -335,12 +335,17 @@
   .tun-why.bad { color:var(--bad); }
   .tun-cmds { display:grid; gap:10px; border-top:1px solid var(--line); padding-top:12px; min-width:0; }
   .tun-cmds code { font-size:.78rem; }
-  /* The tightened line is an OPTION that has not been verified on a real host, so it is folded
-     away behind a disclosure rather than offered beside the one we recommend. */
+  /* The commands an operator needs only sometimes - the remove line, and the tightened line that
+     has not been verified on a real host - fold away behind a disclosure, so the card leads with
+     the one line that is actually pasted. display:flex on a summary drops the browser's own
+     triangle, so the caret is drawn back explicitly: a disclosure nobody can see is not one. */
   .tun-opt summary { cursor:pointer; color:var(--mut); font-size:.82rem; min-height:32px;
-                     display:flex; align-items:center; }
+                     display:flex; align-items:center; gap:4px; list-style:none; }
+  .tun-opt summary::-webkit-details-marker { display:none; }
   .tun-opt summary:hover { color:var(--fg); }
-  .tun-opt .body { display:grid; gap:6px; margin-top:6px; }
+  .tun-opt summary .chev { transform:rotate(45deg); margin-top:-2px; }
+  .tun-opt[open] summary .chev { transform:rotate(-135deg); margin-top:2px; }
+  .tun-opt .body { display:grid; gap:10px; margin-top:8px; }
   .tun-acts { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
               border-top:1px solid var(--line); padding-top:12px; }
   /* Destructive actions last, in a group of their own, outlined in the negative colour, with
@@ -2242,8 +2247,9 @@
     c.appendChild(top);
 
     var meta = el('div', undefined, 'tun-meta');
-    var st = tunState(v);
-    meta.appendChild(tunRow('State', st.word + (v.since ? ' ' + since(v.since) : '')));
+    // The chip in the header already says the state, so this row carries only how long it has
+    // held: the same word in two places reads as two facts and is one.
+    if (v.since) meta.appendChild(tunRow('In this state', since(v.since)));
     // A real zero prints as a zero: "0 restarts" is an answer, an empty cell is not.
     meta.appendChild(tunRow('Restarts in the last hour', String(v.restarts1h) +
       (v.lastRestart ? ' · last at ' + new Date(v.lastRestart).toLocaleTimeString() : '')));
@@ -2276,26 +2282,46 @@
     var cmds = el('div', undefined, 'tun-cmds');
     if (v.rotateInstall) cmds.appendChild(copyLine('Add the NEW line on ' + v.label, v.rotateInstall,
       'Copy the install command for the new key on ' + v.label));
-    if (v.install) cmds.appendChild(copyLine('Add this line on ' + v.label, v.install,
-      'Copy the install command for ' + v.label));
-    if (v.remove) cmds.appendChild(copyLine('Remove it again with', v.remove,
-      'Copy the remove command for ' + v.label));
-    // A revoked key's line survives a replacement key, so its remove command does too: it is
-    // the only way that line comes off the host, and nothing here can do it.
-    if (v.revokedRemove && v.revokedRemove !== v.remove) {
-      cmds.appendChild(copyLine('Remove the REVOKED line on ' + v.label, v.revokedRemove,
+    // Mid-rotation the old line is already on the host, so telling the operator to add it would
+    // send them to do something they did it months ago.
+    if (v.install) cmds.appendChild(copyLine(v.rotateInstall ? 'The line already on ' + v.label
+      : 'Add this line on ' + v.label, v.install, 'Copy the install command for ' + v.label));
+    // A revoked key's line survives a replacement key, so its remove command does too: it is the
+    // only way that line comes off the host, nothing here can do it, and the card above has just
+    // told the operator to run it - so it stays in the open. Folding away a command the card asks
+    // for in the same breath is how an instruction goes unread.
+    if (v.revokedRemove) {
+      cmds.appendChild(copyLine(v.remove && v.remove !== v.revokedRemove
+        ? 'Remove the REVOKED line on ' + v.label
+        : 'Remove this line on ' + v.label, v.revokedRemove,
         'Copy the remove command for the revoked key on ' + v.label));
     }
+
+    // Everyday work needs one line pasted on the host. Removing it again, and the tightened line
+    // nobody has verified, are wanted only when the operator goes looking for them, so they fold
+    // away instead of doubling the monospace on every card in the estate.
+    var body = el('div', undefined, 'body');
+    var folded = [];
+    if (v.remove && v.remove !== v.revokedRemove) {
+      folded.push('removing it again');
+      body.appendChild(copyLine('Remove it again with', v.remove,
+        'Copy the remove command for ' + v.label));
+    }
     if (v.installTight) {
-      var d = el('details', undefined, 'tun-opt');
-      d.appendChild(el('summary', 'A tighter line, not verified'));
-      var body = el('div', undefined, 'body');
+      folded.push('a tighter line, not verified');
       body.appendChild(el('p', 'port-forwarding re-enables -L as well as -R, and permitlisten ' +
         'constrains only the -R listen address, so a stolen key could forward out of the host. ' +
         'Adding permitopen="127.0.0.1:1" should close that. Whether it leaves the -R forward ' +
         'working has NOT been tested on a real host, so it is not what we recommend yet.', 'sub'));
       body.appendChild(copyLine('The tightened line', v.installTight,
         'Copy the tightened install command for ' + v.label));
+    }
+    if (folded.length) {
+      var d = el('details', undefined, 'tun-opt');
+      var sum = el('summary');
+      sum.appendChild(el('span', undefined, 'chev'));
+      sum.appendChild(el('span', 'Also: ' + folded.join(', and ')));
+      d.appendChild(sum);
       d.appendChild(body);
       cmds.appendChild(d);
     }
