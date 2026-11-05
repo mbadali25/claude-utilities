@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 
@@ -505,6 +506,37 @@ func TestMissingCredsFileReportsCredsPresentFalse(t *testing.T) {
 	writeCreds(t, r.creds, testBlock(origSecret, future()))
 	if rep := r.a.report(context.Background()); !rep.CredsPresent || rep.ActiveIdentity != "id-1" {
 		t.Fatalf("report with file: %+v", rep)
+	}
+}
+
+// A pathological session name must not push the report past proto.MaxMessageSize, where
+// Decode would reject the host's whole report: the agent caps names before the wire.
+func TestReportCapsSessionNames(t *testing.T) {
+	r := newRig(t, "https://127.0.0.1:1", "")
+	long := strings.Repeat("é日", 2*maxNameRunes)
+	r.a.scan = func(context.Context) ([]proto.Session, error) {
+		return []proto.Session{
+			{PID: 1, ID: "a", Name: long, RemoteName: long},
+			{PID: 2, ID: "b", Name: "short"},
+			{PID: 3, ID: "c", Name: strings.Repeat("x", maxNameRunes)},
+		}, nil
+	}
+	rep := r.a.report(context.Background())
+	if n := utf8.RuneCountInString(rep.Sessions[0].Name); n != maxNameRunes {
+		t.Fatalf("name runes = %d, want %d", n, maxNameRunes)
+	}
+	if n := utf8.RuneCountInString(rep.Sessions[0].RemoteName); n != maxNameRunes {
+		t.Fatalf("remote name runes = %d, want %d", n, maxNameRunes)
+	}
+	if !utf8.ValidString(rep.Sessions[0].Name) {
+		t.Fatal("cap split a rune")
+	}
+	if rep.Sessions[1].Name != "short" || utf8.RuneCountInString(rep.Sessions[2].Name) != maxNameRunes {
+		t.Fatalf("names at or under the cap changed: %+v", rep.Sessions[1:])
+	}
+	b, err := json.Marshal(rep)
+	if err != nil || len(b) > proto.MaxMessageSize {
+		t.Fatalf("report %d bytes, err %v", len(b), err)
 	}
 }
 

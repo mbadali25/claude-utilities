@@ -405,11 +405,31 @@ func (a *agent) handle(ctx context.Context, s *sess, env proto.Envelope) error {
 	return s.send(ctx, proto.TypeSwapRes, env.ID, a.applySwap(req))
 }
 
+// maxNameRunes bounds a session name on the wire. An unbounded name could push a report past
+// proto.MaxMessageSize, and Decode would then reject the host's whole report.
+const maxNameRunes = 256
+
+// capRunes truncates s to at most n runes without splitting one.
+func capRunes(s string, n int) string {
+	if len(s) <= n { // fewer bytes than the cap means fewer runes too
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
 // report describes this host. A missing or block-less credentials file is CredsPresent=false.
 func (a *agent) report(ctx context.Context) proto.Report {
 	sessions, err := a.scan(ctx)
 	if err != nil || sessions == nil {
 		sessions = []proto.Session{}
+	}
+	for i := range sessions {
+		sessions[i].Name = capRunes(sessions[i].Name, maxNameRunes)
+		sessions[i].RemoteName = capRunes(sessions[i].RemoteName, maxNameRunes)
 	}
 	rep := proto.Report{Sessions: sessions, SwapBlocked: a.blocked.Load()}
 	if _, err := credfile.ReadBlock(a.cfg.CredsPath); err == nil {
