@@ -160,7 +160,7 @@ Every action prints as a `DRY-RUN:` line and nothing is executed, written or dow
 ==> unit /etc/systemd/system/claude-swap-agent.service
 ```
 
-Note the home: it came from `getent passwd`, not from `/home/dadeush`. Read those four lines before the real run.
+Note the home: it came from `getent passwd`, not from `/home/<user>`. Read those four lines before the real run.
 
 ### What it does
 

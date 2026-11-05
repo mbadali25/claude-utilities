@@ -274,3 +274,12 @@ __marimo__/
 
 # Playwright MCP scratch output
 .playwright-mcp/
+
+# claude-swap: local agent worktrees, build and backup artefacts
+.claude/worktrees/
+*.bak
+*.exe
+*.test
+/server
+/agent
+/claude-swap-data/

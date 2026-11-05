@@ -257,7 +257,7 @@ func shellWords(s string) []string {
 
 func TestHookCommandIsBashSafe(t *testing.T) {
 	cases := []struct{ name, exe, want string }{
-		{"windows backslashes", `C:\Users\d3ade\.claude-swap\claude-swap-agent.exe`, "C:/Users/d3ade/.claude-swap/claude-swap-agent.exe"},
+		{"windows backslashes", `C:\Users\user\.claude-swap\claude-swap-agent.exe`, "C:/Users/user/.claude-swap/claude-swap-agent.exe"},
 		{"windows with spaces", `C:\Program Files\claude-swap\agent.exe`, "C:/Program Files/claude-swap/agent.exe"},
 		{"windows forward slashes", `C:/Users/x/agent.exe`, "C:/Users/x/agent.exe"},
 		{"unc", `\\host\share\agent.exe`, "//host/share/agent.exe"},
@@ -289,7 +289,7 @@ func TestHookCommandIsBashSafe(t *testing.T) {
 
 func TestInstallReplacesOldBackslashEntries(t *testing.T) {
 	path := sandboxSettings(t)
-	old := `C:\Users\d3ade\.claude-swap\claude-swap-agent.exe hook --tag ` + hookTag
+	old := `C:\Users\user\.claude-swap\claude-swap-agent.exe hook --tag ` + hookTag
 	seed := map[string]any{"hooks": map[string]any{
 		"SessionStart":     []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "echo mine"}}}, map[string]any{"hooks": []any{map[string]any{"type": "command", "command": old}}}},
 		"UserPromptSubmit": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": old}}}},
@@ -299,7 +299,7 @@ func TestInstallReplacesOldBackslashEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := InstallHooks(`C:\Users\d3ade\.claude-swap\claude-swap-agent.exe`); err != nil {
+		if _, err := InstallHooks(`C:\Users\user\.claude-swap\claude-swap-agent.exe`); err != nil {
 			t.Fatal(err)
 		}
 	}

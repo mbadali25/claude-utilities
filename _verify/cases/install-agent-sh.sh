@@ -30,7 +30,7 @@ ok() { echo "ok   $*"; }
 # fall through into the failure branch (which `A && ok || fail` allows).
 check() { local label="$1"; shift; if "$@"; then ok "$label"; else fail "$label"; fi; }
 refute() { local label="$1"; shift; if "$@"; then fail "$label"; else ok "$label"; fi; }
-# shellcheck disable=SC2329  # called indirectly, as the command argument of check
+# shellcheck disable=SC2317,SC2329  # (SC2317 on shellcheck < 0.11) called indirectly, as the command argument of check
 mode_is() { [ "$(stat -c '%a' "$1" 2>/dev/null || echo '?')" = "$2" ]; }
 
 TMP="$(mktemp -d)" || { echo "cannot create a temp dir"; exit 77; }
@@ -113,6 +113,7 @@ done <"$pw"
 echo "id: no such user" >&2
 exit 1
 STUBEOF
+sed -i "s/STUB_SELF:-1000}/STUB_SELF:-$REAL_UID}/" "$STUB/id"   # default identity = the real uid, not 1000
 chmod 0755 "$STUB/id"
 
 cat >"$STUB/getent" <<'STUBEOF'
@@ -579,7 +580,7 @@ unset CLAUDESWAP_DRY_RUN CLAUDESWAP_RUN_AS
 unset STUB_SELF
 EXTRA_PASSWD=()
 printf '%s\n' "$out12" >"$TMP/out12"
-check "dry run names the user" grep -q '^==> run as tester (uid 1000)' "$TMP/out12"
+check "dry run names the user" grep -q "^==> run as tester (uid $UID_DEF)" "$TMP/out12"
 check "dry run names the home" grep -q "home $H12\$" "$TMP/out12"
 check "dry run names the state dir" grep -q "^==> state dir $H12/.config/claude-swap-agent\$" "$TMP/out12"
 check "dry run names the unit path" grep -q "^==> unit $SYSUNITS/claude-swap-agent.service\$" "$TMP/out12"
