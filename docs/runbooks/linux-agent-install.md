@@ -262,6 +262,12 @@ comes back before the host reports `connected` again.
 A hand-started `ssh -R` dies with its console and never comes back. The two scripts below make it
 survive a dropped link, a host reboot and a logon.
 
+> **The scripts are the interim arrangement.** The server supervises the same tunnels itself when
+> it is started with `--tunnels`, which puts the key in the encrypted keyring instead of on disk and
+> the state on the Tunnels tab. Run one or the other, never both — see
+> [Moving to the app-managed supervisor](#moving-to-the-app-managed-supervisor). Everything from
+> here to that section describes the scripts, and still applies while you are on them.
+
 ### The restricted key
 
 The tunnels authenticate with one dedicated key that does nothing else:
@@ -303,6 +309,19 @@ No `sudo` is needed, and nothing under `~/.claude*` is touched.
 
 Order matters: a later option overrides an earlier one, so `restrict` first and `port-forwarding`
 second is the whole point of the line.
+
+`port-forwarding` re-enables `-L` as well as `-R`, and `permitlisten` constrains only the `-R`
+listen address, so a stolen key could still forward *out of* the host. Adding
+`permitopen="127.0.0.1:1"` before `permitlisten` should close that:
+
+```text
+command="/bin/false",restrict,port-forwarding,permitopen="127.0.0.1:1",permitlisten="127.0.0.1:8443" ssh-ed25519 AAAA… claude-swap-tunnel
+```
+
+**Not verified.** Whether that leaves the `-R` forward working has not been tested on a real host,
+so it is not what this runbook recommends yet. The app offers it the same way: generated, shown
+behind a disclosure on the Tunnels tab, and applied to nothing. Changing a line on a host is always
+the operator's own `ssh`; neither the scripts nor the server ever writes one.
 
 ### Scripts
 
@@ -410,6 +429,61 @@ That unregisters the task, stops only the processes it started — matched on th
 and on the dedicated key file name — deletes `tunnels.json` and deletes the installed copy of the
 supervisor. The log and the key are left behind; delete them by hand if you want them gone, and
 drop the key's line from each host's `~/.ssh/authorized_keys`.
+
+### Moving to the app-managed supervisor
+
+The server started with `--tunnels` runs the same `ssh -R` children itself. What changes:
+
+| | Scripts (interim) | `--tunnels` |
+|---|---|---|
+| Private key | `~\.ssh\id_ed25519_claudeswap`, one key for every host | one key per host, encrypted in `tunnelkeys.bin` beside the vault; written to a temp file for a child's lifetime only |
+| Host list | `%USERPROFILE%\.claude-swap\tunnels.json` | the server's own state, seeded by **Import the interim host list** |
+| Host key | whatever `known_hosts` the user has | recorded per tunnel; `StrictHostKeyChecking=yes` against a file the app writes |
+| State | `tunnels.log` | the Tunnels tab, per host, with the last reason code |
+| Lifetime | the logon task: that user, logged on, awake | the server process |
+
+**Do not run both.** Two supervisors dial the same `-R 127.0.0.1:8443`; the second forward is
+refused, so the app sits in `forward_refused` for ever while the task quietly keeps the link up.
+Unregister the task first.
+
+```powershell
+# 1. look at what is running now, so you can tell an orphan from a new child later
+Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" |
+  Where-Object { $_.CommandLine -like '*id_ed25519_claudeswap*' } | Select-Object ProcessId
+
+# 2. keep a copy of the host list: -Uninstall deletes it, and the app's import reads it
+Copy-Item "$env:USERPROFILE\.claude-swap\tunnels.json" "$env:USERPROFILE\.claude-swap\tunnels.json.bak"
+
+# 3. stop the interim supervisor
+powershell -NoProfile -File scripts\install-tunnels-task.ps1 -Uninstall -DryRun
+powershell -NoProfile -File scripts\install-tunnels-task.ps1 -Uninstall
+
+# 4. prove nothing is left holding the forward
+Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" |
+  Where-Object { $_.CommandLine -like '*-R 127.0.0.1:8443*' }      # expect nothing
+```
+
+Step 4 matters: a hard kill of the old supervisor can leave an orphan `ssh.exe` that still owns the
+listen address on the host. If one is matched, inspect it, then stop that pid alone.
+
+Then restart the server with `--tunnels` and work the Tunnels tab, one host at a time:
+
+1. **Import the interim host list** reads `tunnels.json` from the fixed path above and leaves the
+   file where it is. The request cannot name a path; only `CLAUDESWAP_TUNNELS_JSON`, set on the
+   server before it starts, points the import somewhere else.
+2. **Record the host key.** Take it from the host itself — `ssh-keygen -lf
+   /etc/ssh/ssh_host_ed25519_key.pub` prints the fingerprint, and the install command the tab
+   generates ends with that same line. Until it is recorded the tunnel cannot start, by design.
+3. **Generate a key**, then paste the install command the card shows on that host. This is a *new*
+   key: the old `authorized_keys` line keeps working and is not touched by anything here.
+4. **Start**, and wait for the card to read `up`. The host's own agent reconnects on its next
+   backoff tick — within ~15 s when it is configured with a loopback server URL.
+5. Only once that host is up, remove the old line by hand. The tab has no command for it: it belongs
+   to the scripts' key, not to any key the app holds.
+
+Rolling back is the same list in reverse: stop the tunnel in the app, re-run the installer with the
+host list restored from the `.bak` copy, and start the task. The old line is still in place, which
+is why step 5 comes last.
 
 ### Caveats
 

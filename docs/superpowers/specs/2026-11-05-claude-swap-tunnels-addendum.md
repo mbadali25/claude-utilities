@@ -1,11 +1,20 @@
 # claude-swap: app-managed tunnels addendum (2026-11-05)
 
-Status: draft for approval. Does **not** edit the approved design (`2026-11-04-claude-swap-design.md`).
-It extends that design with a **Tunnels** section in the admin UI and moves the reverse-SSH
-supervision out of `scripts/claude-swap-tunnels.ps1` and the `claude-swap-tunnels` scheduled task
-into the server binary.
+Status: **approved (option C) and implemented behind `--tunnels`, off by default.** Does **not** edit
+the approved design (`2026-11-04-claude-swap-design.md`). It extends that design with a **Tunnels**
+section in the admin UI and moves the reverse-SSH supervision out of
+`scripts/claude-swap-tunnels.ps1` and the `claude-swap-tunnels` scheduled task into the server
+binary.
 
-Design only. No application code is written by this addendum.
+What shipped: `internal/tunnel` (supervisor, classifier, generated `authorized_keys` commands),
+the per-host keyring in `internal/vault` (`tunnelkeys.bin`), the `/api/tunnels*` routes and the
+Tunnels tab, and the agent's 15 s redial cap on a loopback server URL (section 0).
+
+Not done by this addendum, deliberately: nothing was run against a real host, the interim scheduled
+task was not touched, and no `authorized_keys` line anywhere was changed. The tightened
+`permitopen="127.0.0.1:1"` line of section 3 is generated and shown as an option, and is applied
+nowhere. Moving an estate across is a manual procedure, written up in
+`docs/runbooks/linux-agent-install.md`, "Moving to the app-managed supervisor".
 
 ## Decision (Matthew)
 
