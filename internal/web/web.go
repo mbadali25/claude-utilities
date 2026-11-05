@@ -61,6 +61,7 @@ type hubAPI interface {
 	AddCancel(id string) error
 	Allow(fingerprint string) (string, error)
 	Deny(fingerprint string) error
+	Command(ctx context.Context, req hub.CommandRequest) (hub.CommandView, error)
 }
 
 // usageAPI is the part of *usage.Poller the web layer uses.
@@ -101,10 +102,13 @@ type server struct {
 	mu       sync.Mutex
 	sessions map[string]sess
 	failures map[string][]time.Time // per source IP
+	// commandHits rate limits POST /api/sessions/command per source IP (control.go).
+	commandHits map[string][]time.Time
 }
 
 func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, now func() time.Time) http.Handler {
-	s := &server{hub: h, vault: v, usage: u, pw: pw, now: now, sessions: map[string]sess{}, failures: map[string][]time.Time{}}
+	s := &server{hub: h, vault: v, usage: u, pw: pw, now: now, sessions: map[string]sess{},
+		failures: map[string][]time.Time{}, commandHits: map[string][]time.Time{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
 	mux.HandleFunc("POST /login", s.login)
@@ -114,6 +118,7 @@ func newHandler(h hubAPI, v *vault.Vault, u usageAPI, pw PasswordAPI, now func()
 	mux.HandleFunc("GET /api/hosts", s.auth(s.hosts))
 	mux.HandleFunc("GET /api/pending", s.auth(s.pending))
 	mux.HandleFunc("POST /api/swap", s.authPost(s.swap))
+	mux.HandleFunc("POST /api/sessions/command", s.authPost(s.sessionCommand))
 	mux.HandleFunc("POST /api/enrol-code", s.authPost(s.enrolCode))
 	mux.HandleFunc("POST /api/hosts/{id}/revoke", s.authPost(s.revoke))
 	mux.HandleFunc("POST /api/import", s.authPost(s.importLogin))
@@ -531,6 +536,9 @@ type sessionJSON struct {
 	NeedsReload   bool      `json:"needsReload"`
 	// RestartCommand is set only on a session that needs a reload, for the operator to copy.
 	RestartCommand string `json:"restartCommand,omitempty"`
+	// Commands are the session-control commands recently aimed at this session, oldest first.
+	// This is where the UI reads command status: there is no separate status endpoint.
+	Commands []commandJSON `json:"commands,omitempty"`
 }
 
 // sessionUUID matches the 36-char sessionId that `claude --resume` takes.
@@ -572,7 +580,8 @@ func (s *server) hosts(w http.ResponseWriter, _ *http.Request) {
 			j.Sessions = append(j.Sessions, sessionJSON{PID: x.PID, ID: x.ID, Name: x.Name,
 				RemoteName: x.RemoteName, Status: x.Status, RemoteControl: x.RemoteControl,
 				Cwd: x.Cwd, StartedAt: x.StartedAt,
-				NeedsReload: x.NeedsReload, RestartCommand: restartCommand(x)})
+				NeedsReload: x.NeedsReload, RestartCommand: restartCommand(x),
+				Commands: commandsView(x.Commands)})
 			j.NeedsReload = j.NeedsReload || x.NeedsReload
 		}
 		out = append(out, j)

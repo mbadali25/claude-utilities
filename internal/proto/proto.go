@@ -107,6 +107,11 @@ type Report struct {
 	// SwapBlocked is true while an unfinished earlier swap cannot be settled, so every swap on
 	// this host is refused until an operator intervenes.
 	SwapBlocked bool `json:"swapBlocked,omitempty"`
+	// Commands carries the agent's later view of session commands it has already answered, so a
+	// delivery observed minutes after the reply reaches the hub without a new message type. It is
+	// additive and omitted when empty, so an older hub sees the report shape it expects. Bounded
+	// by MaxCommandsPerReport.
+	Commands []SessionCommandStatus `json:"commands,omitempty"`
 }
 
 type ExportRes struct {

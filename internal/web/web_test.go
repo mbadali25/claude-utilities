@@ -50,6 +50,26 @@ type fakeHub struct {
 	statusFn func(id string) (hub.AddView, error)
 	codeFn   func(id, code string) error
 	cancelFn func(id string) error
+
+	commandCalls []hub.CommandRequest
+	commandView  hub.CommandView
+	commandErr   error
+}
+
+func (f *fakeHub) Command(_ context.Context, req hub.CommandRequest) (hub.CommandView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commandCalls = append(f.commandCalls, req)
+	if f.commandErr != nil {
+		return hub.CommandView{}, f.commandErr
+	}
+	return f.commandView, nil
+}
+
+func (f *fakeHub) commands() []hub.CommandRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]hub.CommandRequest(nil), f.commandCalls...)
 }
 
 func (f *fakeHub) AddAccount(_ context.Context, host, label string) (string, error) {
@@ -1140,12 +1160,12 @@ func TestUIHasAccountMenuHoldingTheSettingsActions(t *testing.T) {
 			t.Errorf("index.html still carries the old bottom-of-page section %q", gone)
 		}
 	}
-	if n := strings.Count(p, "<dialog"); n != 2 {
-		t.Errorf("page has %d dialogs, want the password one and the add-account one", n)
+	if n := strings.Count(p, "<dialog"); n != 4 {
+		t.Errorf("page has %d dialogs, want password, add-account, session-control confirm and fix-name", n)
 	}
 	// A <dialog> must never carry hidden: the page's [hidden]{display:none!important} would beat
 	// showModal() and the dialog could not open at all.
-	for _, id := range []string{"add-dialog", "pw-dialog"} {
+	for _, id := range []string{"add-dialog", "pw-dialog", "ctl-confirm", "ctl-name"} {
 		if strings.Contains(element(t, p, `id="`+id+`"`, ">"), "hidden") {
 			t.Errorf("%s carries hidden, so showModal() cannot show it", id)
 		}
