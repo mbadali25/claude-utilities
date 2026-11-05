@@ -1368,6 +1368,14 @@
     var pick = el('select'); pick.setAttribute('aria-label', 'Account for ' + h.name);
     accountsCache.forEach(function (a) { var o = el('option', a.label); o.value = a.id; if (a.id === h.activeAccount) o.selected = true; pick.appendChild(o); });
     var go = el('button', 'Swap', 'btn primary'); go.type = 'button'; go.disabled = !h.online || !accountsCache.length;
+    // A swap needs to know which account the host is on, and this one cannot say. The reason is
+    // already on the card, so the button points at it instead of repeating it: the operator reads
+    // one explanation, and a screen reader gets it as the button's description.
+    if (!h.activeAccount && h.identityReason) {
+      go.disabled = true;
+      go.title = identityWhy(h.identityReason).why;
+      go.setAttribute('aria-describedby', identityNoteID(h));
+    }
     var rv = el('button', 'Revoke', 'btn danger'); rv.type = 'button';
     function idle() {
       confirming = null; sw.textContent = '';
