@@ -1,0 +1,141 @@
+[
+  {
+    "pid": 13308,
+    "sessionId": "81ff45c1-87f1-4f43-a5ff-852ce20f0990",
+    "cwd": "C:\\repos\\anew\\TheSelectSource",
+    "startedAt": 1793716513843,
+    "procStart": "134381901116157287",
+    "version": "2.1.314",
+    "peerProtocol": 1,
+    "peerFeatures": [
+      "notify_idle",
+      "artifact_yield"
+    ],
+    "kind": "interactive",
+    "entrypoint": "cli",
+    "pidDomain": "win32:dadeush-desktop",
+    "asksForConvertedSkills": false,
+    "messagingSocketPath": "<redacted>",
+    "name": "TSS-win",
+    "nameSource": "user",
+    "nameSince": 1793716533044,
+    "updatedAt": 1793839997600,
+    "status": "idle",
+    "statusUpdatedAt": 1793839997600,
+    "bridgeSessionId": "<redacted>"
+  },
+  {
+    "pid": 16788,
+    "sessionId": "d60099d4-e50e-4825-99d9-e43ae24e1d1d",
+    "cwd": "C:\\repos\\anew\\SRL",
+    "startedAt": 1793716493380,
+    "procStart": "134381900906305901",
+    "version": "2.1.314",
+    "peerProtocol": 1,
+    "peerFeatures": [
+      "notify_idle",
+      "artifact_yield"
+    ],
+    "kind": "interactive",
+    "entrypoint": "cli",
+    "pidDomain": "win32:dadeush-desktop",
+    "asksForConvertedSkills": false,
+    "messagingSocketPath": "<redacted>",
+    "name": "SRL-DESKTOP",
+    "nameSource": "user",
+    "nameSince": 1793716497177,
+    "updatedAt": 1793841279197,
+    "status": "idle",
+    "statusUpdatedAt": 1793841279197,
+    "bridgeSessionId": "<redacted>"
+  },
+  {
+    "pid": 24676,
+    "sessionId": "645b7ceb-a540-46c5-8448-83bd3b7cce77",
+    "cwd": "C:\\repos\\solomon\\aws-managed-services",
+    "startedAt": 1793827516036,
+    "procStart": "134383011148715633",
+    "version": "2.1.318",
+    "peerProtocol": 1,
+    "peerFeatures": [
+      "notify_idle",
+      "artifact_yield"
+    ],
+    "kind": "interactive",
+    "entrypoint": "cli",
+    "pidDomain": "win32:dadeush-desktop",
+    "asksForConvertedSkills": false,
+    "messagingSocketPath": "<redacted>",
+    "name": "solomon-alerts",
+    "nameSource": "user",
+    "nameSince": 1793827559327,
+    "updatedAt": 1793834589835,
+    "status": "busy",
+    "statusUpdatedAt": 1793834589835,
+    "bridgeSessionId": "<redacted>",
+    "formerNames": [
+      {
+        "name": "cloud-alarms",
+        "until": 1793827559327,
+        "sessionId": "645b7ceb-a540-46c5-8448-83bd3b7cce77"
+      }
+    ]
+  },
+  {
+    "pid": 47188,
+    "sessionId": "f531ea32-d724-498a-92bb-a477488967f8",
+    "cwd": "C:\\repos\\anew\\terraform-aws-managed-services",
+    "startedAt": 1793822952683,
+    "procStart": "134382965508464450",
+    "version": "2.1.317",
+    "peerProtocol": 1,
+    "peerFeatures": [
+      "notify_idle",
+      "artifact_yield"
+    ],
+    "kind": "interactive",
+    "entrypoint": "cli",
+    "pidDomain": "win32:dadeush-desktop",
+    "asksForConvertedSkills": false,
+    "messagingSocketPath": "<redacted>",
+    "name": "AWS-Fix",
+    "nameSource": "user",
+    "nameSince": 1793823269549,
+    "status": "idle",
+    "updatedAt": 1793836903012,
+    "statusUpdatedAt": 1793836903012,
+    "bridgeSessionId": "<redacted>"
+  },
+  {
+    "pid": 47204,
+    "sessionId": "8b4ebc55-e177-4675-aaf7-2436ce67f749",
+    "cwd": "C:\\repos\\personal\\claude-utilities",
+    "startedAt": 1793825407256,
+    "procStart": "134382990035328445",
+    "version": "2.1.318",
+    "peerProtocol": 1,
+    "peerFeatures": [
+      "notify_idle",
+      "artifact_yield"
+    ],
+    "kind": "interactive",
+    "entrypoint": "cli",
+    "pidDomain": "win32:dadeush-desktop",
+    "asksForConvertedSkills": false,
+    "messagingSocketPath": "<redacted>",
+    "name": "claude-swap",
+    "nameSource": "user",
+    "nameSince": 1793825660786,
+    "status": "busy",
+    "updatedAt": 1793840719178,
+    "statusUpdatedAt": 1793840719178,
+    "bridgeSessionId": "<redacted>",
+    "formerNames": [
+      {
+        "name": "claude-utilites",
+        "until": 1793825660786,
+        "sessionId": "2af6086e-9125-4d3f-962e-d45770b67712"
+      }
+    ]
+  }
+]
