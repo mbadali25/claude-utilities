@@ -56,6 +56,8 @@ The server (`cmd/server`) is one TLS listener: `/ws` for agents, everything else
 - Every task runs as its own background subagent. Dispatch independent tasks together in one message so they run in parallel.
 - Main stays free for Matthew: it coordinates, decides and relays. It does not run hands-on work or wait on workers.
 - Each agent brief is self-contained: goal, constraints, return format.
+- Sub-agents sit under a manager, not under main. Main only talks to Matthew and dispatches one background manager agent; the manager spawns one sub-agent per task (own worktree where tasks share files), collects results, merges locally and runs the gate.
+- Main's turns stay short. After any interruption, resume all cancelled work through the manager without being asked.
 
 ## Stop and ask
 - The ticket's "done when" is not observable
