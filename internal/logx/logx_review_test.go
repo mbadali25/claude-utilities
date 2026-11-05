@@ -8,6 +8,31 @@ import (
 	"testing"
 )
 
+// A bare code= with an OAuth-code-sized value is masked wherever it appears, while a short result
+// code (exit code=1, status code=500) stays readable. The allowlisted "code" attribute follows
+// the same rule so allowlisting it cannot leak a real authorization code.
+func TestBareCodeValueMaskedOnlyWhenNotAShortResultCode(t *testing.T) {
+	long := "4%2FP7q7W91a-oMsCeLvIaQm6bTrgtp7"
+	for _, in := range []string{"code=" + long, "got code: " + long, `code="` + long + `"`} {
+		if out := Redact(in); strings.Contains(out, long) || strings.Contains(out, "P7q7W91a") {
+			t.Errorf("not masked: %q -> %q", in, out)
+		}
+	}
+	if out := Redact("exit code=1 status code=500"); out != "exit code=1 status code=500" {
+		t.Errorf("over-redacted: %q", out)
+	}
+	var buf bytes.Buffer
+	New(&buf).Info("m", "code", long)
+	if strings.Contains(buf.String(), "P7q7W91a") {
+		t.Errorf("attr code leaked: %s", buf.String())
+	}
+	buf.Reset()
+	New(&buf).Info("m", "code", "E42")
+	if !strings.Contains(buf.String(), `"code":"E42"`) {
+		t.Errorf("short result code lost: %s", buf.String())
+	}
+}
+
 func TestRedactCamelCaseAndNestedJSON(t *testing.T) {
 	cases := []string{
 		`{"accessToken":"abc123secret"}`,

@@ -117,8 +117,8 @@ var (
 	emailRe  = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`)
 	authRe   = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(?:(?:basic|bearer|digest|token)\s+)?[^\s"',;]+`)
 	// kvRe finds name=value and name: value pairs (any name, camelCase included); kvSecret
-	// decides which are masked. A bare "code" is never masked here: it collides with benign
-	// text such as "exit code=1"; OAuth codes are caught by codeRe. Quoted values are masked
+	// decides which are masked. A bare "code" is masked only when its value is longer than
+	// maxResultCode: "exit code=1" stays readable, an OAuth code does not. Quoted values are masked
 	// whole; an unquoted value is masked up to the next whitespace or delimiter only, so
 	// "password = hunter2 extra words" leaves "extra words" visible.
 	kvRe   = regexp.MustCompile(`\b([A-Za-z][A-Za-z0-9_-]*)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^&\s"',;]+)`)
@@ -169,6 +169,9 @@ func Redact(s string) string {
 	s = jwtRe.ReplaceAllString(s, redacted)
 	s = kvRe.ReplaceAllStringFunc(s, func(m string) string {
 		p := kvRe.FindStringSubmatch(m)
+		if normKey(p[1]) == "code" && !shortResultCode(p[3]) {
+			return p[1] + p[2] + redacted
+		}
 		if !kvSecret(p[1]) {
 			return m
 		}
@@ -179,6 +182,14 @@ func Redact(s string) string {
 	s = redactJSON(s, escJSONMemberRe, `\"`)
 	s = emailRe.ReplaceAllString(s, redacted)
 	return s
+}
+
+// maxResultCode is the longest value a bare "code" may carry and still read as a result code
+// (1, 500, E42); anything longer looks like an OAuth authorization code and is masked.
+const maxResultCode = 8
+
+func shortResultCode(v string) bool {
+	return len(strings.Trim(v, `"'`)) <= maxResultCode
 }
 
 // kvSecret reports whether a free-text name=value key is secret. Bare exact names such as
@@ -348,6 +359,9 @@ func (h *handler) sanitize(a slog.Attr) slog.Attr {
 	}
 	switch v.Kind() {
 	case slog.KindString:
+		if normKey(a.Key) == "code" && !shortResultCode(v.String()) {
+			return slog.String(a.Key, redacted) // "code" is allowlisted for result codes only
+		}
 		return slog.String(a.Key, clean(v.String()))
 	case slog.KindInt64, slog.KindUint64, slog.KindFloat64, slog.KindBool, slog.KindDuration, slog.KindTime:
 		return slog.Attr{Key: a.Key, Value: v}
