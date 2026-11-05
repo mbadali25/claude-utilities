@@ -76,7 +76,33 @@ printf 'systemctl %s\n' "$*" >>"${STUB_LOG:?}"
 STUBEOF
 chmod 0755 "$STUB/systemctl"
 
+# A stub curl stands in for the network in section 5. It serves the stub agent,
+# so the digest the script verifies is the digest of a binary that then works.
+cat >"$STUB/curl" <<STUBEOF
+#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cp -f -- "$STUB/fake-agent" "\${out:?curl stub: no -o}"
+STUBEOF
+chmod 0755 "$STUB/curl"
+
 export PATH="$STUB:$PATH"
+
+# The stubs must win every PATH lookup. This case declares itself read-only, so
+# run-all.sh may run it in a production pass: reaching the real user manager
+# would enable a real unit. Refuse to run at all rather than risk it.
+for tool in systemctl curl; do
+  if [ "$(command -v "$tool" 2>/dev/null)" != "$STUB/$tool" ]; then
+    echo "$tool resolves outside the stub dir: refusing to run"
+    exit 77
+  fi
+done
 PIN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 SECRET=super-secret-one-time-code
 
@@ -180,26 +206,13 @@ badrun "missing local binary" CLAUDESWAP_SERVER="https://x:1" CLAUDESWAP_PIN="$P
 
 # ------------------------------------------- 5. download with sha256 check
 
-# A stub curl stands in for the network: the only thing under test is whether
-# the script refuses a payload whose digest does not match.
-cat >"$STUB/curl" <<STUBEOF
-#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [ \$# -gt 0 ]; do
-  case "\$1" in
-    -o) out="\$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-cp -f -- "$STUB/fake-agent" "\${out:?curl stub: no -o}"
-STUBEOF
-chmod 0755 "$STUB/curl"
+# The only thing under test here is whether the script refuses a payload whose
+# digest does not match. The stub curl is set up with the other stubs above.
 PAYLOAD_SHA="$(sha256sum "$STUB/fake-agent" | cut -d' ' -f1)"
 BAD_SHA=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
 dlrun() { # dlrun <home> <sha256>
-  env -i PATH="$STUB:$PATH" HOME="$1" STUB_LOG="$STUB_LOG" \
+  env -i PATH="$PATH" HOME="$1" STUB_LOG="$STUB_LOG" \
     CLAUDESWAP_SERVER="https://swap.example:8443" CLAUDESWAP_PIN="$PIN" \
     CLAUDESWAP_AGENT_URL="https://dl.example/claude-swap-agent" \
     CLAUDESWAP_AGENT_SHA256="$2" \
