@@ -1,5 +1,18 @@
 # Install the claude-swap agent on a Linux host
 
+## Quick start
+
+1. On a build machine run `GOOS=linux go build -o agent-linux ./cmd/agent` and copy `agent-linux` to the host.
+2. Set these environment variables (never flags):
+   - `CLAUDESWAP_SERVER`: the server URL, `https://host:port`.
+   - `CLAUDESWAP_PIN`: the server certificate sha256 printed at server start (64 hex characters).
+   - `CLAUDESWAP_ENROL_CODE`: the one-time code from the admin UI. Optional; without it an admin must approve the host.
+   - `CLAUDESWAP_AGENT_BIN`: the path to the `agent-linux` file you copied.
+3. Run `CLAUDESWAP_DRY_RUN=1 scripts/install-agent.sh` first, then run `scripts/install-agent.sh` without the dry-run flag.
+4. Approve the host in the server UI (not needed when a valid one-time code was used).
+
+**Not yet verified on a real host.** The installer and the Linux session scan have not run on a real host, and the `/proc` start-time (`procStart`) format is unverified. Targets are TSS and SRL-LIN, to be run by Matthew himself.
+
 One script does the whole install: `scripts/install-agent.sh`. It copies or downloads the agent binary, enrols the host, writes a systemd **user** unit and starts it. Every input arrives in the environment, never as a flag, because an enrolment code on a command line is readable by every user on the host through `/proc/<pid>/cmdline`.
 
 Never paste, print, log or commit a token. Do not `cat` a credentials file or a backup; check files by existence, size and key names only.
