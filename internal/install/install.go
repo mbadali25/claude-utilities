@@ -45,6 +45,8 @@ func envQuote(s string) string {
 func RenderSystemdUserUnit(exe, stateDir string) string {
 	return fmt.Sprintf(`[Unit]
 Description=Claude Swap agent
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 ExecStart="%s" run
@@ -62,7 +64,7 @@ WantedBy=default.target
 // schtasks switches it can lift the 72-hour limit, keep running on battery and
 // restart the agent when it exits. The action runs the agent through cmd so the
 // task can set StateDirEnv. exe and stateDir must not contain '"' or '%'
-// (checked by checkWindowsPath).
+// (checked by checkWindowsPath, along with & ^ ! < > |).
 func RenderTaskXML(exe, stateDir, user string) string {
 	cmdArgs := fmt.Sprintf(`/d /s /c "set "%s=%s" && "%s" run"`, StateDirEnv, stateDir, exe)
 	esc := func(s string) string {
@@ -143,16 +145,24 @@ func absStateDir(dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("install: state dir: %w", err)
 	}
-	if fi, err := os.Lstat(abs); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("install: state dir %q is a symlink", abs)
+	if fi, err := os.Lstat(abs); err == nil && isLink(fi.Mode()) {
+		return "", fmt.Errorf("install: state dir %q is a symlink or junction", abs)
 	}
 	return abs, nil
 }
 
-// checkWindowsPath rejects characters that would break the cmd wrapper.
+// isLink reports a symlink, or a Windows junction/reparse point (Go reports
+// those as ModeIrregular).
+func isLink(m os.FileMode) bool {
+	return m&(os.ModeSymlink|os.ModeIrregular) != 0
+}
+
+// checkWindowsPath rejects characters that would break or escape the cmd
+// wrapper. Parentheses stay allowed ("Program Files (x86)") because they are
+// inert inside the quoted words.
 func checkWindowsPath(what, p string) error {
-	if strings.ContainsAny(p, `"%`) {
-		return fmt.Errorf("install: %s contains a quote or percent sign", what)
+	if strings.ContainsAny(p, "\"%&^!<>|") {
+		return fmt.Errorf("install: %s contains a quote or one of %% & ^ ! < > |", what)
 	}
 	return nil
 }

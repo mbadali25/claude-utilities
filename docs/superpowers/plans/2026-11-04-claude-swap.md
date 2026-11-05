@@ -227,9 +227,9 @@ Commit: `git add docs/superpowers/spike-results.md && git commit -m "docs: spike
 - Create: `internal/install/install.go`, `internal/install/install_test.go`, `README.md` (modify the existing two-line file)
 
 **Interfaces:**
-- Produces: `func RenderSystemdUserUnit(exe, stateDir string) string`; `func SchtasksCreateArgs(exe, user string) []string` (`/Create /SC ONLOGON /TN ClaudeSwapAgent /RU <user> /TR "<exe> run"`); `func Install(exe, stateDir string) error` (Windows: `schtasks`; Linux: write `~/.config/systemd/user/claude-swap-agent.service`, print `loginctl enable-linger` hint).
+- Produces: `func RenderSystemdUserUnit(exe, stateDir string) string`; `func RenderTaskXML(exe, stateDir, user string) string` and `func SchtasksCreateArgs(xmlPath string) []string` (`/Create /F /TN ClaudeSwapAgent /XML <path>`; amended from the `/SC ONLOGON /TR` form because only XML lifts the 72h limit and sets the state-dir env); `func Install(exe, stateDir string) error` (Windows: `schtasks`; Linux: write `~/.config/systemd/user/claude-swap-agent.service`, print `loginctl enable-linger` hint).
 
-- [ ] **Step 1: Write failing tests:** `TestRenderSystemdUnitHasRestartAlways`, `TestSchtasksArgsQuoteExePathWithSpaces`, `TestRenderUnitNeverContainsToken`.
+- [ ] **Step 1: Write failing tests:** `TestRenderSystemdUnitHasRestartAlways`, `TestSchtasksArgsQuoteExePathWithSpaces` (checks the quoted exe in the task XML), `TestRenderUnitNeverContainsToken`.
 - [ ] **Step 2: Run `go test ./internal/install`; expect FAIL.**
 - [ ] **Step 3: Implement** the two renderers and `Install`. README covers build (`go build ./...`, `GOOS=linux go build -o claude-swap-agent ./cmd/agent`), env vars, enrolment, the mcpOAuth caveat, and the Anthropic-terms risk.
 - [ ] **Step 4: Run; expect PASS.**

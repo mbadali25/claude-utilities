@@ -116,6 +116,45 @@ func TestSchtasksArgsUseXMLAndNoPassword(t *testing.T) {
 	}
 }
 
+func TestSchtasksArgsQuoteExePathWithSpaces(t *testing.T) {
+	// The task is registered from XML, so the exe path is quoted in the
+	// <Arguments> command line, not in the schtasks switches.
+	x := RenderTaskXML(`C:\Program Files (x86)\claude swap\agent.exe`, `C:\s`, `CORP\bob`)
+	want := `&amp;&amp; &#34;C:\Program Files (x86)\claude swap\agent.exe&#34; run`
+	if !strings.Contains(x, want) {
+		t.Errorf("exe path not quoted:\n%s", x)
+	}
+	if a := SchtasksCreateArgs(`C:\Temp Dir\t.xml`); a[len(a)-1] != `C:\Temp Dir\t.xml` {
+		t.Errorf("xml path must be one argument: %v", a)
+	}
+}
+
+func TestCheckWindowsPathRejectsShellMetachars(t *testing.T) {
+	for _, bad := range []string{`C:\a"b`, `C:\100%`, `C:\a&b`, `C:\a^b`, `C:\a!b`, `C:\a|b`, `C:\a<b`, `C:\a>b`} {
+		if checkWindowsPath("p", bad) == nil {
+			t.Errorf("want error for %q", bad)
+		}
+	}
+	if err := checkWindowsPath("p", `C:\Program Files (x86)\claude swap`); err != nil {
+		t.Errorf("unexpected: %v", err)
+	}
+}
+
+func TestIsLinkCoversJunctions(t *testing.T) {
+	if !isLink(os.ModeSymlink) || !isLink(os.ModeIrregular|os.ModeDir) || isLink(os.ModeDir) {
+		t.Error("isLink misclassifies modes")
+	}
+}
+
+func TestUnitWaitsForNetwork(t *testing.T) {
+	u := RenderSystemdUserUnit("/a", "/s")
+	for _, want := range []string{"After=network-online.target", "Wants=network-online.target"} {
+		if !strings.Contains(u, want) {
+			t.Errorf("unit missing %q", want)
+		}
+	}
+}
+
 func TestTaskXMLSettingsAndEnv(t *testing.T) {
 	x := RenderTaskXML(`C:\Program Files\swap\agent.exe`, `C:\Users\a&b\state`, `CORP\bob`)
 	for _, want := range []string{
