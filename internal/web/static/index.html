@@ -71,7 +71,9 @@
   /* The two shrink-to-fit helpers. A flex or grid child needs min-width:0 before it can ellipsis
      at all, and .col/.trunc replace the inline style attributes the card builders used to set -
      which a style-src nonce does not cover, so they were also the one CSP-shaped hole in here. */
-  .col { display:grid; gap:var(--s1); min-width:0; }
+  /* minmax(0,1fr), not the implicit auto: an auto grid column is sized to its content, so a long
+     name would widen the column past the box and defeat the min-width:0 beside it. */
+  .col { display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s1); min-width:0; }
   .trunc { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
   /* Header */
@@ -251,10 +253,15 @@
      operator scans a wall of cards for. The rest is one hidden block. */
   .acct-top { display:flex; align-items:center; gap:var(--s4); }
   .acct-h { flex:1 1 0; min-width:0; font:inherit; }
-  .acct-dis { width:100%; min-height:var(--h-dis); display:flex; align-items:center; gap:var(--s3); padding:0;
+  /* The caret is a rotated square, so its drawn corners reach about 1.7px past its 8px layout
+     box. The trailing 2px keeps those corners inside the header instead of over the card's
+     content edge, which is where the caret used to sit by a hair. */
+  .acct-dis { width:100%; min-height:var(--h-dis); display:flex; align-items:center; gap:var(--s3); padding:0 var(--s1) 0 0;
               background:none; border:0; color:inherit; font:inherit; text-align:left; cursor:pointer; }
   .acct-dis:hover .title { color:var(--acc); }
-  .acct-dis .chev { margin-left:2px; color:var(--mut); }
+  /* No right margin: the button is width:100%, so the caret's own trailing margin pushed 2px of
+     the header past the card's content box. */
+  .acct-dis .chev { margin:0 0 0 var(--s1); color:var(--mut); }
   .acct-dis[aria-expanded="true"] .chev { transform:rotate(-135deg); margin-top:4px; }
   /* Closed, the 7-day meter keeps its bar and its percentage and drops its reset time: the reset
      time is detail, and it belongs with the other detail. Dropping it is also what makes every
@@ -329,9 +336,10 @@
           min-height:calc(var(--h-ctl) + var(--s7)); }
   /* 120px basis: select, Swap and Revoke share one row in a 300px card instead of Revoke wrapping alone. */
   .swap select { flex:1 1 120px; min-width:0; }
-  /* The ghost Copy button sits flush with the row's right edge: the pull equals the row's own
-     padding, so it lands on the edge rather than 1px past it. */
-  details.sess li .btn.ghost { margin-right:calc(var(--s4) * -1); }
+  /* The Copy button keeps the row's padding rather than being pulled onto its edge. The pull it
+     used to carry put its right edge 8px past the content box of every row it sat in, so a
+     command row ended on a different line from the name and the chips above it; one right edge
+     per row is the whole point. */
   .confirm { display:flex; gap:var(--s4); flex-wrap:wrap; align-items:center; width:100%; }
   .confirm .q { flex:1 1 100%; font-weight:600; }
   /* The swap verdict, on the card that produced it. Every press leaves one of these: working,
@@ -495,6 +503,10 @@
   .modal-head .x { padding:0 var(--s4); }
   .modal-head .x svg { width:13px; height:13px; display:block; }
   .modal-body { padding:var(--s6); overflow:auto; display:grid; grid-template-columns:minmax(0,1fr); gap:var(--s6); align-content:start; }
+  /* A dialog quotes fingerprints, keys and host names inside its prose, and a 50-character token
+     with no break opportunity in it pushed the whole dialog sideways on a phone. anywhere breaks
+     only when there is no other way, unlike break-all, so ordinary sentences are unaffected. */
+  .modal-body p { overflow-wrap:anywhere; }
   .modal-foot { display:flex; justify-content:flex-end; gap:var(--s4); flex-wrap:wrap; }
   .fld { display:grid; gap:var(--s3); font-weight:500; }
   .fld input { width:100%; }
