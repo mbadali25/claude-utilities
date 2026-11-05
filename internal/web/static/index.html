@@ -40,6 +40,7 @@
   .scope { font-size:.85rem; color:var(--mut); }
   .enrol { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   #enrol-out { font-size:.9rem; min-height:1.5em; }
+  .acct { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   #enrol-out .code { font:600 1.05rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing:.06em; color:var(--fg); }
 
   /* Buttons: one primary per region, rest outlined. 36px+ hit height, 44px on touch. */
@@ -174,9 +175,44 @@
   .confirm { display:flex; gap:8px; flex-wrap:wrap; align-items:center; width:100%; }
   .confirm .q { flex:1 1 100%; font-weight:600; }
 
-  /* Import, add account, password */
-  .import { padding:14px 16px; border:1px dashed var(--line-strong); border-radius:var(--r); display:grid; gap:10px; background:var(--surface); }
-  .tools { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap:var(--gap); align-items:start; }
+  /* Account menu: a disclosure button over a floating menu. A shadow is for what floats. */
+  .menuwrap { position:relative; }
+  #acct-btn { display:inline-flex; align-items:center; gap:8px; }
+  #acct-btn svg { width:15px; height:15px; flex:none; }
+  .chev.dn { transform:rotate(45deg); margin:-3px 0 0 2px; }
+  #acct-btn[aria-expanded="true"] .chev.dn { transform:rotate(-135deg); margin:3px 0 0 2px; }
+  .menu { position:absolute; right:0; top:calc(100% + 6px); z-index:30; min-width:236px; padding:6px; display:grid; gap:2px;
+          background:var(--surface); border:1px solid var(--line-strong); border-radius:var(--r); box-shadow:0 10px 28px rgb(0 0 0 / .18); }
+  .mi { width:100%; min-height:40px; padding:0 12px; display:flex; align-items:center; gap:16px; text-align:left; white-space:nowrap;
+        background:transparent; border:0; border-radius:6px; font:inherit; font-weight:500; color:inherit; cursor:pointer; }
+  .mi:hover { background:var(--sunk); }
+  .mi.out { color:var(--bad); }
+  .mi .note { margin-left:auto; font-size:.8rem; font-weight:400; color:var(--mut); }
+  .mi-rule { height:1px; margin:4px 8px; background:var(--line); }
+  @media (pointer:coarse) { .mi { min-height:44px; } }
+  #add-busy { display:inline-flex; align-items:center; gap:7px; }
+  #add-busy .dot { background:var(--warn); }
+
+  /* Modals: native <dialog>, so Esc closes, Tab stays inside and focus returns to the opener.
+     Only [open] gets a display, or the UA's dialog:not([open]) rule is overridden and it never shuts. */
+  .modal { width:min(580px, calc(100vw - 28px)); max-height:86vh; max-height:calc(100dvh - 48px); padding:0; color:var(--fg);
+           background:var(--surface); border:1px solid var(--line-strong); border-radius:var(--r); box-shadow:0 20px 50px rgb(0 0 0 / .26); }
+  .modal[open] { display:grid; grid-template-rows:auto minmax(0,1fr); }
+  .modal::backdrop { background:rgb(0 0 0 / .55); }
+  .modal-head { display:flex; align-items:center; gap:12px; padding:13px 14px 13px 16px; border-bottom:1px solid var(--line); }
+  .modal-head h2 { margin-right:auto; }
+  .modal-head .x { min-height:32px; padding:0 9px; }
+  .modal-head .x svg { width:13px; height:13px; display:block; }
+  .modal-body { padding:16px; overflow:auto; display:grid; gap:16px; align-content:start; }
+  .modal-foot { display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
+  .fld { display:grid; gap:6px; font-weight:500; }
+  .fld input { width:100%; }
+  .fld .hint { font-weight:400; font-size:.85rem; color:var(--mut); }
+  #pw-form { display:grid; gap:14px; }
+  #pw-msg:empty { display:none; }
+
+  /* Import and add-account panels, both inside the Add a Claude account dialog */
+  .import { padding:14px 16px; border:1px solid var(--line); border-radius:var(--r); display:grid; gap:10px; background:var(--sunk); }
   .import .lead { font-weight:600; color:var(--fg); }
   .import form { display:flex; gap:8px; flex-wrap:wrap; }
   .import select, .import input { flex:1 1 160px; min-width:0; }
@@ -184,8 +220,10 @@
   .add-flow { display:grid; gap:10px; }
   .add-flow form { display:flex; gap:8px; flex-wrap:wrap; }
   .add-flow input { flex:1 1 220px; min-width:0; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .add-flow .btn { display:inline-flex; align-items:center; justify-content:center; text-decoration:none; width:fit-content; color:inherit; }
-  .add-flow .btn.primary { color:var(--bg); }
+  /* The sign-in link is an <a> styled as a button; only it needs the colour reset, or it would
+     take the danger colour off the Cancel button beside it. */
+  .add-flow a.btn { display:inline-flex; align-items:center; justify-content:center; text-decoration:none; width:fit-content; color:inherit; }
+  .add-flow a.btn.primary { color:var(--bg); }
   .add-flow .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
 
   /* Login */
@@ -200,11 +238,18 @@
     .enrol { width:100%; }
     .fp { font-size:1.5rem; }
     .stat dd { font-size:1.35rem; }
+    /* On a phone the menu spans the header instead of the button, or its labels wrap. */
+    .acct { width:100%; position:relative; }
+    .menuwrap { margin-left:auto; position:static; }
+    .menu { left:0; right:0; min-width:0; }
+    .modal-foot .btn { flex:1 1 auto; }
   }
   @media (prefers-reduced-motion: no-preference) {
     .bar > i { transition:width .3s ease; }
-    .btn, .seg button, .hostnav button { transition:border-color .15s, color .15s, background-color .15s; }
+    .btn, .seg button, .hostnav button, .mi { transition:border-color .15s, color .15s, background-color .15s; }
     .chev { transition:transform .15s ease; }
+    .modal[open] { animation:rise .14s ease-out; }
+    @keyframes rise { from { opacity:0; transform:translateY(8px); } }
   }
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; scroll-behavior:auto !important; } }
 </style>
@@ -233,6 +278,21 @@
   <div class="enrol">
     <button type="button" class="btn" id="enrol">New enrolment code</button>
     <span id="enrol-out" class="mut" role="status"></span>
+  </div>
+  <div class="acct" id="acct">
+    <span role="status" aria-live="polite"><button type="button" class="btn sm" id="add-busy" hidden><span class="dot" aria-hidden="true"></span><span class="txt">Sign-in running</span></button></span>
+    <div class="menuwrap">
+      <button type="button" class="btn" id="acct-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="acct-menu">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.6 14c.6-2.8 2.7-4.2 5.4-4.2s4.8 1.4 5.4 4.2"/></svg>
+        Account<span class="chev dn" aria-hidden="true"></span>
+      </button>
+      <div class="menu" id="acct-menu" role="menu" aria-labelledby="acct-btn" hidden>
+        <button type="button" role="menuitem" tabindex="-1" class="mi" id="mi-pw">Change password</button>
+        <button type="button" role="menuitem" tabindex="-1" class="mi" id="mi-add">Add Claude account<span class="note" id="mi-add-note" hidden></span></button>
+        <div class="mi-rule" role="separator"></div>
+        <button type="button" role="menuitem" tabindex="-1" class="mi out" id="mi-out">Log out</button>
+      </div>
+    </div>
   </div>
 </header>
 
@@ -298,9 +358,17 @@
   <div id="hosts" class="grid"><p class="empty">Loading hosts...</p></div>
 </section>
 
-<section aria-labelledby="add-sec-h">
-  <div class="head"><h2 id="add-sec-h"><button type="button" class="fold" data-fold="addacct" aria-expanded="true" aria-controls="add-body"><span class="chev" aria-hidden="true"></span>Add an account</button></h2></div>
-  <div id="add-body" class="tools">
+</main>
+</div>
+
+<dialog class="modal" id="add-dialog" aria-labelledby="add-sec-h">
+  <div class="modal-head">
+    <h2 id="add-sec-h">Add a Claude account</h2>
+    <button type="button" class="btn sm ghost x" data-close="add-dialog" aria-label="Close without cancelling a running sign-in">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
     <div class="import">
       <p class="lead">Add account: import from a logged-in host</p>
       <form id="import-form">
@@ -308,6 +376,7 @@
         <input name="label" placeholder="Label" maxlength="64" required aria-label="Label" autocomplete="off">
         <button type="submit" class="btn primary">Import</button>
       </form>
+      <p class="sub">The host must be online and signed in to Claude Code. Its login is copied into the vault.</p>
     </div>
     <div class="import" id="add-panel" aria-labelledby="add-h">
       <p class="lead" id="add-h">Add account: sign in with Anthropic</p>
@@ -321,29 +390,40 @@
         <a class="btn primary" id="add-link" target="_blank" rel="noopener noreferrer" hidden>Open Anthropic sign-in</a>
         <form id="add-code-form" hidden>
           <input name="code" id="add-code" autocomplete="off" spellcheck="false" maxlength="2048" required aria-label="Code from Anthropic's page">
-          <button type="submit" class="btn primary" id="add-send">Submit code</button>
+          <button type="submit" class="btn" id="add-send">Submit code</button>
         </form>
-        <div class="actions"><button type="button" class="btn" id="add-cancel">Cancel</button></div>
+        <div class="actions"><button type="button" class="btn danger" id="add-cancel">Cancel sign-in</button></div>
       </div>
-      <p class="sub">The sign-in is completed on Anthropic's own page. claude-swap never sees your password; it only passes the link and the one-time code.</p>
+      <p class="sub">The sign-in is completed on Anthropic's own page. claude-swap never sees your password; it only passes the link and the one-time code. Closing this dialog leaves a started sign-in running; it stays in the Account menu.</p>
     </div>
   </div>
-</section>
+</dialog>
 
-<section aria-labelledby="pw-h">
-  <div class="head"><h2 id="pw-h"><button type="button" class="fold" data-fold="password" data-closed="1" aria-expanded="true" aria-controls="pw-body"><span class="chev" aria-hidden="true"></span>Admin password</button></h2></div>
-  <div class="import" id="pw-body">
+<dialog class="modal" id="pw-dialog" aria-labelledby="pw-h">
+  <div class="modal-head">
+    <h2 id="pw-h">Admin password</h2>
+    <button type="button" class="btn sm ghost x" data-close="pw-dialog" aria-label="Close">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="modal-body">
     <p class="mut">The new password is stored on the server as a hash and replaces the bootstrap environment variable. Every signed-in session ends, this one included.</p>
     <form id="pw-form" autocomplete="off">
-      <input type="password" name="current" id="pw-current" placeholder="Current password" autocomplete="current-password" required aria-label="Current admin password">
-      <input type="password" name="new" id="pw-new" placeholder="New password (12 characters or more)" minlength="12" maxlength="1024" autocomplete="new-password" required aria-label="New admin password">
-      <button type="submit" class="btn primary" id="pw-save">Change password</button>
+      <label class="fld">Current password
+        <input type="password" name="current" id="pw-current" autocomplete="current-password" required>
+      </label>
+      <label class="fld">New password
+        <input type="password" name="new" id="pw-new" minlength="12" maxlength="1024" autocomplete="new-password" required aria-describedby="pw-hint">
+        <span class="hint" id="pw-hint">12 characters or more.</span>
+      </label>
+      <p id="pw-msg" role="status" aria-live="polite"></p>
+      <div class="modal-foot">
+        <button type="button" class="btn" data-close="pw-dialog">Cancel</button>
+        <button type="submit" class="btn primary" id="pw-save">Change password</button>
+      </div>
     </form>
-    <p id="pw-msg" role="status" aria-live="polite"></p>
   </div>
-</section>
-</main>
-</div>
+</dialog>
 
 <script nonce="{{.Nonce}}">
 (function () {
@@ -378,7 +458,7 @@
   }
   Array.prototype.forEach.call(document.querySelectorAll('.fold'), function (btn) {
     var key = 'fold.' + btn.dataset.fold;
-    var dflt = btn.dataset.closed ? false : !(narrow && btn.dataset.fold === 'sidehosts');
+    var dflt = !(narrow && btn.dataset.fold === 'sidehosts');
     setFold(btn, pref(key, dflt));
     btn.addEventListener('click', function () {
       var open = btn.getAttribute('aria-expanded') !== 'true';
@@ -389,6 +469,56 @@
     var b = $('.fold[data-fold="' + name + '"]');
     if (b && b.getAttribute('aria-expanded') !== 'true') { setFold(b, true); prefs['fold.' + name] = true; savePrefs(); }
   }
+
+  // Account menu. The button owns aria-expanded; the items hold a roving tabindex, so the arrows
+  // move inside the menu and Tab leaves it. Nothing here is a link: every item acts in place.
+  var mBtn = $('#acct-btn'), mBox = $('#acct-menu');
+  var mItems = Array.prototype.slice.call(mBox.querySelectorAll('.mi'));
+  function menuShown() { return mBtn.getAttribute('aria-expanded') === 'true'; }
+  function closeMenu(refocus) {
+    mBtn.setAttribute('aria-expanded', 'false'); mBox.hidden = true;
+    if (refocus) mBtn.focus();
+  }
+  function openMenu(i) {
+    mBtn.setAttribute('aria-expanded', 'true'); mBox.hidden = false; mItems[i].focus();
+  }
+  function moveItem(step) {
+    var at = mItems.indexOf(document.activeElement);
+    mItems[(at + step + mItems.length) % mItems.length].focus();
+  }
+  mBtn.addEventListener('click', function () { if (menuShown()) closeMenu(true); else openMenu(0); });
+  mBtn.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+    ev.preventDefault(); openMenu(ev.key === 'ArrowUp' ? mItems.length - 1 : 0);
+  });
+  mBox.addEventListener('keydown', function (ev) {
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); moveItem(1); }
+    else if (ev.key === 'ArrowUp') { ev.preventDefault(); moveItem(-1); }
+    else if (ev.key === 'Home') { ev.preventDefault(); mItems[0].focus(); }
+    else if (ev.key === 'End') { ev.preventDefault(); mItems[mItems.length - 1].focus(); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); closeMenu(true); }
+    else if (ev.key === 'Tab') { closeMenu(false); }
+  });
+  document.addEventListener('pointerdown', function (ev) {
+    if (menuShown() && !$('#acct').contains(ev.target)) closeMenu(false);
+  });
+
+  // Modal dialogs. showModal() keeps Tab inside the dialog and closes it on Escape; the menu
+  // button is focused first, so the browser returns focus there, and the close handler sends it
+  // back as well for the browsers that do not. Closing a dialog never touches a running job:
+  // only "Cancel sign-in" posts /cancel.
+  function openModal(sel) {
+    var d = $(sel);
+    closeMenu(true);
+    if (d.showModal) d.showModal(); else d.setAttribute('open', 'open');
+    return d;
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('[data-close]'), function (b) {
+    b.addEventListener('click', function () { $('#' + b.dataset.close).close(); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('.modal'), function (d) {
+    d.addEventListener('close', function () { mBtn.focus(); });
+  });
 
   var SVG = 'http://www.w3.org/2000/svg';
   function glyph(d) {
@@ -576,7 +706,7 @@
     if (!force && !changed('acc', [list, filter]) && !$('#accounts .empty')) return;
     sig.acc = JSON.stringify([list, filter]);
     var box = $('#accounts'); box.textContent = '';
-    if (!list.length) { box.appendChild(el('p', 'No accounts yet. Import one from a logged-in host below.', 'empty')); return; }
+    if (!list.length) { box.appendChild(el('p', 'No accounts yet. Open the Account menu and choose Add Claude account.', 'empty')); return; }
     var shown = list.filter(matches);
     if (!shown.length) box.appendChild(el('p', 'No accounts match this filter.', 'empty'));
     shown.forEach(function (a) { box.appendChild(accountCard(a)); });
@@ -741,13 +871,25 @@
   // storage, the address bar or the title. The link is shown only while the hub says awaiting_code.
   var add = { id: null, timer: null, state: '' };
   var A = { form: $('#add-form'), start: $('#add-start'), flow: $('#add-flow'), msg: $('#add-msg'), link: $('#add-link'),
-            codeForm: $('#add-code-form'), code: $('#add-code'), send: $('#add-send'), cancel: $('#add-cancel') };
+            codeForm: $('#add-code-form'), code: $('#add-code'), send: $('#add-send'), cancel: $('#add-cancel'),
+            busy: $('#add-busy'), note: $('#mi-add-note') };
   var LINK_OK = /^https:\/\/claude\.(com|ai)\//;
+  var ADD_LIVE = ['starting', 'awaiting_code', 'finishing'];
   function addMsg(text, bad) { A.msg.textContent = text; A.msg.className = bad ? 'err' : ''; }
+  // A started sign-in survives the dialog closing, so the header and the menu item say it is
+  // running and lead back to it. The poll keeps going either way.
+  function addBusy() {
+    var live = !!add.id && ADD_LIVE.indexOf(add.state) >= 0;
+    A.busy.hidden = !live; A.note.hidden = !live;
+    var waiting = add.state === 'awaiting_code';
+    A.busy.querySelector('.txt').textContent = waiting ? 'Sign-in needs the code' : 'Sign-in running';
+    A.note.textContent = waiting ? 'needs code' : 'running';
+  }
   function addIdle() { // back to the start form; drops the link and any code
     clearTimeout(add.timer); add.id = null; add.state = '';
     A.flow.hidden = true; A.link.hidden = true; A.link.removeAttribute('href'); A.codeForm.hidden = true;
-    A.code.value = ''; A.start.disabled = false; A.cancel.textContent = 'Cancel';
+    A.code.value = ''; A.start.disabled = false; A.cancel.textContent = 'Cancel sign-in';
+    addBusy();
   }
   function addRender(j) {
     var prev = add.state; add.state = j.state;
@@ -757,13 +899,14 @@
       if (j.url && LINK_OK.test(j.url)) { A.link.href = j.url; A.link.hidden = false; }
       A.codeForm.hidden = false;
       addMsg("Open the link, sign in on Anthropic's own page, then paste the code it shows.");
-      if (prev !== 'awaiting_code') A.code.focus();
+      if (prev !== 'awaiting_code' && $('#add-dialog').open) A.code.focus();
     } else if (j.state === 'finishing') { addMsg('Finishing the sign-in...'); }
     else if (j.state === 'done') {
       addMsg('Added ' + (j.account ? j.account.label : 'the account') + '. It is stored free; swap it onto a host to use it.');
       A.cancel.textContent = 'Close'; refresh();
     } else if (j.state === 'failed') { addMsg(j.error || 'The sign-in failed.', true); A.cancel.textContent = 'Close'; }
-    else if (j.state === 'cancelled') { addIdle(); }
+    else if (j.state === 'cancelled') { addIdle(); return; }
+    addBusy();
   }
   function addPoll() {
     if (!add.id) return;
@@ -771,12 +914,13 @@
       if (!add.id) return;
       addRender(j);
       if (['starting', 'awaiting_code', 'finishing'].indexOf(j.state) >= 0) add.timer = setTimeout(addPoll, 2000);
-    }).catch(function (e) { addMsg(e.message, true); A.cancel.textContent = 'Close'; add.state = 'failed'; });
+    }).catch(function (e) { addMsg(e.message, true); A.cancel.textContent = 'Close'; add.state = 'failed'; addBusy(); });
   }
   A.form.addEventListener('submit', function (ev) {
     ev.preventDefault(); say(''); A.start.disabled = true;
     call('POST', '/api/accounts/add', { host: $('#add-host').value, label: A.form.label.value }).then(function (r) {
-      add.id = r.id; A.form.label.value = ''; A.flow.hidden = false; addMsg('Starting the sign-in on the host...'); addPoll();
+      add.id = r.id; add.state = 'starting'; A.form.label.value = ''; A.flow.hidden = false;
+      addMsg('Starting the sign-in on the host...'); addBusy(); addPoll();
     }).catch(function (e) { say(e.message); A.start.disabled = false; });
   });
   A.codeForm.addEventListener('submit', function (ev) {
@@ -791,6 +935,26 @@
     var id = add.id, finished = add.state === 'done' || add.state === 'failed';
     addIdle();
     if (id && !finished) call('POST', '/api/accounts/add/' + encodeURIComponent(id) + '/cancel').catch(function (e) { say(e.message); });
+  });
+
+  // The menu's three items. Add account reopens a running sign-in where it left off.
+  function openAdd() {
+    openModal('#add-dialog');
+    if (add.state === 'awaiting_code') A.code.focus(); else $('#import-host').focus();
+  }
+  $('#mi-add').addEventListener('click', openAdd);
+  A.busy.addEventListener('click', openAdd);
+  $('#mi-pw').addEventListener('click', function () {
+    openModal('#pw-dialog');
+    var msg = $('#pw-msg'); msg.textContent = ''; msg.className = '';
+    $('#pw-save').disabled = false; $('#pw-current').focus();
+  });
+  // Log out drops the server-side session and clears the cookie, so the reload lands on sign-in.
+  $('#mi-out').addEventListener('click', function () {
+    var b = $('#mi-out');
+    closeMenu(true); say(''); b.disabled = true;
+    call('POST', '/api/logout').then(function () { location.reload(); })
+      .catch(function (e) { b.disabled = false; say(e.message); });
   });
 
   // Change the admin password. Both values live only in the form fields; on success the server

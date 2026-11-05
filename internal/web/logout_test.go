@@ -115,6 +115,20 @@ func TestLogoutEndsOnlyTheCallersSession(t *testing.T) {
 	}
 }
 
+func TestUIHasLogOutInTheAccountMenu(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	p := page(r, s)
+	for _, want := range []string{"Log out", `id="mi-out"`, "/api/logout"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+	if strings.Contains(page(r, nil), "/api/logout") {
+		t.Error("the sign-in page offers the logout route")
+	}
+}
+
 func TestLogoutNeverLogsTheSessionToken(t *testing.T) {
 	var buf bytes.Buffer
 	old := logger
