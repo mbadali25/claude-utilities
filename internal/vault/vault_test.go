@@ -156,6 +156,46 @@ func TestFileMode0600(t *testing.T) {
 	}
 }
 
+func TestBadMagicWithValidLengthIsRejected(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "v.bin")
+	v, _ := open(t, p, "pw")
+	v.Put(acct("a"))
+	b, _ := os.ReadFile(p)
+	copy(b, "XXXX")
+	os.WriteFile(p, b, 0o600)
+	if _, err := open(t, p, "pw"); !errors.Is(err, errCorrupt) {
+		t.Fatalf("want errCorrupt, got %v", err)
+	}
+}
+
+func TestBlockIsDeepCopied(t *testing.T) {
+	v, _ := open(t, filepath.Join(t.TempDir(), "v.bin"), "pw")
+	in := acct("a")
+	v.Put(in)
+	in.Block[0] = 'X' // caller mutates its input after Put
+	g, _ := v.Get("a")
+	g.Block[0] = 'Y'
+	v.List()[0].Block[0] = 'Z'
+	g2, _ := v.Get("a")
+	if g2.Block[0] != '{' {
+		t.Fatalf("store aliased caller memory: %q", g2.Block[0])
+	}
+}
+
+func TestFailedDeleteRollsBack(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "v.bin")
+	v, _ := open(t, p, "pw")
+	v.Put(acct("a"))
+	renameFn = func(a, b string) error { return errors.New("boom") }
+	t.Cleanup(func() { renameFn = os.Rename })
+	if err := v.Delete("a"); err == nil {
+		t.Fatal("expected delete error")
+	}
+	if _, ok := v.Get("a"); !ok {
+		t.Fatal("failed delete not rolled back")
+	}
+}
+
 func TestEmptyVaultListsEmpty(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "v.bin")
 	v, err := open(t, p, "pw")

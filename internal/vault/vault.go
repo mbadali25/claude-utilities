@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/argon2"
+
+	"claude-utilities/internal/credfile"
 )
 
 const (
@@ -27,7 +29,7 @@ const (
 	nonceLen  = 12
 	keyLen    = 32
 	headerLen = len(magic) + saltLen
-	argonTime = 1
+	argonTime = 3
 	argonMem  = 64 * 1024 // KiB
 	argonPar  = 4
 )
@@ -229,6 +231,10 @@ func (v *Vault) save() error {
 	if err := tmp.Chmod(0o600); err != nil && !isWindowsChmodQuirk(err) {
 		return fail(err)
 	}
+	// Windows: Chmod only toggles read-only, so set an owner-only ACL (no-op elsewhere).
+	if err := credfile.RestrictFile(name); err != nil {
+		return fail(err)
+	}
 	if _, err := tmp.Write(buf.Bytes()); err != nil {
 		return fail(err)
 	}
@@ -243,6 +249,7 @@ func (v *Vault) save() error {
 		os.Remove(name)
 		return fmt.Errorf("vault: rename: %w", err)
 	}
+	credfile.SyncDir(dir)
 	return nil
 }
 
