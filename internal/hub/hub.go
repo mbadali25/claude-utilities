@@ -148,7 +148,19 @@ type host struct {
 	// login. Keyed by session, not by time, so cross-host clock skew cannot matter. In memory only.
 	reloadIDs map[string]struct{}
 	identity  string // last known live identity (from a report or a successful swap)
+	// A swap rewrites the login but never ~/.claude.json, so the agent keeps reporting the identity
+	// it had before the swap. swapFrom is that stale identity, swapTarget the account swapped in and
+	// swapIdent its identity; while reports still say swapFrom, the login is swapTarget's. In memory only.
+	swapFrom, swapTarget, swapIdent string
 }
+
+// noteSwapLocked remembers that account (identity ident) was put on the host while the agent
+// reported from. Callers hold h.mu.
+func (ho *host) noteSwapLocked(from, account, ident string) {
+	ho.swapFrom, ho.swapTarget, ho.swapIdent = from, account, ident
+}
+
+func (ho *host) forgetSwapLocked() { ho.swapFrom, ho.swapTarget, ho.swapIdent = "", "", "" }
 
 func sessionKey(s proto.Session) string { return fmt.Sprintf("%d:%s", s.PID, s.ID) }
 
@@ -415,6 +427,13 @@ func (h *Hub) touch(c *conn, rep *proto.Report) {
 	}
 	ho.report = *rep
 	ho.identity = rep.ActiveIdentity
+	if ho.swapTarget != "" {
+		if rep.ActiveIdentity == ho.swapFrom {
+			ho.identity = ho.swapIdent // stale: the swap did not rewrite ~/.claude.json
+		} else {
+			ho.forgetSwapLocked() // the identity changed since (a manual login): trust it again
+		}
+	}
 	live := map[string]struct{}{}
 	for _, s := range rep.Sessions {
 		live[sessionKey(s)] = struct{}{}
@@ -429,17 +448,70 @@ func (h *Hub) touch(c *conn, rep *proto.Report) {
 // sameLineage reports whether two login blocks carry the same non-empty refresh token, i.e. the
 // exported login is demonstrably the stored account's. Identity in a report is only a claim.
 func sameLineage(a, b json.RawMessage) bool {
-	rt := func(raw json.RawMessage) string {
-		var v struct {
-			RefreshToken string `json:"refreshToken"`
-		}
-		if json.Unmarshal(raw, &v) != nil {
-			return ""
-		}
-		return v.RefreshToken
+	x := refreshToken(a)
+	return x != "" && x == refreshToken(b)
+}
+
+func refreshToken(raw json.RawMessage) string {
+	var v struct {
+		RefreshToken string `json:"refreshToken"`
 	}
-	x := rt(a)
-	return x != "" && x == rt(b)
+	if json.Unmarshal(raw, &v) != nil {
+		return ""
+	}
+	return v.RefreshToken
+}
+
+// lineageConflict reports whether both blocks carry a refresh token and the tokens differ, i.e. the
+// two logins are demonstrably different. A block with no refresh token proves nothing either way.
+func lineageConflict(a, b json.RawMessage) bool {
+	x, y := refreshToken(a), refreshToken(b)
+	return x != "" && y != "" && x != y
+}
+
+type liveHow int
+
+const (
+	liveByLineage  liveHow = iota // the exported login's refresh token matches a stored login
+	liveBySwap                    // the hub swapped that account in and the agent's identity is still the old one
+	liveByIdentity                // only the agent-reported identity names it
+)
+
+// liveAccount decides which vault account the host is logged in as. The login (refresh-token
+// lineage) outranks the agent's identity, because a swap never rewrites ~/.claude.json and the
+// identity it reports goes stale. Next comes the hub's own record of its last swap, then the bare
+// identity. It returns nil when none applies.
+func (h *Hub) liveAccount(ho *host, identity string, block json.RawMessage) (*vault.Account, liveHow) {
+	accts := h.vault.List()
+	var byLineage *vault.Account
+	for i := range accts {
+		if !sameLineage(block, accts[i].Block) {
+			continue
+		}
+		if byLineage == nil || (identity != "" && accts[i].Identity == identity) {
+			byLineage = &accts[i]
+		}
+	}
+	if byLineage != nil {
+		return byLineage, liveByLineage
+	}
+	h.mu.Lock()
+	from, target := ho.swapFrom, ho.swapTarget
+	h.mu.Unlock()
+	if target != "" && identity == from {
+		if a, ok := h.vault.Get(target); ok {
+			return &a, liveBySwap
+		}
+	}
+	if identity == "" {
+		return nil, liveByIdentity
+	}
+	for i := range accts {
+		if accts[i].Identity == identity {
+			return &accts[i], liveByIdentity
+		}
+	}
+	return nil, liveByIdentity
 }
 
 // dropConn runs when a connection's handler exits.
@@ -613,48 +685,47 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 	if exp.Err != "" {
 		return fmt.Errorf("hub: export failed: %s", logx.Redact(exp.Err))
 	}
-	var live *vault.Account
-	if exp.Identity != "" {
-		for _, a := range h.vault.List() {
-			if a.Identity == exp.Identity {
-				a := a
-				live = &a
-				break
-			}
-		}
-	}
-	if live == nil {
-		h.log.Warn("swap refused", "action", "swap", "host_id", hostID, "result", "unknown live account")
-		return ErrUnknownLiveAccount
-	}
 	block, err := oauthBlock(exp.Block)
 	if err != nil {
 		return err
 	}
+	live, how := h.liveAccount(ho, exp.Identity, block)
+	if live == nil {
+		h.log.Warn("swap refused", "action", "swap", "host_id", hostID, "result", "unknown live account")
+		return ErrUnknownLiveAccount
+	}
+	if live.ID == target.ID {
+		// Already active: nothing is written to the vault, not even a fresher block.
+		if _, holds := h.reg.HostsUsing(live.ID)[hostID]; !holds && h.reg.OwnerOf(live.ID).Server && sameLineage(block, live.Block) {
+			h.reg.SwapIn(live.ID, hostID) // exported login matches the stored one: record the holder
+		}
+		h.mu.Lock()
+		ho.identity = target.Identity
+		ho.noteSwapLocked(exp.Identity, target.ID, target.Identity)
+		h.mu.Unlock()
+		h.log.Info("swap no-op", "action", "swap", "host_id", hostID, "account", accountID, "result", "already active")
+		return nil
+	}
+
 	// Write back only what this host may speak for: the Active holder. A Shared or Stale holder
 	// has a possibly rotated-out copy, and a host that merely claims an account (identity is
 	// agent-supplied, the block carries none) must not overwrite it, even when the server owns it.
-	owner := h.reg.OwnerOf(live.ID)
+	// A slot is never overwritten with a login of a different lineage; that is how a stale identity
+	// used to put one account's tokens into another's slot.
 	state, holds := h.reg.HostsUsing(live.ID)[hostID]
-	if holds && state == ownership.Active {
+	switch {
+	case !holds || state != ownership.Active:
+		h.log.Warn("writeback skipped", "action", "swap", "host_id", hostID, "account", live.ID,
+			"result", "host does not own the live login")
+	case how == liveByIdentity && lineageConflict(block, live.Block):
+		h.log.Warn("writeback skipped", "action", "swap", "host_id", hostID, "account", live.ID,
+			"result", "live login has a different lineage than the stored one")
+	default:
 		live.Block = block
 		live.Updated = h.now()
 		if err := h.vault.Put(*live); err != nil {
 			return fmt.Errorf("hub: write back live login: %w", err)
 		}
-	} else {
-		h.log.Warn("writeback skipped", "action", "swap", "host_id", hostID, "account", live.ID,
-			"result", "host does not own the live login")
-	}
-	if live.ID == target.ID {
-		if !holds && owner.Server && sameLineage(block, live.Block) {
-			h.reg.SwapIn(live.ID, hostID) // exported login matches the stored one: record the holder
-		}
-		h.mu.Lock()
-		ho.identity = target.Identity
-		h.mu.Unlock()
-		h.log.Info("swap no-op", "action", "swap", "host_id", hostID, "account", accountID, "result", "already active")
-		return nil
 	}
 
 	raw, err = h.request(ctx, c, proto.TypeSwapReq, proto.TypeSwapRes, proto.SwapReq{Block: target.Block, Account: accountID})
@@ -663,6 +734,7 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 		h.mu.Lock()
 		ho.markReloadLocked()
 		ho.identity = ""
+		ho.forgetSwapLocked()
 		h.mu.Unlock()
 		h.log.Warn("swap outcome unknown", "action", "swap", "host_id", hostID, "account", accountID,
 			"result", "unknown", logx.Err(err))
@@ -683,6 +755,7 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 	h.mu.Lock()
 	ho.markReloadLocked()
 	ho.identity = target.Identity
+	ho.noteSwapLocked(exp.Identity, target.ID, target.Identity)
 	h.mu.Unlock()
 	h.log.Info("swap done", "action", "swap", "host_id", hostID, "account", accountID, "result", "ok")
 	return nil

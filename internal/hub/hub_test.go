@@ -382,6 +382,9 @@ type script struct {
 	f           *fixture
 	identityOf  map[string]string
 	stopSwapRes bool
+	// staleIdentity mimics the real agent: a swap rewrites the login but never ~/.claude.json,
+	// so the reported identity keeps naming the previous account.
+	staleIdentity bool
 }
 
 func (f *fixture) newScript(identity, block string) *script {
@@ -424,7 +427,9 @@ func (s *script) serve(a *agent) {
 				time.Sleep(delay)
 				s.mu.Lock()
 				if ok {
-					s.identity = s.identityOf[req.Account]
+					if !s.staleIdentity {
+						s.identity = s.identityOf[req.Account]
+					}
 					s.liveBlock = string(req.Block)
 				}
 				s.inflight--
