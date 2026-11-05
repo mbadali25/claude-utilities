@@ -150,27 +150,50 @@ func TestUnknownAndCompositeCommandsAreRefused(t *testing.T) {
 	}
 }
 
-func TestInboxMechanismIsOffByDefaultAndUnsupportedWhenOn(t *testing.T) {
+func TestInboxMechanismIsOffByDefault(t *testing.T) {
 	off, _ := newTestControl(t, false)
-	for _, c := range []string{proto.CmdReloadPlugins, proto.CmdRemoteControlEnable, proto.CmdRenameRemote} {
+	for _, c := range []string{proto.CmdReloadPlugins, proto.CmdRemoteControlEnable,
+		proto.CmdRenameRemote, proto.CmdRestartSessions} {
 		for _, m := range off.ex.mechanisms(c) {
 			if m.Name() == "inbox" {
 				t.Fatalf("%s: inbox registered with the flag off", c)
 			}
 		}
 	}
-	on, _ := newTestControl(t, true)
-	first := on.ex.mechanisms(proto.CmdRemoteControlEnable)
-	if len(first) == 0 || first[0].Name() != "inbox" {
-		t.Fatalf("inbox should be tried first when on: %v", first)
-	}
-	// It is tried and declines, so the relaunch mechanism still answers.
-	res := on.ex.run(CommandTask{CommandID: "c1", Command: proto.CmdRemoteControlEnable, SessionID: testSession})
-	if res.Mechanism != "relaunch" {
+	// With the flag off a rename is the relaunch command and nothing is connected to.
+	res := off.ex.run(CommandTask{CommandID: "c1", Command: proto.CmdRenameRemote,
+		SessionID: testSession, Name: "alpha"})
+	if res.Mechanism != "relaunch" || res.Code != proto.CodeRequiresRestart {
 		t.Fatalf("res = %+v", res)
 	}
-	if got := (inboxMechanism{}).Execute(CommandTask{}); got.Status != proto.StatusUnsupported || got.Code != proto.CodeInboxUnproven {
-		t.Fatalf("inbox = %+v", got)
+}
+
+// rename_remote's mechanism is the inbox; relaunch is the fallback behind it. reload_plugins must
+// NEVER get the inbox: its enqueue path sets skipSlashCommands, so "/reload-plugins" would arrive
+// as literal text, add a visible user turn and cost an API turn without running the command.
+func TestInboxIsTheRenameMechanismAndIsNeverRegisteredForReloadPlugins(t *testing.T) {
+	on, _ := newTestControl(t, true)
+	var names []string
+	for _, m := range on.ex.mechanisms(proto.CmdRenameRemote) {
+		names = append(names, m.Name())
+	}
+	if len(names) != 2 || names[0] != "inbox" || names[1] != "relaunch" {
+		t.Fatalf("rename_remote mechanisms = %v, want [inbox relaunch]", names)
+	}
+	for _, m := range on.ex.mechanisms(proto.CmdReloadPlugins) {
+		if m.Name() != "hook-queue" {
+			t.Fatalf("reload_plugins got the %q mechanism; hook-queue must be its only one", m.Name())
+		}
+	}
+	// remote_control_enable still tries the inbox first, which declines with no-mechanism, so the
+	// relaunch command is what the operator ends up with.
+	first := on.ex.mechanisms(proto.CmdRemoteControlEnable)
+	if len(first) == 0 || first[0].Name() != "inbox" {
+		t.Fatalf("mechanisms = %v", first)
+	}
+	res := on.ex.run(CommandTask{CommandID: "c1", Command: proto.CmdRemoteControlEnable, SessionID: testSession})
+	if res.Mechanism != "relaunch" || res.Code != proto.CodeRequiresRestart {
+		t.Fatalf("res = %+v", res)
 	}
 }
 

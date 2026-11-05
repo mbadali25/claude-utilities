@@ -4,9 +4,6 @@ package sessions
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
 
 	"claude-utilities/internal/proto"
 )
@@ -22,11 +19,14 @@ func Scan(ctx context.Context) ([]proto.Session, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	home, err := os.UserHomeDir()
+	dir, err := Dir()
 	if err != nil {
-		return nil, fmt.Errorf("sessions: home dir: %w", err)
+		return nil, err
 	}
-	return scanDir(filepath.Join(home, ".claude", "sessions"), func(pid int, procStart string) bool {
-		return procAlive(procRoot, pid, procStart)
-	})
+	return scanDir(dir, Alive)
 }
+
+// Alive reports whether pid is a live Claude Code process whose starttime matches procStart. It is
+// the same gate Scan keeps a session on, exported so anything about to act on a session can insist
+// on a live owner rather than on a file existing.
+func Alive(pid int, procStart string) bool { return procAlive(procRoot, pid, procStart) }

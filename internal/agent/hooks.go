@@ -312,8 +312,11 @@ func instructionText(entries []queueEntry) string {
 			if name == "" {
 				name = "(no name given)"
 			}
-			b.WriteString("- The remote-visible title is latched when the bridge binds and cannot be changed now. " +
-				"Tell the user to relaunch with the name " + name + ".\n")
+			// A hook cannot set the title itself, but the session can: a `/rename` in a
+			// bridge-bound session pushes the new title to the bridge, with no restart and no
+			// API turn. That is the cheapest thing to ask for, so it is what is asked for.
+			b.WriteString("- A hook cannot set the remote-visible title. Tell the user to run " +
+				"/rename " + name + " in this session, or to relaunch it with that name.\n")
 		default:
 			b.WriteString("- Unknown instruction; ignore it and tell the user.\n")
 		}

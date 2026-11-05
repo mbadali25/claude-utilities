@@ -4,10 +4,7 @@ package sessions
 
 import (
 	"context"
-	"fmt"
 	"math"
-	"os"
-	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -19,12 +16,17 @@ func Scan(ctx context.Context) ([]proto.Session, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	home, err := os.UserHomeDir()
+	dir, err := Dir()
 	if err != nil {
-		return nil, fmt.Errorf("sessions: home dir: %w", err)
+		return nil, err
 	}
-	return scanDir(filepath.Join(home, ".claude", "sessions"), processAlive)
+	return scanDir(dir, processAlive)
 }
+
+// Alive reports whether pid is a live process whose creation time matches procStart. It is the
+// same gate Scan keeps a session on, exported so anything about to act on a session can insist on
+// a live owner rather than on a file existing.
+func Alive(pid int, procStart string) bool { return processAlive(pid, procStart) }
 
 // processAlive is true when pid exists and its creation FILETIME equals procStart.
 func processAlive(pid int, procStart string) bool {

@@ -235,7 +235,7 @@ func (b *cmdBatch) view() CommandView {
 }
 
 // repairSteps is what the composite command expands to per session, in order: activate pending
-// plugin changes, bind a Remote Control bridge, then latch the remote title.
+// plugin changes, bind a Remote Control bridge, then set the remote title.
 var repairSteps = []string{proto.CmdReloadPlugins, proto.CmdRemoteControlEnable, proto.CmdRenameRemote}
 
 // validateCommandRequest checks everything that does not need the host table.
@@ -312,8 +312,8 @@ func (h *Hub) matchSessionsLocked(req CommandRequest) ([]sessionTarget, map[stri
 			if _, stale := ho.reloadIDs[sessionKey(s)]; req.OnlyNeedsReload && !stale {
 				continue
 			}
-			// The name to latch is the session's OWN name, as `/rename` set it. RemoteName is
-			// the stale latched title the operator is trying to replace, so naming a session
+			// The name to set is the session's OWN name, as `/rename` set it. RemoteName is
+			// the stale remote title the operator is trying to replace, so naming a session
 			// after it would be a no-op by construction the day Claude Code starts writing it.
 			out = append(out, sessionTarget{hostID: id, sessionID: s.ID, pid: s.PID,
 				name: proto.CleanRemoteName(s.Name)})
@@ -386,7 +386,7 @@ func (h *Hub) Command(ctx context.Context, req CommandRequest) (CommandView, err
 				name = m.name // the composite names each session after itself
 			}
 			if proto.IsRestartCommand(step) {
-				// The relaunch command the agent builds latches a name at bind, so it has to be
+				// The relaunch command the agent builds gives the name at bind, so it has to be
 				// the session's OWN name: validateCommandRequest cleared req.Name for anything but
 				// a rename, which would otherwise leave the operator a nameless relaunch.
 				name = m.name

@@ -279,12 +279,15 @@ func TestInstructionTextIsHonestAboutWhatItCanDo(t *testing.T) {
 		{CommandID: "c2", Command: "remote_control_enable"},
 		{CommandID: "c3", Command: "rename_remote", Name: "alpha"},
 	})
-	for _, want := range []string{"/reload-plugins", "cannot be enabled from outside", "latched", "alpha"} {
+	for _, want := range []string{"/reload-plugins", "cannot be enabled from outside",
+		"A hook cannot set the remote-visible title", "/rename alpha"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q: %s", want, got)
 		}
 	}
-	for _, unwanted := range []string{"has been reloaded", "Remote Control is now on"} {
+	// "latched" is the claim this build disproved: every non-auto rename pushes the new title to
+	// the bridge, so the title is not fixed at bind and the text must not say it is.
+	for _, unwanted := range []string{"has been reloaded", "Remote Control is now on", "latch"} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("claims too much (%q): %s", unwanted, got)
 		}

@@ -131,7 +131,7 @@ func TestRestartCommandNeedsConfirmAtEveryScope(t *testing.T) {
 }
 
 // With the confirm, a restart dispatches one restart_sessions per session and carries the
-// session's own name, so the relaunch command the agent builds is the one that latches that name.
+// session's own name, so the relaunch command the agent builds is the one that sets that name.
 func TestRestartCommandWithConfirmCarriesTheSessionsOwnName(t *testing.T) {
 	f := newFixture(t)
 	a, _, hostID := f.enrol("box")
@@ -240,13 +240,13 @@ func TestRepairExpandsToThreeStepsNamedAfterTheSession(t *testing.T) {
 	}
 }
 
-// The name to latch is the session's own name, never the stale remote title the operator is
-// replacing: naming a session after its latched title would be a no-op by construction.
+// The name to set is the session's own name, never the stale remote title the operator is
+// replacing: naming a session after its current remote title would be a no-op by construction.
 func TestRepairNamesTheSessionAfterItsOwnNameNotItsRemoteName(t *testing.T) {
 	f := newFixture(t)
 	a, _, hostID := f.enrol("box")
 	s := sess("s-1", "alpha", 11)
-	s.RemoteName = "stale latched title"
+	s.RemoteName = "stale remote title"
 	f.report(a, hostID, proto.Report{Sessions: []proto.Session{s}})
 
 	v, err := f.h.Command(context.Background(), CommandRequest{
