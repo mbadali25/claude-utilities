@@ -1002,6 +1002,74 @@ func TestUIHasRenameControl(t *testing.T) {
 	}
 }
 
+// element returns the markup from the opening tag carrying attr up to the next close tag, so a
+// test can assert that something sits inside that element rather than merely somewhere on the page.
+func element(t *testing.T, p, attr, close string) string {
+	t.Helper()
+	i := strings.Index(p, attr)
+	if i < 0 {
+		t.Fatalf("page has no %s", attr)
+	}
+	j := strings.Index(p[i:], close)
+	if j < 0 {
+		t.Fatalf("page has no %s after %s", close, attr)
+	}
+	return p[i : i+j]
+}
+
+func TestUIHasAccountMenuHoldingTheSettingsActions(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	p := page(r, s)
+	for _, want := range []string{
+		`id="acct-btn"`, `aria-haspopup="menu"`, `aria-expanded="false"`, `aria-controls="acct-menu"`,
+		`id="acct-menu"`, `role="menu"`, `role="menuitem"`,
+		`id="mi-pw"`, `id="mi-add"`, `id="mi-out"`,
+		"Change password", "Add Claude account", "Log out",
+		`<dialog class="modal" id="add-dialog"`, `<dialog class="modal" id="pw-dialog"`,
+		"showModal", ".modal[open] { display:grid",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+	// Both forms moved into the dialogs; neither is left as a folded section at the page foot.
+	for _, gone := range []string{`data-fold="password"`, `data-fold="addacct"`, `id="pw-body"`, `id="add-body"`} {
+		if strings.Contains(p, gone) {
+			t.Errorf("index.html still carries the old bottom-of-page section %q", gone)
+		}
+	}
+	if n := strings.Count(p, "<dialog"); n != 2 {
+		t.Errorf("page has %d dialogs, want the password one and the add-account one", n)
+	}
+	// A <dialog> must never carry hidden: the page's [hidden]{display:none!important} would beat
+	// showModal() and the dialog could not open at all.
+	for _, id := range []string{"add-dialog", "pw-dialog"} {
+		if strings.Contains(element(t, p, `id="`+id+`"`, ">"), "hidden") {
+			t.Errorf("%s carries hidden, so showModal() cannot show it", id)
+		}
+	}
+	pw := element(t, p, `id="pw-dialog"`, "</dialog>")
+	for _, want := range []string{`id="pw-form"`, `minlength="12"`, `id="pw-msg"`, `aria-live="polite"`} {
+		if !strings.Contains(pw, want) {
+			t.Errorf("the password dialog lacks %q", want)
+		}
+	}
+	add := element(t, p, `id="add-dialog"`, "</dialog>")
+	for _, want := range []string{`id="import-form"`, `id="add-form"`, `id="add-flow"`, "Cancel sign-in",
+		"Add account: import from a logged-in host"} {
+		if !strings.Contains(add, want) {
+			t.Errorf("the add-account dialog lacks %q", want)
+		}
+	}
+	// Closing the dialog must leave a started sign-in alone, so the header keeps a way back to it.
+	for _, want := range []string{`id="add-busy"`, `id="mi-add-note"`} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks the running-sign-in indicator %q", want)
+		}
+	}
+}
+
 func TestUnknownHubErrorIsGenericBadGateway(t *testing.T) {
 	r := newRig(t)
 	r.fh.swapErr = errors.New("boom detail-that-stays-in-the-log")

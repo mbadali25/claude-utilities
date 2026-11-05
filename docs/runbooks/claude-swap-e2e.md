@@ -84,7 +84,8 @@ D:\temp\claude-swap-e2e\server.exe --listen <LAN_IP>:<PORT> --data-dir D:\temp\c
 - Open `https://<LAN_IP>:<PORT>/` and log in with the admin password.
 - `CLAUDESWAP_ADMIN_PASSWORD` is only the bootstrap password: it works while no `admin-password.json` exists in the data dir. Once a password is set, the stored argon2id hash wins and the variable is ignored (the server also starts without it).
 - Change the password offline: `go run ./cmd/server set-password [--data-dir DIR]` (or `server.exe set-password`). It prompts twice with echo off on a terminal, or reads one line from stdin when piped; minimum 12 characters; never an argument. A running server reads the hash at startup, so restart it for the new password to apply.
-- Change it in the UI: the **Admin password** form (current password plus new password, 12+ characters). A successful change ends every signed-in session, this one included; sign in again with the new password. A wrong current password counts toward the login rate limit.
+- Change it in the UI: **Account** (top right) > **Change password**, which opens the **Admin password** dialog (current password plus new password, 12+ characters). A successful change ends every signed-in session, this one included; sign in again with the new password. A wrong current password counts toward the login rate limit.
+- Sign out from the same menu: **Account** > **Log out** ends only this session and returns to the sign-in page. Other signed-in sessions keep working; only a password change ends them all.
 
 ### 1.3 Enrol agent on Windows via Pending connections
 ```powershell
@@ -122,7 +123,7 @@ Expect it enrolled without a Pending entry.
 Start a fourth throwaway agent with its own state dir, click **Deny**, confirm exit code 2 and "Do not retry for ...". Re-run `enrol`: it should create a fresh fingerprint on a fresh nonce, per spec, so also confirm that re-dialling the same attempt is not listed (the suppression is by fingerprint for 1 hour). Record what you actually see.
 
 ### 1.6 Import the fake accounts
-For each fake credential on a host, in **Add account: import from a logged-in host**, pick the host, type a label (`FakeA`, then change the file on another host to block B and import `FakeB`), click Import. Labels are unique, 1-64 characters. The account appears with an error state in usage (fake token): the page must not break.
+For each fake credential on a host, open **Account** > **Add Claude account** and, in **Add account: import from a logged-in host**, pick the host, type a label (`FakeA`, then change the file on another host to block B and import `FakeB`), click Import. Labels are unique, 1-64 characters. The account appears with an error state in usage (fake token): the page must not break.
 
 ### 1.7 Swap A to B on each host and verify
 UI: Hosts table, pick the account in **Swap to**, click **Swap**.
