@@ -124,6 +124,188 @@ Then in the admin UI: the host appears **online**, with the identity from its `~
 
 The logs never contain a token or an identity. If you see either, stop and report it.
 
+## Durable tunnels
+
+### Why
+
+The server binds `127.0.0.1` only, so nothing on the LAN can reach it and the hosts open no
+inbound port either. Each Linux host therefore reaches the server through a reverse SSH tunnel
+that the **Windows machine running the server dials out**:
+
+```text
+Linux host 127.0.0.1:8443  ──(ssh -R)──>  Windows 127.0.0.1:8443  ──>  claude-swap server
+```
+
+The agent on the host is configured with `https://127.0.0.1:8443`; the tunnel is what makes that
+address resolve to the server. No tunnel, no agent: the host logs `connection refused` and retries
+with a growing backoff that reaches about a minute, so expect up to ~60 s of lag after a tunnel
+comes back before the host reports `connected` again.
+
+A hand-started `ssh -R` dies with its console and never comes back. The two scripts below make it
+survive a dropped link, a host reboot and a logon.
+
+### The restricted key
+
+The tunnels authenticate with one dedicated key that does nothing else:
+
+```powershell
+ssh-keygen -t ed25519 -f "$env:USERPROFILE\.ssh\id_ed25519_claudeswap" -C claude-swap-tunnel
+icacls "$env:USERPROFILE\.ssh\id_ed25519_claudeswap" /inheritance:r /grant:r "$($env:USERNAME):(F)"
+icacls "$env:USERPROFILE\.ssh\id_ed25519_claudeswap" /remove:g "BUILTIN\Administrators" "NT AUTHORITY\SYSTEM"
+```
+
+**The key has no passphrase, deliberately.** A logon task cannot type one, and an agent-held key
+would not survive a reboot unattended. What makes that acceptable is that the key is useless for
+anything but this one forward — see the options below — and that only the current Windows user can
+read it. Never reuse this key, and never add it to another host.
+
+When creating the key from PowerShell, do not pass `-N '""'`: PowerShell forwards that as a literal
+two-character passphrase, and the key then fails to sign with `incorrect passphrase supplied`
+*after* the server has already accepted it. Omit `-N` and press Enter twice, or pass a genuinely
+empty argument. Check with `ssh-keygen -y -P '' -f <key>`, which must print the public key.
+
+### authorized_keys options
+
+On each host, append **one** line to `~/.ssh/authorized_keys` (`~/.ssh` mode `0700`, the file
+`0600`). Keep any lines that are already there; the append is idempotent — skip it when the key
+body is already present.
+
+```text
+command="/bin/false",restrict,port-forwarding,permitlisten="127.0.0.1:8443" ssh-ed25519 AAAA… claude-swap-tunnel
+```
+
+| Option | Effect |
+|---|---|
+| `command="/bin/false"` | any command or shell request runs `/bin/false` and exits 1 |
+| `restrict` | denies agent forwarding, port forwarding, PTY, user rc and X11, plus anything added in a future OpenSSH |
+| `port-forwarding` | re-enables forwarding only — it **must** come after `restrict`, which otherwise wins |
+| `permitlisten="127.0.0.1:8443"` | the key may ask for that one remote listen address and no other |
+
+No `sudo` is needed, and nothing under `~/.claude*` is touched.
+
+Order matters: a later option overrides an earlier one, so `restrict` first and `port-forwarding`
+second is the whole point of the line.
+
+### Scripts
+
+| File | Job |
+|---|---|
+| `scripts/claude-swap-tunnels.ps1` | supervisor: one hidden `ssh.exe` per host, restarted 15 s after any exit, for as long as it runs |
+| `scripts/install-tunnels-task.ps1` | registers, or with `-Uninstall` removes, the `claude-swap-tunnels` logon task |
+
+Both take `-DryRun`, which prints every action and changes nothing. Neither file contains a host
+address, a username or a password.
+
+The host list lives **outside the repository**, at `%USERPROFILE%\.claude-swap\tunnels.json`,
+ACL'd to the current user:
+
+```json
+[ { "name": "label-only", "host": "host.example.internal", "user": "someone" } ]
+```
+
+`name` is a label the log uses. `host` and `user` are read at task runtime and never logged: the
+supervisor redacts them, and every IP literal other than loopback, out of anything it writes.
+
+The log is `%USERPROFILE%\.claude-swap\tunnels.log`, one line per start and per exit with the
+label, the pid, the exit code and a redacted reason. It rotates to `tunnels.log.1` at 1 MB, so it
+has an explicit bound rather than growing forever.
+
+The installer copies the supervisor next to the config and points the task at that copy, so the
+task does not break when a git worktree is pruned. **Re-run the installer after you edit the
+script.**
+
+### Install
+
+```powershell
+# 1. write %USERPROFILE%\.claude-swap\tunnels.json by hand, then lock it down
+icacls "$env:USERPROFILE\.claude-swap\tunnels.json" /inheritance:r /grant:r "$($env:USERNAME):(F)"
+
+# 2. look before you leap
+powershell -NoProfile -File scripts\claude-swap-tunnels.ps1 -DryRun
+powershell -NoProfile -File scripts\install-tunnels-task.ps1 -DryRun
+
+# 3. register and start
+powershell -NoProfile -File scripts\install-tunnels-task.ps1
+Start-ScheduledTask -TaskName claude-swap-tunnels
+```
+
+The task runs as the current user with `LogonType Interactive`, `RunLevel Limited`, hidden, no
+execution time limit, and restarts on failure every minute. No password is stored.
+
+Replacing older hand-started tunnels: find them by command line, not by name, and stop only those.
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" |
+  Where-Object { $_.CommandLine -match '-R 127\.0\.0\.1:8443:127\.0\.0\.1:8443' }
+```
+
+Other `ssh.exe` processes on the machine will not match. Inspect the matched set before stopping
+anything, and redact the address if you print it.
+
+### Verify
+
+```powershell
+(Get-ScheduledTask -TaskName claude-swap-tunnels).State          # Running
+(Get-ScheduledTask -TaskName claude-swap-tunnels).Triggers       # MSFT_TaskLogonTrigger
+Get-Content "$env:USERPROFILE\.claude-swap\tunnels.log" -Tail 5  # one 'tunnel start' per host
+Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" |
+  Where-Object { $_.CommandLine -like '*id_ed25519_claudeswap*' } | Select-Object ProcessId
+```
+
+Then on each host:
+
+```bash
+systemctl --user is-active claude-swap-agent.service                       # active
+curl -sk -o /dev/null -w '%{http_code}\n' https://127.0.0.1:8443/         # 200
+journalctl --user -u claude-swap-agent.service -n 5 --no-pager            # ends in "connected"
+```
+
+Prove the restriction holds, from the Windows side with the tunnel key:
+
+```powershell
+$k = "$env:USERPROFILE\.ssh\id_ed25519_claudeswap"
+# a command or a shell: refused, exit 1 with no output (the forced /bin/false)
+ssh -i $k -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey <user@host> id
+# a PTY: "PTY allocation request failed on channel 0"
+ssh -i $k -o IdentitiesOnly=yes -o BatchMode=yes -tt <user@host> id
+# any other listen port: "remote port forwarding failed for listen port 18443"
+ssh -i $k -o IdentitiesOnly=yes -o BatchMode=yes -o ExitOnForwardFailure=yes -N `
+    -R 127.0.0.1:18443:127.0.0.1:8443 <user@host>
+```
+
+Always pass `-o PreferredAuthentications=publickey`. Without it a rejected key falls through to
+password auth and you get a flat `Permission denied (publickey,password)`, which cannot be told
+apart from the key never having authenticated at all.
+
+Resilience: stop one of the tunnel `ssh.exe` processes and watch `tunnels.log`. A `tunnel exit`
+line appears at once and a `tunnel start` line about 15-20 s later. The host's own agent then
+reconnects on its next backoff tick, up to about a minute behind.
+
+### Remove
+
+```powershell
+powershell -NoProfile -File scripts\install-tunnels-task.ps1 -Uninstall -DryRun
+powershell -NoProfile -File scripts\install-tunnels-task.ps1 -Uninstall
+```
+
+That unregisters the task, stops only the processes it started — matched on the tunnel script name
+and on the dedicated key file name — deletes `tunnels.json` and deletes the installed copy of the
+supervisor. The log and the key are left behind; delete them by hand if you want them gone, and
+drop the key's line from each host's `~/.ssh/authorized_keys`.
+
+### Caveats
+
+- **The key has no passphrase.** Mitigated, not eliminated, by `restrict`, `permitlisten` for the
+  one address, `command="/bin/false"`, and an ACL that admits only the current Windows user.
+- **The tunnels only run while that user is logged on and the machine is awake.** `LogonType
+  Interactive` is what avoids storing a password; the price is that a locked-but-logged-on session
+  keeps them up, a logged-off or sleeping machine does not. Hosts show offline in the admin UI for
+  that whole window.
+- **The server certificate pin is unaffected** by the tunnel, but a regenerated server certificate
+  still invalidates every agent's `--pin`.
+- **`ServerAliveInterval` does not catch every stall.** The unconditional restart loop, not the
+  keepalive, is what actually keeps the tunnels up.
+
 ## Uninstall
 
 ```bash
