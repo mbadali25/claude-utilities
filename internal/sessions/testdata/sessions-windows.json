@@ -1,10 +1,10 @@
 [
   {
-    "pid": 13308,
-    "sessionId": "81ff45c1-87f1-4f43-a5ff-852ce20f0990",
-    "cwd": "C:\\repos\\anew\\TheSelectSource",
+    "pid": 2001,
+    "sessionId": "11111111-1111-4111-8111-111111111111",
+    "cwd": "C:\\fixture\\alpha",
     "startedAt": 1793716513843,
-    "procStart": "134381901116157287",
+    "procStart": "134381901116157210",
     "version": "2.1.314",
     "peerProtocol": 1,
     "peerFeatures": [
@@ -13,10 +13,10 @@
     ],
     "kind": "interactive",
     "entrypoint": "cli",
-    "pidDomain": "win32:dadeush-desktop",
+    "pidDomain": "win32:fixture-host",
     "asksForConvertedSkills": false,
     "messagingSocketPath": "<redacted>",
-    "name": "TSS-win",
+    "name": "lane-alpha",
     "nameSource": "user",
     "nameSince": 1793716533044,
     "updatedAt": 1793839997600,
@@ -25,11 +25,11 @@
     "bridgeSessionId": "<redacted>"
   },
   {
-    "pid": 16788,
-    "sessionId": "d60099d4-e50e-4825-99d9-e43ae24e1d1d",
-    "cwd": "C:\\repos\\anew\\SRL",
+    "pid": 2002,
+    "sessionId": "22222222-2222-4222-8222-222222222222",
+    "cwd": "C:\\fixture\\beta",
     "startedAt": 1793716493380,
-    "procStart": "134381900906305901",
+    "procStart": "134381901116157220",
     "version": "2.1.314",
     "peerProtocol": 1,
     "peerFeatures": [
@@ -38,10 +38,10 @@
     ],
     "kind": "interactive",
     "entrypoint": "cli",
-    "pidDomain": "win32:dadeush-desktop",
+    "pidDomain": "win32:fixture-host",
     "asksForConvertedSkills": false,
     "messagingSocketPath": "<redacted>",
-    "name": "SRL-DESKTOP",
+    "name": "lane-beta",
     "nameSource": "user",
     "nameSince": 1793716497177,
     "updatedAt": 1793841279197,
@@ -50,11 +50,11 @@
     "bridgeSessionId": "<redacted>"
   },
   {
-    "pid": 24676,
-    "sessionId": "645b7ceb-a540-46c5-8448-83bd3b7cce77",
-    "cwd": "C:\\repos\\solomon\\aws-managed-services",
+    "pid": 2003,
+    "sessionId": "33333333-3333-4333-8333-333333333333",
+    "cwd": "C:\\fixture\\gamma",
     "startedAt": 1793827516036,
-    "procStart": "134383011148715633",
+    "procStart": "134381901116157230",
     "version": "2.1.318",
     "peerProtocol": 1,
     "peerFeatures": [
@@ -63,10 +63,10 @@
     ],
     "kind": "interactive",
     "entrypoint": "cli",
-    "pidDomain": "win32:dadeush-desktop",
+    "pidDomain": "win32:fixture-host",
     "asksForConvertedSkills": false,
     "messagingSocketPath": "<redacted>",
-    "name": "solomon-alerts",
+    "name": "lane-gamma",
     "nameSource": "user",
     "nameSince": 1793827559327,
     "updatedAt": 1793834589835,
@@ -74,19 +74,15 @@
     "statusUpdatedAt": 1793834589835,
     "bridgeSessionId": "<redacted>",
     "formerNames": [
-      {
-        "name": "cloud-alarms",
-        "until": 1793827559327,
-        "sessionId": "645b7ceb-a540-46c5-8448-83bd3b7cce77"
-      }
+      "former-gamma"
     ]
   },
   {
-    "pid": 47188,
-    "sessionId": "f531ea32-d724-498a-92bb-a477488967f8",
-    "cwd": "C:\\repos\\anew\\terraform-aws-managed-services",
+    "pid": 2004,
+    "sessionId": "44444444-4444-4444-8444-444444444444",
+    "cwd": "C:\\fixture\\delta",
     "startedAt": 1793822952683,
-    "procStart": "134382965508464450",
+    "procStart": "134381901116157240",
     "version": "2.1.317",
     "peerProtocol": 1,
     "peerFeatures": [
@@ -95,10 +91,10 @@
     ],
     "kind": "interactive",
     "entrypoint": "cli",
-    "pidDomain": "win32:dadeush-desktop",
+    "pidDomain": "win32:fixture-host",
     "asksForConvertedSkills": false,
     "messagingSocketPath": "<redacted>",
-    "name": "AWS-Fix",
+    "name": "lane-delta",
     "nameSource": "user",
     "nameSince": 1793823269549,
     "status": "idle",
@@ -107,11 +103,11 @@
     "bridgeSessionId": "<redacted>"
   },
   {
-    "pid": 47204,
-    "sessionId": "8b4ebc55-e177-4675-aaf7-2436ce67f749",
-    "cwd": "C:\\repos\\personal\\claude-utilities",
+    "pid": 2005,
+    "sessionId": "55555555-5555-4555-8555-555555555555",
+    "cwd": "C:\\fixture\\epsilon",
     "startedAt": 1793825407256,
-    "procStart": "134382990035328445",
+    "procStart": "134381901116157250",
     "version": "2.1.318",
     "peerProtocol": 1,
     "peerFeatures": [
@@ -120,10 +116,10 @@
     ],
     "kind": "interactive",
     "entrypoint": "cli",
-    "pidDomain": "win32:dadeush-desktop",
+    "pidDomain": "win32:fixture-host",
     "asksForConvertedSkills": false,
     "messagingSocketPath": "<redacted>",
-    "name": "claude-swap",
+    "name": "lane-epsilon",
     "nameSource": "user",
     "nameSince": 1793825660786,
     "status": "busy",
@@ -131,11 +127,7 @@
     "statusUpdatedAt": 1793840719178,
     "bridgeSessionId": "<redacted>",
     "formerNames": [
-      {
-        "name": "claude-utilites",
-        "until": 1793825660786,
-        "sessionId": "2af6086e-9125-4d3f-962e-d45770b67712"
-      }
+      "former-epsilon"
     ]
   }
 ]

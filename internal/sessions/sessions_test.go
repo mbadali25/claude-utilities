@@ -23,7 +23,7 @@ func TestParseWindowsFixture(t *testing.T) {
 		t.Fatalf("want 5 sessions, got %d", len(got))
 	}
 	s := got[0]
-	if s.PID != 13308 || s.ID != "81ff45c1-87f1-4f43-a5ff-852ce20f0990" || s.Cwd != `C:\repos\anew\TheSelectSource` {
+	if s.PID != 2001 || s.ID != "11111111-1111-4111-8111-111111111111" || s.Cwd != `C:\fixture\alpha` {
 		t.Fatalf("unexpected session: %+v", s)
 	}
 	if !s.StartedAt.Equal(time.UnixMilli(1793716513843)) {
