@@ -231,6 +231,12 @@
   /* The lead line carries the Copy button; the command itself runs full width underneath. */
   .copyline { display:grid; gap:1px; min-width:0; }
   .copyline code { overflow-wrap:anywhere; }
+
+  /* Why a host names no account: one step in the ground inside the card that failed to name one,
+     never a tinted ground of its own. The sentence is in the full ink; the fix is secondary. */
+  .whyid { background:var(--sunk); border-radius:var(--r); padding:10px 12px; display:grid; gap:6px; font-size:.9rem; min-width:0; }
+  .whyid p { margin:0; overflow-wrap:anywhere; }
+  .whyid .fix { color:var(--mut); font-size:.85rem; }
   #ctl-summary:empty, #ctl-name-for:empty { display:none; }
 
   /* Account menu: a disclosure button over a floating menu. A shadow is for what floats. */
@@ -712,6 +718,40 @@
     return box;
   }
   function restartLine(cmd) { return copyLine('Restart with', cmd, 'Copy the restart command'); }
+
+  // Why a host names no account, in plain words with the one line that fixes it. A connected host
+  // used to show "Active account -" and nothing else, so a Linux host nobody had signed in on
+  // looked exactly like one whose state file the agent cannot read.
+  //
+  // The key is a fixed code from the hub (never text from the host, which validates it against
+  // the set it knows), so this map is the whole vocabulary; an unrecognised code still gets the
+  // general line rather than silence.
+  var LOGIN_CMD = 'claude auth login';
+  var SIGN_IN_FIX = 'Run this as the user the agent runs as; the agent picks it up within a minute';
+  var IDENTITY_WHY = {
+    no_claude_json: { why: 'No Claude Code account is signed in on this host.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
+    no_oauth_account: { why: 'Claude Code has run on this host, but no account is signed in.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
+    no_credentials: { why: 'This host holds no Claude Code login for the agent to read.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
+    parse_error: { why: "This host's Claude Code state file is not readable as JSON, so it names no account.", fix: 'Sign in again as the user the agent runs as to rewrite it', cmd: LOGIN_CMD },
+    home_mismatch: { why: 'The user the agent runs as has no account signed in; another user on this host does.', fix: 'Run the agent as that user, or sign in as the user the agent runs as', cmd: LOGIN_CMD },
+    unreadable: { why: "The agent cannot read this host's Claude Code state file." , fix: 'Run the agent as the user who owns that file, or let that user read it. The agent retries every 30 seconds, so no restart is needed.' },
+    config_dir_elsewhere: { why: 'CLAUDE_CONFIG_DIR points the agent at another config directory, and no account is signed in there.', fix: 'Either sign in inside that directory, or clear CLAUDE_CONFIG_DIR for the agent and restart it. Keep it identical at enrol and run.' }
+  };
+  function identityWhy(code) {
+    return IDENTITY_WHY[code] || { why: 'This host reports no signed-in Claude Code account.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD };
+  }
+  // identityNote is the card's explanation. Its id is what the Swap button names as the reason it
+  // is disabled, so the reason is read out, not only shown.
+  function identityNoteID(h) { return 'whyid-' + h.hostId; }
+  function identityNote(h) {
+    var w = identityWhy(h.identityReason);
+    var box = el('div', undefined, 'whyid');
+    box.id = identityNoteID(h);
+    box.appendChild(el('p', w.why));
+    if (w.cmd) box.appendChild(copyLine(w.fix, w.cmd, 'Copy the sign-in command for ' + h.name));
+    else box.appendChild(el('div', w.fix, 'fix'));
+    return box;
+  }
   function fmtDate(iso) {
     var d = new Date(iso); if (isNaN(d)) return '-';
     return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -1286,6 +1326,8 @@
     if (h.needsReload) line.appendChild(chip('Needs reload', 'warn', 'warn'));
     if (h.swapBlocked) line.appendChild(chip('Swaps blocked', 'bad', 'bad'));
     c.appendChild(line);
+    // A dash on its own is not an answer: when the host names no account, say why and what fixes it.
+    if (!h.activeAccount && h.identityReason) c.appendChild(identityNote(h));
 
     // Sessions collapse, but a restart command must never start out hidden: a host with a stale
     // session opens by default, and the closed summary still says how many need one. With no

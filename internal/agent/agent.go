@@ -216,10 +216,17 @@ type agent struct {
 	hostName  string
 	heartbeat time.Duration
 	delay     func(attempt int) time.Duration
-	identity  func() string
-	scan      func(context.Context) ([]proto.Session, error)
-	readBack  func(path string) (json.RawMessage, error)
-	replace   func(path string, block json.RawMessage, onPrev func(json.RawMessage) error) (string, error)
+	// identity probes the signed-in account: its id, else "" and a proto.Reason* code (identity.go).
+	identity func() (string, string)
+	// ident caches the last probe, so every report says the same thing and a change is logged once.
+	ident *identityCache
+	// identityEvery, tick and hup drive the identity refresh; tick and hup are test seams.
+	identityEvery time.Duration
+	tick          func(time.Duration) (<-chan time.Time, func())
+	hup           func() (<-chan os.Signal, func())
+	scan          func(context.Context) ([]proto.Session, error)
+	readBack      func(path string) (json.RawMessage, error)
+	replace       func(path string, block json.RawMessage, onPrev func(json.RawMessage) error) (string, error)
 
 	// Session control (control.go): the instruction queue and the mechanism registry.
 	ctl *control
@@ -234,15 +241,20 @@ type agent struct {
 
 func newAgent(c Config, log *slog.Logger) *agent {
 	name, _ := os.Hostname()
-	return &agent{
-		cfg: c, log: log.With("component", "agent"), hostName: name, heartbeat: HeartbeatInterval,
-		delay: NextDelay, identity: func() string { return readIdentity(claudeJSONPath()) },
+	lg := log.With("component", "agent")
+	a := &agent{
+		cfg: c, log: lg, hostName: name, heartbeat: HeartbeatInterval,
+		delay: NextDelay, identity: newIdentityProbe().run,
+		identityEvery: identityRefresh, tick: realTicker, hup: hupSignal,
 		scan: sessions.Scan, readBack: credfile.ReadBlock,
 		replace: credfile.ReplaceWith,
 		login:   execRunner{}, logins: map[string]*loginJob{},
 		urlTimeout: defaultURLTimeout, jobTimeout: defaultJobTimeout, exitTimeout: defaultExitTimeout,
 		ctl: newControl(c.StateDir, time.Now, os.Getenv(ExperimentalInboxEnv) == "1"),
 	}
+	// Through a.identity, so a test that replaces the seam after newAgent is still the one probed.
+	a.ident = &identityCache{probe: func() (string, string) { return a.identity() }, log: lg}
+	return a
 }
 
 // Run connects, reports and serves swap requests until ctx ends. It redials with NextDelay
@@ -280,6 +292,18 @@ func (a *agent) run(ctx context.Context) error {
 	if err := a.recoverJournal(); err != nil {
 		a.log.Error("swap recovery failed", "action", "recover", "result", "failed", logx.Err(err))
 	}
+	// The identity watcher outlives any one connection: a sign-in while the agent is disconnected
+	// is still in the first report after it reconnects. It ends when run does, including on a
+	// fatal error, so run never waits on it.
+	wctx, stopWatch := context.WithCancel(ctx)
+	var idwg sync.WaitGroup
+	idwg.Add(1)
+	go func() {
+		defer idwg.Done()
+		a.watchIdentity(wctx)
+	}()
+	defer idwg.Wait()
+	defer stopWatch()
 	attempt := 0
 	for {
 		start := time.Now()
@@ -445,6 +469,10 @@ func capRunes(s string, n int) string {
 }
 
 // report describes this host. A missing or block-less credentials file is CredsPresent=false.
+//
+// IdentityReason is set whenever ActiveIdentity is empty, and only then: a host that was never
+// signed in has no credentials file either, so the reason must not be computed inside the
+// credentials branch, or the one host that needs the explanation never gets it.
 func (a *agent) report(ctx context.Context) proto.Report {
 	sessions, err := a.scan(ctx)
 	if err != nil || sessions == nil {
@@ -455,9 +483,17 @@ func (a *agent) report(ctx context.Context) proto.Report {
 		sessions[i].RemoteName = capRunes(sessions[i].RemoteName, maxNameRunes)
 	}
 	rep := proto.Report{Sessions: sessions, SwapBlocked: a.blocked.Load(), Commands: a.ctl.q.delivered()}
-	if _, err := credfile.ReadBlock(a.cfg.CredsPath); err == nil {
+	id, reason := a.ident.current()
+	switch _, err := credfile.ReadBlock(a.cfg.CredsPath); {
+	case err == nil:
 		rep.CredsPresent = true
-		rep.ActiveIdentity = a.identity()
+		rep.ActiveIdentity, rep.IdentityReason = id, reason
+	case reason != "": // no login and nothing names an account: the identity reason is the answer
+		rep.IdentityReason = reason
+	case errors.Is(err, credfile.ErrNoBlock), errors.Is(err, os.ErrNotExist):
+		rep.IdentityReason = proto.ReasonNoCredentials
+	default:
+		rep.IdentityReason = proto.ReasonUnreadable
 	}
 	return rep
 }
@@ -473,7 +509,8 @@ func (a *agent) export() proto.ExportRes {
 		return proto.ExportRes{Err: "credentials unreadable"}
 	}
 	a.log.Info("exported", "action", "export", "result", "ok")
-	return proto.ExportRes{Block: block, Identity: a.identity()}
+	id, _ := a.ident.current()
+	return proto.ExportRes{Block: block, Identity: id}
 }
 
 // applySwap replaces the claudeAiOauth block. Order: validate, journal, Replace, read-back,
@@ -602,20 +639,9 @@ func (a *agent) settleJournal() error {
 	return clearJournal(a.cfg.StateDir)
 }
 
-// claudeJSONPath locates Claude Code's global state file, which names the signed-in account.
-func claudeJSONPath() string {
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return filepath.Join(d, ".claude.json")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".claude.json")
-}
-
 // readIdentity returns the signed-in account's email, else its account uuid, else "".
-// The value may be an email address: callers must not log it.
+// The value may be an email address: callers must not log it. Why it is empty is identity.go's
+// job (identityProbe.run); this is the plain read a finished sign-in needs.
 func readIdentity(path string) string {
 	if path == "" {
 		return ""
@@ -624,21 +650,6 @@ func readIdentity(path string) string {
 	if err != nil {
 		return ""
 	}
-	var f struct {
-		OAuthAccount struct {
-			Email string `json:"emailAddress"`
-			UUID  string `json:"accountUuid"`
-		} `json:"oauthAccount"`
-	}
-	if json.Unmarshal(data, &f) != nil {
-		return ""
-	}
-	id := f.OAuthAccount.Email
-	if id == "" {
-		id = f.OAuthAccount.UUID
-	}
-	if len(id) > maxIdentity {
-		return ""
-	}
+	id, _ := parseIdentity(data)
 	return id
 }
