@@ -439,6 +439,73 @@ func TestPageRendersRestartCommand(t *testing.T) {
 	}
 }
 
+// The Hosts tab names every running session, so /api/hosts carries the name beside the pid,
+// cwd, status and needs-reload. The names here are invented.
+func TestHostsCarrySessionNameStatusAndRemoteControl(t *testing.T) {
+	r := newRig(t)
+	const long = "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww-end"
+	r.fh.hosts = []hub.HostView{{HostID: "h1", Name: "box", OS: "linux", Online: true, Sessions: []hub.SessionView{
+		{Session: proto.Session{PID: 7, ID: "s1", Cwd: "/srv/one", Name: "alpha-lane", Status: "busy", RemoteControl: true}},
+		{Session: proto.Session{PID: 8, ID: "s2", Cwd: "/srv/two", Name: "café 日本 λane ✓", Status: "idle"}},
+		{Session: proto.Session{PID: 9, ID: "s3", Cwd: "/srv/three", Name: ""}},                              // unnamed
+		{Session: proto.Session{PID: 10, ID: "s4", Cwd: "/srv/four", Name: long}},                            // very long
+		{Session: proto.Session{PID: 11, ID: "s5", Cwd: "/srv/five", Name: "eta", RemoteName: "eta-remote"}}, // separate field
+	}}}
+	s := r.login()
+	var hosts []struct {
+		Sessions []struct {
+			PID           int    `json:"pid"`
+			Name          string `json:"name"`
+			RemoteName    string `json:"remoteName"`
+			Status        string `json:"status"`
+			RemoteControl bool   `json:"remoteControl"`
+			Cwd           string `json:"cwd"`
+		} `json:"sessions"`
+	}
+	w := r.do("GET", "/api/hosts", "", s, "")
+	if err := json.Unmarshal(w.Body.Bytes(), &hosts); err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 1 || len(hosts[0].Sessions) != 5 {
+		t.Fatalf("hosts %s", w.Body)
+	}
+	ss := hosts[0].Sessions
+	if ss[0].Name != "alpha-lane" || ss[0].Status != "busy" || !ss[0].RemoteControl || ss[0].Cwd != "/srv/one" {
+		t.Errorf("session 0 = %+v", ss[0])
+	}
+	if ss[1].Name != "café 日本 λane ✓" || ss[1].Status != "idle" || ss[1].RemoteControl {
+		t.Errorf("unicode name not carried: %+v", ss[1])
+	}
+	if ss[2].Name != "" || ss[2].PID != 9 {
+		t.Errorf("unnamed session = %+v", ss[2])
+	}
+	// The name is not shortened on the wire: the UI truncates it and keeps the full text.
+	if ss[3].Name != long {
+		t.Errorf("long name was altered: %q", ss[3].Name)
+	}
+	// A remote-control name is its own field and never collapses into Name.
+	if ss[4].Name != "eta" || ss[4].RemoteName != "eta-remote" {
+		t.Errorf("remoteName not separate: %+v", ss[4])
+	}
+}
+
+// A session's name, cwd and status all arrive from the agent, so the page must write them as
+// text. Nothing in the page may assign HTML, and the name needs its own truncating element.
+func TestPageRendersSessionNamesAsText(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+	for _, want := range []string{"sname", "nameless", "shortCwd", "Remote control", "textContent"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	for _, bad := range []string{".innerHTML =", ".innerHTML=", "insertAdjacentHTML", "outerHTML"} {
+		if strings.Contains(p, bad) {
+			t.Errorf("page assigns HTML (%q): a session name must go in as text", bad)
+		}
+	}
+}
+
 func TestRestartCommandRejectsUntrustedID(t *testing.T) {
 	// PID, ID and Cwd all arrive from the agent. A command the operator pastes into a shell
 	// must never carry agent-supplied text, so anything but a UUID falls back to --continue.

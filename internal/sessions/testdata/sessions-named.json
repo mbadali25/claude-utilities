@@ -1,0 +1,72 @@
+[
+  {
+    "pid": 1001,
+    "sessionId": "11111111-1111-4111-8111-111111111111",
+    "cwd": "/srv/fixture/alpha",
+    "startedAt": 1700000000000,
+    "procStart": "p1",
+    "name": "alpha-lane",
+    "nameSource": "user",
+    "status": "busy",
+    "kind": "interactive",
+    "entrypoint": "cli",
+    "bridgeSessionId": "22222222-2222-4222-8222-222222222222"
+  },
+  {
+    "pid": 1002,
+    "sessionId": "33333333-3333-4333-8333-333333333333",
+    "cwd": "/srv/fixture/beta",
+    "startedAt": 1700000001000,
+    "procStart": "p2",
+    "name": "café 日本 λane ✓",
+    "nameSource": "user",
+    "status": "idle",
+    "bridgeSessionId": null
+  },
+  {
+    "pid": 1003,
+    "sessionId": "44444444-4444-4444-8444-444444444444",
+    "cwd": "/srv/fixture/gamma",
+    "startedAt": 1700000002000,
+    "procStart": "p3",
+    "name": "",
+    "status": "idle"
+  },
+  {
+    "pid": 1004,
+    "sessionId": "55555555-5555-4555-8555-555555555555",
+    "cwd": "/srv/fixture/delta",
+    "startedAt": 1700000003000,
+    "procStart": "p4",
+    "name": "   ",
+    "status": ""
+  },
+  {
+    "pid": 1005,
+    "sessionId": "66666666-6666-4666-8666-666666666666",
+    "cwd": "/srv/fixture/epsilon",
+    "startedAt": 1700000004000,
+    "procStart": "p5",
+    "name": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww-end",
+    "status": "busy",
+    "bridgeSessionId": "77777777-7777-4777-8777-777777777777"
+  },
+  {
+    "pid": 1006,
+    "sessionId": "88888888-8888-4888-8888-888888888888",
+    "cwd": "/srv/fixture/zeta",
+    "startedAt": 1700000005000,
+    "procStart": "p6"
+  },
+  {
+    "pid": 1007,
+    "sessionId": "99999999-9999-4999-8999-999999999999",
+    "cwd": "/srv/fixture/eta",
+    "startedAt": 1700000006000,
+    "procStart": "p7",
+    "name": "eta-lane",
+    "remoteName": "eta-remote",
+    "status": "idle",
+    "bridgeSessionId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  }
+]

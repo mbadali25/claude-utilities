@@ -3,6 +3,7 @@ package sessions
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +65,114 @@ func TestCwdWithUnicodeAndSpaces(t *testing.T) {
 	}
 	if got[0].Cwd != "C:\\repos\\my proj\\café 日本" {
 		t.Fatalf("cwd: %q", got[0].Cwd)
+	}
+}
+
+// The session's name lives in the sessions file itself ("name", with "nameSource" saying
+// whether `/rename` set it), so no transcript is read. The fixture names are invented.
+func TestParseNamedFixture(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "sessions-named.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 7 {
+		t.Fatalf("want 7 sessions, got %d", len(got))
+	}
+	byPID := map[int]proto.Session{}
+	for _, s := range got {
+		byPID[s.PID] = s
+	}
+	for _, tc := range []struct {
+		pid        int
+		name       string
+		remoteName string
+		status     string
+		remote     bool
+	}{
+		{1001, "alpha-lane", "", "busy", true},
+		{1002, "café 日本 λane ✓", "", "idle", false}, // bridgeSessionId null: not remote-controlled
+		{1003, "", "", "idle", false},               // name present but empty
+		{1004, "", "", "", false},                   // whitespace-only name is no name
+		{1006, "", "", "", false},                   // no name field at all
+		{1007, "eta-lane", "eta-remote", "idle", true},
+	} {
+		s, ok := byPID[tc.pid]
+		if !ok {
+			t.Fatalf("pid %d missing", tc.pid)
+		}
+		if s.Name != tc.name {
+			t.Errorf("pid %d name = %q, want %q", tc.pid, s.Name, tc.name)
+		}
+		if s.RemoteName != tc.remoteName {
+			t.Errorf("pid %d remoteName = %q, want %q", tc.pid, s.RemoteName, tc.remoteName)
+		}
+		if s.Status != tc.status {
+			t.Errorf("pid %d status = %q, want %q", tc.pid, s.Status, tc.status)
+		}
+		if s.RemoteControl != tc.remote {
+			t.Errorf("pid %d remoteControl = %v, want %v", tc.pid, s.RemoteControl, tc.remote)
+		}
+	}
+	// A very long name is carried whole: the UI truncates it for display, so the parser
+	// must not decide where a name ends.
+	if n := byPID[1005].Name; len(n) < 250 || !strings.HasSuffix(n, "-end") {
+		t.Errorf("long name was altered: len %d", len(n))
+	}
+}
+
+// The captured Windows fixture is a real sessions file, so it proves the live shape: the
+// name is in the file, no transcript needed.
+func TestWindowsFixtureCarriesNameFromTheSessionsFile(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "sessions-windows.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	named := 0
+	for _, s := range got {
+		if s.Name != "" {
+			named++
+		}
+		if s.RemoteName != "" {
+			t.Errorf("pid %d has a remoteName; 2.1.318 writes none", s.PID)
+		}
+	}
+	if named == 0 {
+		t.Fatal("no session in the fixture carries a name")
+	}
+}
+
+// A record from an older agent carries none of the new fields and still decodes, with the
+// new fields empty and no error: the protocol addition is backwards compatible.
+func TestParseLegacyRecordLeavesNewFieldsEmpty(t *testing.T) {
+	got, err := parse([]byte(`[{"pid":5,"sessionId":"a","cwd":"/w","startedAt":7,"procStart":"p"}]`))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if s := got[0]; s.Name != "" || s.RemoteName != "" || s.Status != "" || s.RemoteControl {
+		t.Fatalf("legacy record gained a field: %+v", s)
+	}
+}
+
+// Both the Windows and Linux scans go through scanDir, so one parser produces the name on
+// either platform. Only the record's own fields differ by file, never by OS.
+func TestScanDirCarriesNameAndRemoteControl(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "100.json", `{"pid":100,"sessionId":"a","cwd":"/w","startedAt":1,"procStart":"p",`+
+		`"name":"lane-one","status":"busy","bridgeSessionId":"b-1"}`)
+	got, err := scanDir(dir, func(int, string) bool { return true })
+	if err != nil || len(got) != 1 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if got[0].Name != "lane-one" || got[0].Status != "busy" || !got[0].RemoteControl {
+		t.Fatalf("got %+v", got[0])
 	}
 }
 

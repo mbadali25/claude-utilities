@@ -322,6 +322,58 @@ func TestEnrolledHostSurvivesRestartWithHashOnly(t *testing.T) {
 	}
 }
 
+// The session census is logged as counts. A session's name and cwd may carry a person's
+// name or a path, so neither may ever reach a log line.
+func TestSessionCensusLogsCountsNeverNamesOrPaths(t *testing.T) {
+	f := newFixture(t)
+	a, _, _ := f.enrol("box")
+	const name, cwd = "planted-name-abc", "/planted/path/xyz"
+	rep := proto.Report{Sessions: []proto.Session{
+		{PID: 1, ID: "s1", Name: name, Cwd: cwd, Status: "busy", RemoteControl: true},
+		{PID: 2, ID: "s2", Cwd: cwd},
+	}}
+	a.send(proto.TypeReport, "", rep)
+	eventually(t, func() bool { return strings.Contains(f.logs.String(), "host sessions changed") })
+	out := f.logs.String()
+	for _, leak := range []string{name, cwd, "planted"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("leaked %q into logs:\n%s", leak, out)
+		}
+	}
+	for _, want := range []string{`"sessionCount":2`, `"namedCount":1`, `"remoteCount":1`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log lacks %s:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "[dropped]") {
+		t.Fatalf("a census key is not allowlisted:\n%s", out)
+	}
+	// Reports arrive on every heartbeat, so an unchanged census must not log again.
+	before := strings.Count(out, "host sessions changed")
+	a.send(proto.TypeReport, "", rep)
+	a.send(proto.TypeHeartbeat, "", nil)
+	eventually(t, func() bool { return len(f.h.Hosts()[0].Sessions) == 2 })
+	if got := strings.Count(f.logs.String(), "host sessions changed"); got != before {
+		t.Fatalf("unchanged census logged %d times, want %d", got, before)
+	}
+}
+
+func TestSessionTallyCountsNamedAndRemote(t *testing.T) {
+	got := tallySessions([]proto.Session{
+		{PID: 1, Name: "a"},
+		{PID: 2},                  // unnamed
+		{PID: 3, RemoteName: "r"}, // a remote name counts as named
+		{PID: 4, Name: "d", RemoteControl: true},
+	})
+	if want := (sessionTally{total: 4, named: 3, remote: 1, set: true}); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	// A host with no sessions is still "reported": the zero tally must differ from unset.
+	if empty := tallySessions(nil); empty == (sessionTally{}) {
+		t.Fatal("an empty report must not look like a host that never reported")
+	}
+}
+
 func TestHeartbeatTimeoutMarksOffline(t *testing.T) {
 	f := newFixture(t)
 	a, _, id := f.enrol("box")
