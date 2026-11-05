@@ -52,6 +52,7 @@ var (
 	ErrBadToken           = errors.New("hub: unknown agent token")
 	ErrUnknownHost        = errors.New("hub: unknown host")
 	ErrUnknownAccount     = errors.New("hub: unknown account")
+	ErrAlreadyStored      = errors.New("hub: the host's live login is already stored as an account")
 	// ErrSwapOutcomeUnknown means the swap request went out but no verdict came back, so the host
 	// may or may not have applied it. Ownership is left unchanged and the host's identity is
 	// cleared until its next report.

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-swap</title>
+{{if .LoggedIn}}<meta name="csrf-token" content="{{.CSRF}}">{{end}}
+<style nonce="{{.Nonce}}">
+  :root { --bg:#fff; --fg:#1b1b1f; --mut:#5c5f66; --line:#d9dbe0; --acc:#2f5fd0; --bad:#b3261e; --ok:#1e7a3c; --warn:#8a5a00; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16171a; --fg:#e8e9ec; --mut:#9a9ea8; --line:#34363c; --acc:#7a9cf0; --bad:#f2928b; --ok:#6fcf8f; --warn:#e0b45a; } }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui, sans-serif; max-width:1100px; margin-inline:auto; }
+  h1 { font-size:1.3rem; } h2 { font-size:1.05rem; margin-top:1.6rem; }
+  table { border-collapse:collapse; width:100%; } th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  .wrap { overflow-x:auto; }
+  .mut { color:var(--mut); } .err { color:var(--bad); } .ok { color:var(--ok); }
+  .badge { display:inline-block; padding:0 6px; border-radius:8px; border:1px solid var(--warn); color:var(--warn); font-size:.8rem; }
+  .fp { font:700 1.8rem/1.2 ui-monospace, monospace; letter-spacing:.08em; }
+  .pend { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:8px 0; }
+  button { font:inherit; padding:4px 12px; border:1px solid var(--acc); background:transparent; color:var(--acc); border-radius:6px; cursor:pointer; }
+  button.deny { border-color:var(--bad); color:var(--bad); }
+  input, select { font:inherit; padding:4px 6px; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; }
+  .notice { border-left:3px solid var(--warn); padding:4px 10px; margin:10px 0; }
+</style>
+</head>
+<body>
+<h1>claude-swap</h1>
+{{if not .LoggedIn}}
+<form method="post" action="/login">
+  <p><label>Admin password <input type="password" name="password" autocomplete="current-password" required autofocus></label>
+  <button type="submit">Sign in</button></p>
+  {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
+</form>
+{{else}}
+<div class="notice mut">MCP logins may belong to another account: swapping replaces only the Claude login, never the MCP server logins stored beside it.</div>
+<p id="status" class="err" role="status"></p>
+
+<section id="pending-panel">
+  <h2>Pending connections</h2>
+  <div id="pending-list">
+  {{if .Pending}}
+    <p>Match this code with the one the agent printed before you click Allow</p>
+    {{range .Pending}}
+    <div class="pend" data-fp="{{.Fingerprint}}">
+      <div class="fp">{{.Fingerprint}}</div>
+      <div>{{.HostName}} &middot; {{.OS}} &middot; {{.SourceIP}}</div>
+      <div class="mut">since {{.Since}} &middot; expires {{.Expires}}</div>
+      <button type="button" data-act="allow">Allow</button> <button type="button" class="deny" data-act="deny">Deny</button>
+    </div>
+    {{end}}
+  {{else}}
+    <p class="mut">No pending connections.</p>
+  {{end}}
+  </div>
+</section>
+
+<section>
+  <h2>Accounts</h2>
+  <div class="wrap"><table id="accounts"><thead><tr><th>Label</th><th>Identity</th><th>5h left</th><th>7d left</th><th>Resets</th><th>Age</th><th>Owner</th><th>Status</th></tr></thead><tbody></tbody></table></div>
+  <p class="mut">Add account: import from a logged-in host</p>
+  <form id="import-form">
+    <select name="host" id="import-host" aria-label="Host"></select>
+    <input name="label" placeholder="Label" maxlength="64" required aria-label="Label">
+    <button type="submit">Import</button>
+  </form>
+</section>
+
+<section>
+  <h2>Hosts</h2>
+  <div class="wrap"><table id="hosts"><thead><tr><th>Host</th><th>OS</th><th>State</th><th>Active account</th><th>Sessions</th><th>Swap to</th><th></th></tr></thead><tbody></tbody></table></div>
+  <p><button type="button" id="enrol">New enrolment code</button> <span id="enrol-out" class="mut"></span></p>
+</section>
+
+<script nonce="{{.Nonce}}">
+(function () {
+  var csrf = document.querySelector('meta[name="csrf-token"]').content;
+  var $ = function (s) { return document.querySelector(s); };
+  function el(tag, text, cls) { var e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
+  function say(msg) { $('#status').textContent = msg || ''; }
+  function call(method, path, body) {
+    var o = { method: method, headers: { 'X-CSRF-Token': csrf }, credentials: 'same-origin' };
+    if (body !== undefined) { o.headers['Content-Type'] = 'application/json'; o.body = JSON.stringify(body); }
+    return fetch(path, o).then(function (r) {
+      return r.text().then(function (t) {
+        var j = null; try { j = t ? JSON.parse(t) : null; } catch (e) {}
+        if (r.status === 401) { location.reload(); }
+        if (!r.ok) { throw new Error((j && j.error) || ('request failed (' + r.status + ')')); }
+        return j;
+      });
+    });
+  }
+  function pct(w) { return w ? Math.round(w.leftPct) + '%' : '-'; }
+  function age(s) { if (s == null) return '-'; if (s < 90) return s + 's'; if (s < 5400) return Math.round(s / 60) + 'm'; return Math.round(s / 3600) + 'h'; }
+  var hostsCache = [];
+
+  function loadAccounts() {
+    return call('GET', '/api/accounts').then(function (list) {
+      var tb = $('#accounts tbody'); tb.textContent = '';
+      list.forEach(function (a) {
+        var w = a.sevenDay || a.fiveHour;
+        var tr = el('tr');
+        tr.appendChild(el('td', a.label));
+        tr.appendChild(el('td', a.identity, 'mut'));
+        tr.appendChild(el('td', pct(a.fiveHour)));
+        tr.appendChild(el('td', pct(a.sevenDay)));
+        tr.appendChild(el('td', w ? new Date(w.resetsAt).toLocaleString() : '-'));
+        tr.appendChild(el('td', age(a.ageSeconds)));
+        tr.appendChild(el('td', a.owner));
+        tr.appendChild(el('td', a.error || (a.ageSeconds == null ? 'not polled' : 'ok'), a.error ? 'err' : 'mut'));
+        tb.appendChild(tr);
+      });
+      return list;
+    });
+  }
+
+  function loadHosts(accounts) {
+    return call('GET', '/api/hosts').then(function (list) {
+      hostsCache = list;
+      var tb = $('#hosts tbody'); tb.textContent = '';
+      var sel = $('#import-host'); sel.textContent = '';
+      list.forEach(function (h) {
+        var tr = el('tr');
+        tr.appendChild(el('td', h.name));
+        tr.appendChild(el('td', h.os));
+        tr.appendChild(el('td', h.online ? 'online' : 'offline', h.online ? 'ok' : 'err'));
+        tr.appendChild(el('td', h.activeAccount ? ((accounts.filter(function (a) { return a.id === h.activeAccount; })[0] || {}).label || '?') : '-'));
+        var td = el('td', h.sessions.length + ' session(s) ');
+        if (h.needsReload) td.appendChild(el('span', 'Needs reload', 'badge'));
+        tr.appendChild(td);
+        var form = el('td'); var pick = el('select'); pick.setAttribute('aria-label', 'Account for ' + h.name);
+        accounts.forEach(function (a) { var o = el('option', a.label); o.value = a.id; pick.appendChild(o); });
+        form.appendChild(pick); tr.appendChild(form);
+        var act = el('td'); var go = el('button', 'Swap'); go.type = 'button'; go.disabled = !h.online;
+        go.addEventListener('click', function () {
+          go.disabled = true; say('');
+          call('POST', '/api/swap', { host: h.hostId, account: pick.value }).then(refresh).catch(function (e) { say(e.message); go.disabled = false; });
+        });
+        var rv = el('button', 'Revoke', 'deny'); rv.type = 'button';
+        rv.addEventListener('click', function () {
+          if (!confirm('Revoke ' + h.name + '?')) return;
+          call('POST', '/api/hosts/' + encodeURIComponent(h.hostId) + '/revoke').then(refresh).catch(function (e) { say(e.message); });
+        });
+        act.appendChild(go); act.appendChild(document.createTextNode(' ')); act.appendChild(rv); tr.appendChild(act);
+        tb.appendChild(tr);
+        var o2 = el('option', h.name); o2.value = h.hostId; sel.appendChild(o2);
+      });
+    });
+  }
+
+  function renderPending(list) {
+    var box = $('#pending-list'); box.textContent = '';
+    if (!list.length) { box.appendChild(el('p', 'No pending connections.', 'mut')); return; }
+    box.appendChild(el('p', 'Match this code with the one the agent printed before you click Allow'));
+    list.forEach(function (p) {
+      var d = el('div', undefined, 'pend');
+      d.appendChild(el('div', p.fingerprint, 'fp'));
+      d.appendChild(el('div', p.hostName + ' · ' + p.os + ' · ' + p.sourceIp));
+      d.appendChild(el('div', 'since ' + new Date(p.since).toLocaleString() + ' · expires ' + new Date(p.expires).toLocaleString(), 'mut'));
+      ['allow', 'deny'].forEach(function (act) {
+        var b = el('button', act === 'allow' ? 'Allow' : 'Deny', act === 'deny' ? 'deny' : ''); b.type = 'button';
+        b.addEventListener('click', function () {
+          b.disabled = true; say('');
+          call('POST', '/api/pending/' + encodeURIComponent(p.fingerprint) + '/' + act).then(refresh).catch(function (e) { say(e.message); loadPending(); });
+        });
+        d.appendChild(b); d.appendChild(document.createTextNode(' '));
+      });
+      box.appendChild(d);
+    });
+  }
+  function loadPending() { return call('GET', '/api/pending').then(renderPending).catch(function (e) { say(e.message); }); }
+
+  function refresh() {
+    return loadAccounts().then(loadHosts).then(loadPending).catch(function (e) { say(e.message); });
+  }
+
+  $('#import-form').addEventListener('submit', function (ev) {
+    ev.preventDefault(); say('');
+    call('POST', '/api/import', { host: $('#import-host').value, label: ev.target.label.value })
+      .then(function () { ev.target.label.value = ''; return refresh(); }).catch(function (e) { say(e.message); });
+  });
+  $('#enrol').addEventListener('click', function () {
+    call('POST', '/api/enrol-code').then(function (r) {
+      $('#enrol-out').textContent = 'Code ' + r.code + ' (single use, expires ' + new Date(r.expires).toLocaleTimeString() + ')';
+    }).catch(function (e) { say(e.message); });
+  });
+
+  refresh();
+  setInterval(loadPending, 5000);
+  setInterval(refresh, 30000);
+})();
+</script>
+{{end}}
+</body>
+</html>

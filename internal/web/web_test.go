@@ -1,0 +1,625 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"claude-utilities/internal/hub"
+	"claude-utilities/internal/proto"
+	"claude-utilities/internal/usage"
+	"claude-utilities/internal/vault"
+)
+
+const (
+	adminPW     = "correct horse battery staple"
+	blockSecret = "SECRET-BLOCK-VALUE-9f3a"
+)
+
+var fixedNow = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+
+type fakeHub struct {
+	mu         sync.Mutex
+	hosts      []hub.HostView
+	pending    []hub.PendingView
+	swapCalls  [][2]string
+	swapErr    error
+	allowCalls []string
+	allowErr   error
+	denyCalls  []string
+	denyErr    error
+	revoked    []string
+	importFn   func(host, label string) (vault.Account, error)
+}
+
+func (f *fakeHub) Hosts() []hub.HostView { f.mu.Lock(); defer f.mu.Unlock(); return f.hosts }
+func (f *fakeHub) Pending() []hub.PendingView {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]hub.PendingView(nil), f.pending...)
+}
+func (f *fakeHub) Swap(_ context.Context, host, acct string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.swapCalls = append(f.swapCalls, [2]string{host, acct})
+	return f.swapErr
+}
+func (f *fakeHub) NewEnrolCode() (string, time.Time) {
+	return "abcd2345", fixedNow.Add(10 * time.Minute)
+}
+func (f *fakeHub) Revoke(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revoked = append(f.revoked, id)
+	return nil
+}
+func (f *fakeHub) Import(_ context.Context, host, label string) (vault.Account, error) {
+	return f.importFn(host, label)
+}
+func (f *fakeHub) Allow(fp string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.allowCalls = append(f.allowCalls, fp)
+	if f.allowErr != nil {
+		return "", f.allowErr
+	}
+	f.drop(fp)
+	return "host-1", nil
+}
+func (f *fakeHub) Deny(fp string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.denyCalls = append(f.denyCalls, fp)
+	if f.denyErr != nil {
+		return f.denyErr
+	}
+	f.drop(fp)
+	return nil
+}
+func (f *fakeHub) drop(fp string) {
+	var keep []hub.PendingView
+	for _, p := range f.pending {
+		if p.Fingerprint != fp {
+			keep = append(keep, p)
+		}
+	}
+	f.pending = keep
+}
+func (f *fakeHub) allowN() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.allowCalls) }
+func (f *fakeHub) denyN() int  { f.mu.Lock(); defer f.mu.Unlock(); return len(f.denyCalls) }
+
+type fakeUsage map[string]usage.Usage
+
+func (u fakeUsage) Last(id string) (usage.Usage, bool) { x, ok := u[id]; return x, ok }
+
+type rig struct {
+	t     *testing.T
+	h     http.Handler
+	fh    *fakeHub
+	v     *vault.Vault
+	usage fakeUsage
+}
+
+func newRig(t *testing.T) *rig {
+	t.Helper()
+	t.Setenv("WEB_TEST_KEY", "test-passphrase")
+	v, err := vault.Open(filepath.Join(t.TempDir(), "vault.bin"), "WEB_TEST_KEY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &rig{t: t, fh: &fakeHub{}, v: v, usage: fakeUsage{}}
+	r.h = newHandler(r.fh, v, r.usage, adminPW, func() time.Time { return fixedNow })
+	return r
+}
+
+func (r *rig) seed(id, label string) {
+	r.t.Helper()
+	err := r.v.Put(vault.Account{ID: id, Label: label, Identity: "uuid-" + id, Updated: fixedNow,
+		Block: json.RawMessage(`{"accessToken":"` + blockSecret + `"}`)})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+type session struct {
+	cookie *http.Cookie
+	csrf   string
+}
+
+var csrfRe = regexp.MustCompile(`<meta name="csrf-token" content="([^"]+)"`)
+
+func (r *rig) do(method, path, body string, s *session, csrf string) *httptest.ResponseRecorder {
+	r.t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if s != nil {
+		req.AddCookie(s.cookie)
+	}
+	if csrf != "" {
+		req.Header.Set("X-CSRF-Token", csrf)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	w := httptest.NewRecorder()
+	r.h.ServeHTTP(w, req)
+	return w
+}
+
+func (r *rig) loginRaw(pw string) *httptest.ResponseRecorder {
+	r.t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(url.Values{"password": {pw}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	r.h.ServeHTTP(w, req)
+	return w
+}
+
+func (r *rig) login() *session {
+	r.t.Helper()
+	w := r.loginRaw(adminPW)
+	if w.Code != http.StatusSeeOther {
+		r.t.Fatalf("login status %d", w.Code)
+	}
+	var c *http.Cookie
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == cookieName {
+			c = ck
+		}
+	}
+	if c == nil {
+		r.t.Fatal("no session cookie")
+	}
+	s := &session{cookie: c}
+	page := r.do(http.MethodGet, "/", "", s, "").Body.String()
+	m := csrfRe.FindStringSubmatch(page)
+	if m == nil {
+		r.t.Fatalf("no csrf token in page")
+	}
+	s.csrf = m[1]
+	return s
+}
+
+func page(r *rig, s *session) string {
+	r.t.Helper()
+	w := r.do(http.MethodGet, "/", "", s, "")
+	b, _ := io.ReadAll(w.Body)
+	return string(b)
+}
+
+func TestLoginCookieFlagsAndWrongPassword(t *testing.T) {
+	r := newRig(t)
+	w := r.loginRaw("wrong")
+	if w.Code != http.StatusUnauthorized || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("wrong password: %d cookies %v", w.Code, w.Result().Cookies())
+	}
+	w = r.loginRaw(adminPW)
+	cs := w.Result().Cookies()
+	if len(cs) != 1 || !cs[0].HttpOnly || !cs[0].Secure || cs[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("cookie flags: %+v", cs)
+	}
+}
+
+func TestLoginLocksOutAfterRepeatedFailures(t *testing.T) {
+	r := newRig(t)
+	for i := 0; i < maxLoginFailures; i++ {
+		r.loginRaw("wrong")
+	}
+	if w := r.loginRaw(adminPW); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status %d, want 429 even for the right password", w.Code)
+	}
+}
+
+func TestPageShowsLoginFormWithoutSession(t *testing.T) {
+	r := newRig(t)
+	body := page(r, nil)
+	if !strings.Contains(body, `name="password"`) || strings.Contains(body, "csrf-token") {
+		t.Fatalf("login page wrong: %s", body)
+	}
+}
+
+func TestAccountsNeverIncludeTokens(t *testing.T) {
+	r := newRig(t)
+	r.seed("a1", "personal")
+	s := r.login()
+	w := r.do(http.MethodGet, "/api/accounts", "", s, "")
+	body := w.Body.String()
+	if w.Code != 200 || !strings.Contains(body, "personal") {
+		t.Fatalf("status %d body %s", w.Code, body)
+	}
+	for _, bad := range []string{blockSecret, "accessToken", `"block"`} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("body leaks %q: %s", bad, body)
+		}
+	}
+}
+
+func TestUnauthenticatedRequestRejected(t *testing.T) {
+	r := newRig(t)
+	for _, rt := range [][2]string{
+		{"GET", "/api/accounts"}, {"GET", "/api/hosts"}, {"GET", "/api/pending"},
+		{"POST", "/api/swap"}, {"POST", "/api/enrol-code"}, {"POST", "/api/hosts/h1/revoke"},
+		{"POST", "/api/import"}, {"POST", "/api/pending/ab/allow"}, {"POST", "/api/pending/ab/deny"},
+	} {
+		w := r.do(rt[0], rt[1], "{}", nil, "")
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s = %d, want 401", rt[0], rt[1], w.Code)
+		}
+	}
+}
+
+func TestForgedCookieRejected(t *testing.T) {
+	r := newRig(t)
+	w := r.do("GET", "/api/accounts", "", &session{cookie: &http.Cookie{Name: cookieName, Value: "forged"}}, "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d", w.Code)
+	}
+}
+
+func TestSwapEndpointCallsHub(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	w := r.do("POST", "/api/swap", `{"host":"h1","account":"a1"}`, s, s.csrf)
+	if w.Code != 200 {
+		t.Fatalf("status %d %s", w.Code, w.Body)
+	}
+	if len(r.fh.swapCalls) != 1 || r.fh.swapCalls[0] != [2]string{"h1", "a1"} {
+		t.Fatalf("calls %v", r.fh.swapCalls)
+	}
+}
+
+func TestSwapRequiresCSRF(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	for _, tok := range []string{"", "wrong"} {
+		if w := r.do("POST", "/api/swap", `{"host":"h1","account":"a1"}`, s, tok); w.Code != http.StatusForbidden {
+			t.Fatalf("csrf %q: status %d", tok, w.Code)
+		}
+	}
+	if len(r.fh.swapCalls) != 0 {
+		t.Fatal("swap ran without a valid CSRF token")
+	}
+}
+
+func TestSwapErrorShowsReasonNotToken(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	r.fh.swapErr = fmt.Errorf("hub: agent refused swap: disk full Bearer sk-ant-oat01-LEAKME123")
+	w := r.do("POST", "/api/swap", `{"host":"h1","account":"a1"}`, s, s.csrf)
+	if w.Code < 400 || !strings.Contains(w.Body.String(), "disk full") || strings.Contains(w.Body.String(), "LEAKME123") {
+		t.Fatalf("status %d body %s", w.Code, w.Body)
+	}
+	r.fh.swapErr = hub.ErrUnknownLiveAccount
+	w = r.do("POST", "/api/swap", `{"host":"h1","account":"a1"}`, s, s.csrf)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "import") {
+		t.Fatalf("status %d body %s", w.Code, w.Body)
+	}
+	r.fh.swapErr = hub.ErrUnknownHost
+	if w = r.do("POST", "/api/swap", `{"host":"h1","account":"a1"}`, s, s.csrf); w.Code != http.StatusNotFound {
+		t.Fatalf("status %d", w.Code)
+	}
+}
+
+func TestSwapRejectsMalformedBody(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	for _, b := range []string{`{`, `{"host":"","account":"a"}`, `{"host":"h","account":"a","x":1}`} {
+		if w := r.do("POST", "/api/swap", b, s, s.csrf); w.Code != http.StatusBadRequest {
+			t.Errorf("body %q: status %d", b, w.Code)
+		}
+	}
+}
+
+func TestHostsShowNeedsReloadBadge(t *testing.T) {
+	r := newRig(t)
+	r.fh.hosts = []hub.HostView{{HostID: "h1", Name: "box", OS: "linux", Online: true, ActiveAccount: "a1",
+		Sessions: []hub.SessionView{{Session: proto.Session{PID: 7, ID: "s1"}, NeedsReload: true}}}}
+	s := r.login()
+	var hosts []struct {
+		HostID      string `json:"hostId"`
+		NeedsReload bool   `json:"needsReload"`
+		Sessions    []struct {
+			NeedsReload bool `json:"needsReload"`
+		} `json:"sessions"`
+	}
+	w := r.do("GET", "/api/hosts", "", s, "")
+	if err := json.Unmarshal(w.Body.Bytes(), &hosts); err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 1 || !hosts[0].NeedsReload || !hosts[0].Sessions[0].NeedsReload {
+		t.Fatalf("hosts %s", w.Body)
+	}
+	if !strings.Contains(page(r, s), "Needs reload") {
+		t.Fatal("page lacks the Needs reload badge label")
+	}
+}
+
+func TestUsageShowsLastKnownWithAgeOnError(t *testing.T) {
+	r := newRig(t)
+	r.seed("a1", "personal")
+	r.usage["a1"] = usage.Usage{
+		SevenDay:  usage.Window{UsedPct: 95, ResetsAt: fixedNow.Add(48 * time.Hour)},
+		FetchedAt: fixedNow.Add(-10 * time.Minute),
+		Err:       "rate limited",
+	}
+	s := r.login()
+	var accts []struct {
+		SevenDay *struct {
+			LeftPct  float64   `json:"leftPct"`
+			ResetsAt time.Time `json:"resetsAt"`
+		} `json:"sevenDay"`
+		FiveHour   *struct{} `json:"fiveHour"`
+		AgeSeconds *int64    `json:"ageSeconds"`
+		Error      string    `json:"error"`
+	}
+	w := r.do("GET", "/api/accounts", "", s, "")
+	if err := json.Unmarshal(w.Body.Bytes(), &accts); err != nil || len(accts) != 1 {
+		t.Fatalf("%v %s", err, w.Body)
+	}
+	a := accts[0]
+	if a.SevenDay == nil || a.SevenDay.LeftPct != 5 || a.FiveHour != nil {
+		t.Fatalf("windows: %s", w.Body)
+	}
+	if a.AgeSeconds == nil || *a.AgeSeconds != 600 || a.Error != "rate limited" {
+		t.Fatalf("age/error: %s", w.Body)
+	}
+}
+
+func TestAccountOwnerIsHostNameOrServer(t *testing.T) {
+	r := newRig(t)
+	r.seed("a1", "one")
+	r.seed("a2", "two")
+	r.fh.hosts = []hub.HostView{{HostID: "h1", Name: "box", ActiveAccount: "a1"}}
+	s := r.login()
+	var accts []struct{ ID, Owner string }
+	w := r.do("GET", "/api/accounts", "", s, "")
+	if err := json.Unmarshal(w.Body.Bytes(), &accts); err != nil {
+		t.Fatal(err)
+	}
+	if accts[0].Owner != "box" || accts[1].Owner != "server" {
+		t.Fatalf("owners %+v", accts)
+	}
+}
+
+func TestImportCreatesAccountFromHost(t *testing.T) {
+	r := newRig(t)
+	r.fh.importFn = func(host, label string) (vault.Account, error) {
+		a := vault.Account{ID: "new1", Label: label, Identity: "uuid-new", Updated: fixedNow,
+			Block: json.RawMessage(`{"accessToken":"` + blockSecret + `"}`)}
+		if host != "h1" {
+			return vault.Account{}, hub.ErrUnknownHost
+		}
+		return a, r.v.Put(a)
+	}
+	s := r.login()
+	w := r.do("POST", "/api/import", `{"host":"h1","label":"work"}`, s, s.csrf)
+	if w.Code != http.StatusCreated || !strings.Contains(w.Body.String(), "work") || strings.Contains(w.Body.String(), blockSecret) {
+		t.Fatalf("status %d body %s", w.Code, w.Body)
+	}
+	if got := r.do("GET", "/api/accounts", "", s, "").Body.String(); !strings.Contains(got, "work") {
+		t.Fatalf("accounts %s", got)
+	}
+	if w = r.do("POST", "/api/import", `{"host":"zz","label":"x"}`, s, s.csrf); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown host status %d", w.Code)
+	}
+	r.fh.importFn = func(string, string) (vault.Account, error) { return vault.Account{}, hub.ErrAlreadyStored }
+	if w = r.do("POST", "/api/import", `{"host":"h1","label":"x"}`, s, s.csrf); w.Code != http.StatusConflict {
+		t.Fatalf("duplicate status %d", w.Code)
+	}
+}
+
+func TestEnrolCodeAndRevoke(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	w := r.do("POST", "/api/enrol-code", "", s, s.csrf)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "abcd2345") {
+		t.Fatalf("enrol-code %d %s", w.Code, w.Body)
+	}
+	if w = r.do("POST", "/api/hosts/h9/revoke", "", s, s.csrf); w.Code != 200 || len(r.fh.revoked) != 1 || r.fh.revoked[0] != "h9" {
+		t.Fatalf("revoke %d %v", w.Code, r.fh.revoked)
+	}
+}
+
+func TestMcpOAuthNoticeShownInUI(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	p := page(r, s)
+	for _, want := range []string{"MCP logins may belong to another account", "Add account: import from a logged-in host"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if strings.Contains(p, "/api/login/") {
+		t.Error("web OAuth login routes must not be offered (spike S1 deferred)")
+	}
+}
+
+// --- pending connections ---
+
+func pendingView(fp string) hub.PendingView {
+	return hub.PendingView{Fingerprint: fp, HostName: "laptop-7", OS: "windows", SourceIP: "192.168.1.50",
+		Since: fixedNow.Add(-time.Minute), ExpiresAt: fixedNow.Add(4 * time.Minute)}
+}
+
+func TestPendingListRequiresAdminSession(t *testing.T) {
+	r := newRig(t)
+	r.fh.pending = []hub.PendingView{pendingView("ABCD-EFGH")}
+	w := r.do("GET", "/api/pending", "", nil, "")
+	if w.Code != http.StatusUnauthorized || w.Body.Len() != 0 {
+		t.Fatalf("status %d body %q", w.Code, w.Body)
+	}
+}
+
+func TestAllowWithoutAdminSessionIs401(t *testing.T) {
+	r := newRig(t)
+	r.fh.pending = []hub.PendingView{pendingView("ABCD-EFGH")}
+	w := r.do("POST", "/api/pending/ABCD-EFGH/allow", "", nil, "whatever")
+	if w.Code != http.StatusUnauthorized || r.fh.allowN() != 0 {
+		t.Fatalf("status %d allow calls %d", w.Code, r.fh.allowN())
+	}
+}
+
+func TestAllowWithWrongCSRFIs403(t *testing.T) {
+	r := newRig(t)
+	r.fh.pending = []hub.PendingView{pendingView("ABCD-EFGH")}
+	s := r.login()
+	for _, tok := range []string{"", "wrong"} {
+		if w := r.do("POST", "/api/pending/ABCD-EFGH/allow", "", s, tok); w.Code != http.StatusForbidden {
+			t.Fatalf("csrf %q: status %d", tok, w.Code)
+		}
+	}
+	if r.fh.allowN() != 0 {
+		t.Fatal("Allow called without a valid CSRF token")
+	}
+}
+
+func TestDenyWithWrongCSRFIs403(t *testing.T) {
+	r := newRig(t)
+	r.fh.pending = []hub.PendingView{pendingView("ABCD-EFGH")}
+	s := r.login()
+	if w := r.do("POST", "/api/pending/ABCD-EFGH/deny", "", s, "wrong"); w.Code != http.StatusForbidden || r.fh.denyN() != 0 {
+		t.Fatalf("status %d deny calls %d", w.Code, r.fh.denyN())
+	}
+}
+
+func TestAllowCallsHubAndResponseNeverContainsToken(t *testing.T) {
+	r := newRig(t)
+	r.fh.pending = []hub.PendingView{pendingView("ABCD-EFGH")}
+	s := r.login()
+	w := r.do("POST", "/api/pending/ABCD-EFGH/allow", "", s, s.csrf)
+	if w.Code != 200 {
+		t.Fatalf("status %d %s", w.Code, w.Body)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got) != 1 || got["hostId"] != "host-1" {
+		t.Fatalf("body %s", w.Body)
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "token") {
+		t.Fatal("body mentions a token")
+	}
+	if r.fh.allowN() != 1 || r.fh.allowCalls[0] != "ABCD-EFGH" {
+		t.Fatalf("calls %v", r.fh.allowCalls)
+	}
+}
+
+func TestAllowExpiredEntryIs410WithReason(t *testing.T) {
+	r := newRig(t)
+	r.fh.allowErr = hub.ErrPendingExpired
+	s := r.login()
+	w := r.do("POST", "/api/pending/ABCD-EFGH/allow", "", s, s.csrf)
+	if w.Code != http.StatusGone || !strings.Contains(w.Body.String(), "expired") {
+		t.Fatalf("status %d body %s", w.Code, w.Body)
+	}
+}
+
+func TestAllowUnknownFingerprintIs404(t *testing.T) {
+	r := newRig(t)
+	r.fh.allowErr = hub.ErrNotPending
+	s := r.login()
+	if w := r.do("POST", "/api/pending/NOPE/allow", "", s, s.csrf); w.Code != http.StatusNotFound {
+		t.Fatalf("status %d", w.Code)
+	}
+	r.fh.denyErr = hub.ErrNotPending
+	if w := r.do("POST", "/api/pending/NOPE/deny", "", s, s.csrf); w.Code != http.StatusNotFound {
+		t.Fatalf("deny status %d", w.Code)
+	}
+}
+
+func TestAllowOtherFailureIs500WithoutDetailLeak(t *testing.T) {
+	r := newRig(t)
+	r.fh.allowErr = errors.New("hub: persist failed: password=hunter2")
+	s := r.login()
+	w := r.do("POST", "/api/pending/ABCD-EFGH/allow", "", s, s.csrf)
+	if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "hunter2") {
+		t.Fatalf("status %d body %s", w.Code, w.Body)
+	}
+}
+
+func TestDenyThenListNoLongerShowsEntry(t *testing.T) {
+	r := newRig(t)
+	r.fh.pending = []hub.PendingView{pendingView("ABCD-EFGH")}
+	s := r.login()
+	if got := r.do("GET", "/api/pending", "", s, "").Body.String(); !strings.Contains(got, "ABCD-EFGH") {
+		t.Fatalf("list before deny: %s", got)
+	}
+	if w := r.do("POST", "/api/pending/ABCD-EFGH/deny", "", s, s.csrf); w.Code != 200 {
+		t.Fatalf("deny status %d", w.Code)
+	}
+	if got := r.do("GET", "/api/pending", "", s, "").Body.String(); strings.Contains(got, "ABCD-EFGH") {
+		t.Fatalf("list after deny: %s", got)
+	}
+}
+
+func TestPendingPanelShowsFingerprintHostOSIPAndMatchInstruction(t *testing.T) {
+	r := newRig(t)
+	r.fh.pending = []hub.PendingView{pendingView("ABCD-EFGH")}
+	s := r.login()
+	p := page(r, s)
+	for _, want := range []string{"Pending connections", "ABCD-EFGH", "laptop-7", "windows", "192.168.1.50",
+		"Match this code with the one the agent printed before you click Allow", "Allow", "Deny"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+}
+
+func TestPendingPanelEscapesAgentSuppliedText(t *testing.T) {
+	r := newRig(t)
+	pv := pendingView("ABCD-EFGH")
+	pv.HostName = `<script>alert(1)</script>`
+	r.fh.pending = []hub.PendingView{pv}
+	s := r.login()
+	if p := page(r, s); strings.Contains(p, "<script>alert(1)") {
+		t.Fatal("host name rendered unescaped")
+	}
+}
+
+func TestPendingPanelRenderedEmptyWhenQueueEmpty(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	p := page(r, s)
+	if !strings.Contains(p, "Pending connections") || !strings.Contains(p, "No pending connections") {
+		t.Fatal("empty panel missing")
+	}
+	// The script also holds the sentence (for client-side refresh), so look at the rendered panel only.
+	start := strings.Index(p, `id="pending-panel"`)
+	end := strings.Index(p[start:], "</section>")
+	if start < 0 || end < 0 {
+		t.Fatal("panel markup not found")
+	}
+	if strings.Contains(p[start:start+end], "Match this code") {
+		t.Fatal("instruction shown with no entries")
+	}
+}
+
+func TestCSRFTokenRotatesPerSession(t *testing.T) {
+	r := newRig(t)
+	a, b := r.login(), r.login()
+	if a.csrf == b.csrf || a.cookie.Value == b.cookie.Value {
+		t.Fatal("two sessions share a token")
+	}
+	// session A's CSRF token is not valid in session B.
+	if w := r.do("POST", "/api/swap", `{"host":"h","account":"a"}`, b, a.csrf); w.Code != http.StatusForbidden {
+		t.Fatalf("cross-session csrf accepted: %d", w.Code)
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	r := newRig(t)
+	w := r.do("GET", "/", "", nil, "")
+	h := w.Header()
+	if !strings.Contains(h.Get("Content-Security-Policy"), "default-src 'none'") || h.Get("Cache-Control") != "no-store" ||
+		h.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("headers %v", h)
+	}
+}
