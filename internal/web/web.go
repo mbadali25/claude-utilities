@@ -50,7 +50,7 @@ var pageTmpl = template.Must(template.New("index").Parse(indexHTML))
 type hubAPI interface {
 	Hosts() []hub.HostView
 	Pending() []hub.PendingView
-	Swap(ctx context.Context, hostID, accountID string) error
+	Swap(ctx context.Context, hostID, accountID string) (hub.SwapOutcome, error)
 	NewEnrolCode() (string, time.Time)
 	Revoke(hostID string) error
 	Import(ctx context.Context, hostID, label string) (vault.Account, error)
@@ -632,11 +632,14 @@ func (s *server) swap(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "host and account are required")
 		return
 	}
-	if err := s.hub.Swap(r.Context(), in.Host, in.Account); err != nil {
+	out, err := s.hub.Swap(r.Context(), in.Host, in.Account)
+	if err != nil {
 		hubError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	// outcome separates the two successes: a login was written, or the host already held the
+	// account and nothing was. Both are 200; only the UI copy differs.
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "outcome": string(out)})
 }
 
 func (s *server) enrolCode(w http.ResponseWriter, _ *http.Request) {

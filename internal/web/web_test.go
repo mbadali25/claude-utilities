@@ -33,11 +33,15 @@ const (
 var fixedNow = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 
 type fakeHub struct {
-	mu         sync.Mutex
-	hosts      []hub.HostView
-	pending    []hub.PendingView
-	swapCalls  [][2]string
-	swapErr    error
+	mu          sync.Mutex
+	hosts       []hub.HostView
+	pending     []hub.PendingView
+	swapCalls   [][2]string
+	swapErr     error
+	swapOutcome hub.SwapOutcome
+	// swapFn, when set, answers per host, so one rig can stand in for an estate whose hosts each
+	// fail differently.
+	swapFn     func(host, acct string) (hub.SwapOutcome, error)
 	allowCalls []string
 	allowErr   error
 	denyCalls  []string
@@ -85,11 +89,25 @@ func (f *fakeHub) Pending() []hub.PendingView {
 	defer f.mu.Unlock()
 	return append([]hub.PendingView(nil), f.pending...)
 }
-func (f *fakeHub) Swap(_ context.Context, host, acct string) error {
+
+// Swap records the call, then answers outside the lock. The real hub serialises per host, not
+// across the estate, so a fake that held its mutex across a slow swapFn would freeze every other
+// host and /api/hosts with it, which no real deployment does.
+func (f *fakeHub) Swap(_ context.Context, host, acct string) (hub.SwapOutcome, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.swapCalls = append(f.swapCalls, [2]string{host, acct})
-	return f.swapErr
+	fn, err, out := f.swapFn, f.swapErr, f.swapOutcome
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(host, acct)
+	}
+	if err != nil {
+		return "", err
+	}
+	if out == "" {
+		return hub.SwapDone, nil
+	}
+	return out, nil
 }
 func (f *fakeHub) NewEnrolCode() (string, time.Time) {
 	return "abcd2345", fixedNow.Add(10 * time.Minute)
@@ -384,6 +402,79 @@ func TestSwapErrorShowsReasonNotToken(t *testing.T) {
 	r.fh.swapErr = hub.ErrUnknownHost
 	if w = r.do("POST", "/api/swap", `{"host":"h1","account":"a1"}`, s, s.csrf); w.Code != http.StatusNotFound {
 		t.Fatalf("status %d", w.Code)
+	}
+}
+
+// The 200 body must say which of the two successes happened. Both used to answer {"ok":true},
+// so the UI could not tell a real swap from a press on the account the host already holds.
+func TestSwapResponseCarriesOutcome(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	for _, tc := range []struct {
+		name    string
+		outcome hub.SwapOutcome
+		want    string
+	}{
+		{"swapped", hub.SwapDone, "swapped"},
+		{"already active", hub.SwapAlreadyActive, "already-active"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r.fh.swapOutcome = tc.outcome
+			w := r.do("POST", "/api/swap", `{"host":"h1","account":"a1"}`, s, s.csrf)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status %d body %s", w.Code, w.Body)
+			}
+			var got struct {
+				OK      bool   `json:"ok"`
+				Outcome string `json:"outcome"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !got.OK || got.Outcome != tc.want {
+				t.Fatalf("body %s, want ok with outcome %q", w.Body, tc.want)
+			}
+		})
+	}
+}
+
+// Every Swap press must leave something visible. The bug was a success path that called refresh()
+// and nothing else, so a swap that worked and a swap that changed nothing both painted blank.
+func TestPageCarriesSwapFeedbackSurface(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+
+	for _, want := range []string{
+		// The verdict is kept off the DOM and rendered from this map, because a no-op swap leaves
+		// /api/hosts identical and changed() would otherwise skip the rebuild entirely.
+		"var swapState = {}", "function setSwap(", "renderHosts(true)", "function swapRow(",
+		// The four things a press can end as, plus the in-flight state.
+		"Swapping to ", "Swapped ", "No change: ", "'already-active'",
+		// The two announcers live in the shell so they survive a card rebuild, and the toast
+		// stack is aria-hidden so a verdict is never spoken twice.
+		`id="swap-live"`, `id="swap-alert"`, `aria-live="polite"`, `aria-live="assertive"`,
+		`id="toasts"`, `aria-hidden="true"`, "function notify(",
+		// The disabled button says why, in text that is tied to the button.
+		"function swapWhyNot(", "aria-describedby", "swapwhy-",
+		"This host is offline, so no login can be written to it.",
+		"An unfinished earlier swap on this host blocks every new one.",
+		"Import its live login first.",
+		"The only stored account is the one this host already holds.",
+		"No accounts are stored yet. Add or import one first.",
+		// The current account is marked and is never the open selection, and the marker never
+		// leaks into a sentence about the account.
+		"' (current)'", "function acctLabel(", "acctLabel(pick.value)",
+		// The hub's "hub: " prefix is a name for the log, not for the operator's card.
+		"function plainErr(", "plainErr(e.message)",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+	// The page-wide status line must not be where a swap verdict lands: the operator is looking at
+	// the card, not at the top of the page.
+	if strings.Contains(p, ".catch(function (e) { say(e.message); idle(); })") {
+		t.Error("swap failures still go to the page-wide status line instead of the card")
 	}
 }
 

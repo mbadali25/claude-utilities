@@ -207,6 +207,36 @@
   details.sess li .btn.ghost { margin-right:-10px; }
   .confirm { display:flex; gap:8px; flex-wrap:wrap; align-items:center; width:100%; }
   .confirm .q { flex:1 1 100%; font-weight:600; }
+  /* The swap verdict, on the card that produced it. Every press leaves one of these: working,
+     swapped, already active, refused or failed. It takes the full row so it never squeezes the
+     select, and the row reserves its height so the card does not jump when the verdict lands. */
+  .swap .why, .swap .swapmsg { flex:1 1 100%; font-size:.78rem; }
+  .swap .why { color:var(--mut); }
+  .swapmsg { display:flex; gap:6px; align-items:baseline; color:var(--mut); }
+  .swapmsg:empty { display:none; }
+  .swapmsg.ok { color:var(--ok); }
+  .swapmsg.bad { color:var(--bad); }
+  /* A no-op is neither good nor bad news, so it stays neutral rather than borrowing the ok green. */
+  .swapmsg.info { color:var(--mut); }
+  .swapmsg .dot { flex:none; width:7px; height:7px; border-radius:50%; background:currentColor; align-self:center; }
+  .swapmsg.work .dot { animation:pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.25; } }
+  /* Toasts repeat the verdict where the eye already is after a click, for the case where the card
+     has scrolled off. Visual only: the announcement comes from the two live regions in the shell,
+     which survive a card rebuild, so nothing is said twice. */
+  .toasts { position:fixed; right:16px; bottom:16px; z-index:30; display:grid; gap:8px;
+            width:min(22rem, calc(100vw - 32px)); pointer-events:none; }
+  .toast { background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--mut);
+           border-radius:var(--r); padding:10px 12px; font-size:.85rem; color:var(--fg);
+           box-shadow:0 6px 18px rgb(0 0 0 / .14); animation:toastin .18s ease-out; }
+  .toast.ok { border-left-color:var(--ok); }
+  .toast.bad { border-left-color:var(--bad); }
+  .toast .who { color:var(--mut); font-size:.78rem; }
+  @keyframes toastin { from { opacity:0; transform:translateY(6px); } }
+  @media (prefers-reduced-motion: reduce) {
+    .swapmsg.work .dot { animation:none; }
+    .toast { animation:none; }
+  }
 
   /* Session control. An inline message sits under the controls that produced it, never in the
      page-wide status line, so the error reads where the operator is looking. */
@@ -559,6 +589,14 @@
     </form>
   </div>
 </dialog>
+
+<!-- The two announcers. They live in the shell, not on a host card, because renderHosts replaces
+     the whole card subtree: a live region created in the same pass as its text is not reliably
+     announced, while writing into a region that was already there is. The toast stack beside them
+     is aria-hidden so each verdict is spoken exactly once. -->
+<p id="swap-live" class="sr" role="status" aria-live="polite"></p>
+<p id="swap-alert" class="sr" role="alert" aria-live="assertive"></p>
+<div class="toasts" id="toasts" aria-hidden="true"></div>
 
 <script nonce="{{.Nonce}}">
 (function () {
@@ -1219,6 +1257,52 @@
       });
   });
 
+  // The verdict of the last Swap press, per host, kept out of the DOM on purpose: renderHosts
+  // replaces the whole card, so anything appended to the row would be discarded, and a no-op swap
+  // leaves every field of /api/hosts identical, so changed() short-circuits the rebuild entirely.
+  // hostCard reads this map on every pass instead, and setSwap forces the one paint that needs it.
+  var swapState = {}, toastTimers = {};
+  function setSwap(hostId, st) { swapState[hostId] = st; renderHosts(true); }
+  function acctLabel(id) {
+    var a = accountsCache.filter(function (x) { return x.id === id; })[0];
+    return a ? a.label : id;
+  }
+  // The hub prefixes its own errors with "hub: " so the server log says who wrote them. That is a
+  // name for us, not for the operator reading a card, so it comes off on the way to the screen.
+  // The reason itself is kept word for word; the hub has already redacted it.
+  function plainErr(m) { return String(m || '').replace(/^hub:\s*/, ''); }
+
+  // swapWhyNot returns why this host cannot be swapped right now, or '' when it can. The text is
+  // shown beside the disabled button and read out with it, so it says what to do next, not just
+  // that the button is off. other is the first account the host does not already hold.
+  function swapWhyNot(h, other) {
+    if (!accountsCache.length) return 'No accounts are stored yet. Add or import one first.';
+    if (!h.online) return 'This host is offline, so no login can be written to it.';
+    if (h.swapBlocked) return 'An unfinished earlier swap on this host blocks every new one.';
+    // activeAccount is empty both when the host reports no login and when its login matches no
+    // stored account. Import is the answer to both, and it is what the hub's own refusal says.
+    if (!h.activeAccount) return 'This host has no stored account signed in, so there is no login to swap away. Import its live login first.';
+    if (!other) return 'The only stored account is the one this host already holds.';
+    return '';
+  }
+
+  // notify repeats a verdict as a toast and speaks it through the matching live region. Errors go
+  // to the assertive one, everything else to the polite one. A second verdict for the same host
+  // replaces the first rather than stacking, and the dismissal is a timer, not a transition event,
+  // so an interrupted animation can never leave a toast on screen for good.
+  function notify(hostName, st) {
+    (st.kind === 'bad' ? $('#swap-alert') : $('#swap-live')).textContent = hostName + ': ' + st.text;
+    var box = $('#toasts');
+    if (!box) return;
+    var key = 'h' + hostName;
+    if (toastTimers[key]) { clearTimeout(toastTimers[key].t); toastTimers[key].n.remove(); }
+    var n = el('div', undefined, 'toast' + (st.kind === 'bad' ? ' bad' : st.kind === 'ok' ? ' ok' : ''));
+    n.appendChild(el('div', hostName, 'who'));
+    n.appendChild(el('div', st.text));
+    box.appendChild(n);
+    toastTimers[key] = { n: n, t: setTimeout(function () { n.remove(); delete toastTimers[key]; }, st.kind === 'bad' ? 9000 : 5000) };
+  }
+
   // sessionItem renders one session: its name heading first, then pid and cwd, then the
   // restart command, then its command verdicts and the controls that ask for more. Every value
   // goes in through el()/textContent, never innerHTML, because a name, a cwd and a status all
@@ -1322,17 +1406,55 @@
     }
     c.appendChild(hostControls(h));
 
+    c.appendChild(swapRow(h));
+    return c;
+  }
+
+  // swapRow is the select, the Swap and Revoke buttons, the reason the Swap button is off, and the
+  // verdict of the last press on this host. Every press leaves something visible here: before this
+  // row existed a successful swap and a no-op both painted nothing, because the success path only
+  // called refresh() and a no-op changes no host data, so the card was never even rebuilt.
+  function swapRow(h) {
     var sw = el('div', undefined, 'swap');
     var pick = el('select'); pick.setAttribute('aria-label', 'Account for ' + h.name);
-    accountsCache.forEach(function (a) { var o = el('option', a.label); o.value = a.id; if (a.id === h.activeAccount) o.selected = true; pick.appendChild(o); });
-    var go = el('button', 'Swap', 'btn primary'); go.type = 'button'; go.disabled = !h.online || !accountsCache.length;
+    // The account the host already holds is marked rather than hidden: the operator can still see
+    // where the host is. It is never the open selection, so the default press always changes
+    // something.
+    accountsCache.forEach(function (a) {
+      var o = el('option', a.id === h.activeAccount ? a.label + ' (current)' : a.label);
+      o.value = a.id; pick.appendChild(o);
+    });
+    var other = accountsCache.filter(function (a) { return a.id !== h.activeAccount; })[0];
+    if (other) pick.value = other.id;
+
+    var why = swapWhyNot(h, other);
+    var go = el('button', 'Swap', 'btn primary'); go.type = 'button'; go.disabled = !!why;
     var rv = el('button', 'Revoke', 'btn danger'); rv.type = 'button';
+    var reason = el('div', why, 'why');
+    if (why) {
+      // The reason is readable text, and tied to the button so a screen reader hears it with the
+      // button's own name rather than only "Swap, dimmed".
+      reason.id = 'swapwhy-' + h.hostId;
+      go.setAttribute('aria-describedby', reason.id);
+      pick.disabled = !accountsCache.length;
+    }
+    var st = swapState[h.hostId];
+    var verdict = el('div', undefined, 'swapmsg' + (st ? ' ' + st.kind + (st.working ? ' work' : '') : ''));
+    if (st) { verdict.appendChild(el('span', undefined, 'dot')); verdict.appendChild(el('span', st.text)); }
+    // A swap already in flight owns this host until it answers: a second press would race the
+    // first for the same credential file.
+    if (st && st.working) { go.disabled = true; rv.disabled = true; pick.disabled = true; sw.setAttribute('aria-busy', 'true'); }
+
     function idle() {
       confirming = null; sw.textContent = '';
       sw.appendChild(pick); sw.appendChild(go); sw.appendChild(rv);
+      if (why) sw.appendChild(reason);
+      sw.appendChild(verdict);
     }
     go.addEventListener('click', function () {
-      var label = pick.options[pick.selectedIndex] ? pick.options[pick.selectedIndex].text : '';
+      // The account's own label, not the option's text: the option carries a " (current)" suffix
+      // that must never end up inside a sentence about it.
+      var label = acctLabel(pick.value);
       confirming = h.hostId; sw.textContent = '';
       var box = el('div', undefined, 'confirm');
       box.appendChild(el('div', 'Swap ' + h.name + ' to ' + label + '?', 'q'));
@@ -1342,9 +1464,26 @@
       box.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') { no.click(); } });
       yes.addEventListener('click', function () {
         yes.disabled = true; say('');
+        // confirming is dropped here, before the repaint: the question has been answered, and
+        // renderHosts refuses to rebuild while an open confirm is still on the card, which would
+        // swallow the in-flight state. The in-flight paint goes out before the request, and the
+        // card is rebuilt from swapState, so the operator never watches a dead button.
+        confirming = null;
+        setSwap(h.hostId, { kind: 'info', working: true, text: 'Swapping to ' + label + '...' });
         call('POST', '/api/swap', { host: h.hostId, account: pick.value })
-          .then(function () { confirming = null; return refresh(); })
-          .catch(function (e) { say(e.message); idle(); });
+          .then(function (j) {
+            confirming = null;
+            var done = (j && j.outcome) === 'already-active'
+              ? { kind: 'info', text: 'No change: ' + h.name + ' already holds ' + label + '.' }
+              : { kind: 'ok', text: 'Swapped ' + h.name + ' to ' + label + '.' };
+            // refresh() first, so the rebuild that follows carries both the new host data and the
+            // verdict; setSwap then forces the paint a no-op would otherwise never trigger.
+            return refresh().then(function () { setSwap(h.hostId, done); notify(h.name, done); });
+          })
+          .catch(function (e) {
+            var bad = { kind: 'bad', text: plainErr(e.message) };
+            confirming = null; setSwap(h.hostId, bad); notify(h.name, bad);
+          });
       });
       box.appendChild(yes); box.appendChild(no); sw.appendChild(box); yes.focus();
     });
@@ -1353,8 +1492,7 @@
       call('POST', '/api/hosts/' + encodeURIComponent(h.hostId) + '/revoke').then(refresh).catch(function (e) { say(e.message); });
     });
     idle();
-    c.appendChild(sw);
-    return c;
+    return sw;
   }
 
   function renderHosts(force) {

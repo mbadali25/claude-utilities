@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -34,10 +35,10 @@ func TestSwapBackAfterSwapWithStaleIdentity(t *testing.T) {
 	s.staleIdentity = true
 	s.serve(a)
 
-	if err := f.h.Swap(context.Background(), id, "B"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "B"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.Swap(context.Background(), id, "A"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "A"); err != nil {
 		t.Fatal(err)
 	}
 	_, blocks := s.snapshot()
@@ -68,13 +69,13 @@ func TestRotatedLoginAfterSwapStillBelongsToTheSwappedAccount(t *testing.T) {
 	s := f.newScript("id-a", `{"refreshToken":"rt-a","accessToken":"a1"}`)
 	s.staleIdentity = true
 	s.serve(a)
-	if err := f.h.Swap(context.Background(), id, "B"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "B"); err != nil {
 		t.Fatal(err)
 	}
 	s.mu.Lock()
 	s.liveBlock = `{"refreshToken":"rt-b2","accessToken":"b2"}`
 	s.mu.Unlock()
-	if err := f.h.Swap(context.Background(), id, "A"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "A"); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.vaultBlock("A"); strings.Contains(got, "rt-b2") || !strings.Contains(got, `"rt-a"`) {
@@ -95,7 +96,7 @@ func TestStaleOauthAccountDoesNotMakeSwapANoOp(t *testing.T) {
 	s := f.newScript("id-a", `{"refreshToken":"rt-b","accessToken":"b-live"}`)
 	s.staleIdentity = true
 	s.serve(a)
-	if err := f.h.Swap(context.Background(), id, "A"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "A"); err != nil {
 		t.Fatal(err)
 	}
 	if _, blocks := s.snapshot(); len(blocks) != 1 || blocks[0] != `{"refreshToken":"rt-a","accessToken":"a0"}` {
@@ -115,11 +116,50 @@ func TestWritebackSkippedOnLineageMismatch(t *testing.T) {
 	f.reg.SwapIn("A", id)
 	s := f.newScript("id-a", `{"refreshToken":"rt-stranger","accessToken":"x"}`)
 	s.serve(a)
-	if err := f.h.Swap(context.Background(), id, "B"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "B"); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.vaultBlock("A"); got != `{"refreshToken":"rt-a","accessToken":"a0"}` {
 		t.Fatalf("vault A overwritten by a different lineage: %s", got)
+	}
+}
+
+// A no-op and a real swap both succeed, so the only thing that can tell them apart is the
+// outcome Swap reports. Without it the admin UI cannot say "already on this account" and a
+// press on the preselected account looks like nothing happened at all.
+func TestSwapOutcomeDistinguishesNoOpFromRealSwap(t *testing.T) {
+	f := newFixture(t)
+	f.seedLineage()
+	a, _, id := f.enrol("box")
+	f.reg.SwapIn("A", id)
+	s := f.newScript("id-a", `{"refreshToken":"rt-a","accessToken":"a0"}`)
+	s.serve(a)
+
+	got, err := f.h.Swap(context.Background(), id, "A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != SwapAlreadyActive {
+		t.Fatalf("swap to the active account reported %q, want %q", got, SwapAlreadyActive)
+	}
+	if got, err = f.h.Swap(context.Background(), id, "B"); err != nil {
+		t.Fatal(err)
+	}
+	if got != SwapDone {
+		t.Fatalf("swap to a different account reported %q, want %q", got, SwapDone)
+	}
+}
+
+// A refused swap reports no outcome: the caller must not read one off a failure.
+func TestSwapOutcomeEmptyOnError(t *testing.T) {
+	f := newFixture(t)
+	f.seedLineage()
+	got, err := f.h.Swap(context.Background(), "ghost", "B")
+	if !errors.Is(err, ErrUnknownHost) {
+		t.Fatalf("err = %v, want ErrUnknownHost", err)
+	}
+	if got != "" {
+		t.Fatalf("outcome %q on a refused swap, want empty", got)
 	}
 }
 
@@ -132,7 +172,7 @@ func TestNoOpSwapLeavesVaultUntouched(t *testing.T) {
 	f.reg.SwapIn("A", id)
 	s := f.newScript("id-a", `{"refreshToken":"rt-a","accessToken":"a-fresh"}`)
 	s.serve(a)
-	if err := f.h.Swap(context.Background(), id, "A"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "A"); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := f.v.Get("A")
@@ -153,7 +193,7 @@ func TestHostViewShowsSwappedAccountDespiteStaleHeartbeat(t *testing.T) {
 	s := f.newScript("id-a", `{"refreshToken":"rt-a","accessToken":"a1"}`)
 	s.staleIdentity = true
 	s.serve(a)
-	if err := f.h.Swap(context.Background(), id, "B"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "B"); err != nil {
 		t.Fatal(err)
 	}
 	a.send(proto.TypeReport, "", proto.Report{ActiveIdentity: "id-a", CredsPresent: true,

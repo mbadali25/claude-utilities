@@ -54,7 +54,7 @@ func TestSwapWritebackOnlyFromHostsThatMaySpeakForTheAccount(t *testing.T) {
 			_, _, other := f.enrol("box2")
 			tc.setup(f, me, other)
 			f.newScript("id-a", `{"tok":"A-live"}`).serve(a)
-			if err := f.h.Swap(context.Background(), me, "B"); err != nil {
+			if _, err := f.h.Swap(context.Background(), me, "B"); err != nil {
 				t.Fatal(err)
 			}
 			if got := f.vaultBlock("A"); got != tc.wantBlock {
@@ -70,7 +70,7 @@ func TestSwapStoresOnlyTheClaudeAiOauthBlock(t *testing.T) {
 	a, _, id := f.enrol("box")
 	f.reg.SwapIn("A", id)
 	f.newScript("id-a", `{"claudeAiOauth":{"tok":"A-live"},"mcpOAuth":{"srv":"mcp-secret"}}`).serve(a)
-	if err := f.h.Swap(context.Background(), id, "B"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "B"); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.vaultBlock("A"); got != `{"tok":"A-live"}` {
@@ -94,7 +94,7 @@ func TestSwapRejectsBadBlocks(t *testing.T) {
 			a, _, id := f.enrol("box")
 			s := f.newScript("id-a", block)
 			s.serve(a)
-			err := f.h.Swap(context.Background(), id, "B")
+			_, err := f.h.Swap(context.Background(), id, "B")
 			if err == nil || errors.Is(err, ErrUnknownLiveAccount) {
 				t.Fatalf("got %v", err)
 			}
@@ -116,7 +116,7 @@ func TestSwapNoOpRecordsHolderAndIdentity(t *testing.T) {
 	}
 	a, _, id := f.enrol("box")
 	f.newScript("id-a", `{"refreshToken":"rt-a"}`).serve(a)
-	if err := f.h.Swap(context.Background(), id, "A"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "A"); err != nil {
 		t.Fatal(err)
 	}
 	if o := f.reg.OwnerOf("A"); o.HostID != id {
@@ -136,7 +136,7 @@ func TestSwapTimeoutIsUnknownOutcome(t *testing.T) {
 	s := f.newScript("id-a", `{"tok":"A-live"}`)
 	s.stopSwapRes = true
 	s.serve(a)
-	err := f.h.Swap(context.Background(), id, "B")
+	_, err := f.h.Swap(context.Background(), id, "B")
 	if !errors.Is(err, ErrSwapOutcomeUnknown) {
 		t.Fatalf("got %v", err)
 	}
@@ -159,7 +159,7 @@ func TestRevokeDuringSwapIsUnknownOutcome(t *testing.T) {
 	s.swapDelay = 400 * time.Millisecond
 	s.serve(a)
 	res := make(chan error, 1)
-	go func() { res <- f.h.Swap(context.Background(), id, "B") }()
+	go func() { _, swerr := f.h.Swap(context.Background(), id, "B"); res <- swerr }()
 	eventually(t, func() bool { order, _ := s.snapshot(); return len(order) == 2 })
 	if err := f.h.Revoke(id); err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestReconnectDuringSwapIsUnknownOutcome(t *testing.T) {
 	s.swapDelay = 400 * time.Millisecond
 	s.serve(a)
 	res := make(chan error, 1)
-	go func() { res <- f.h.Swap(context.Background(), id, "B") }()
+	go func() { _, swerr := f.h.Swap(context.Background(), id, "B"); res <- swerr }()
 	eventually(t, func() bool { order, _ := s.snapshot(); return len(order) == 2 })
 	f.dial("", proto.Hello{Token: token, HostName: "box", OS: "linux"})
 	if err := <-res; !errors.Is(err, ErrSwapOutcomeUnknown) {
@@ -251,7 +251,7 @@ func TestClaimedIdentityCannotOverwriteVaultBlock(t *testing.T) {
 	f.newScript("id-a", `{"tok":"B-forged"}`).serve(b)
 	b.send(proto.TypeReport, "", proto.Report{ActiveIdentity: "id-a", CredsPresent: true})
 	eventually(t, func() bool { return f.h.Hosts()[0].ActiveAccount == "A" })
-	if err := f.h.Swap(context.Background(), id, "B"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "B"); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.vaultBlock("A"); got != `{"tok":"A-stored"}` {
@@ -277,7 +277,7 @@ func TestNoOpSwapRecordsHolderOnlyOnLineageMatch(t *testing.T) {
 			}
 			a, _, id := f.enrol("box")
 			f.newScript("id-a", tc.block).serve(a)
-			if err := f.h.Swap(context.Background(), id, "A"); err != nil {
+			if _, err := f.h.Swap(context.Background(), id, "A"); err != nil {
 				t.Fatal(err)
 			}
 			if got := f.reg.OwnerOf("A").HostID == id; got != tc.wantOwn {
@@ -309,7 +309,7 @@ func TestNeedsReloadIgnoresClockSkew(t *testing.T) {
 	a.send(proto.TypeReport, "", proto.Report{ActiveIdentity: "id-a",
 		Sessions: []proto.Session{{PID: 1, ID: "old", StartedAt: skewed}}})
 	eventually(t, func() bool { return len(f.h.Hosts()[0].Sessions) == 1 })
-	if err := f.h.Swap(context.Background(), id, "B"); err != nil {
+	if _, err := f.h.Swap(context.Background(), id, "B"); err != nil {
 		t.Fatal(err)
 	}
 	if !f.h.Hosts()[0].Sessions[0].NeedsReload {
@@ -412,7 +412,7 @@ func TestSwapAwayDoesNotPromotePreviousHolderOfOldAccount(t *testing.T) {
 	f.reg.SwapIn("A", other)
 	f.reg.SwapIn("A", me) // me is Active, other holds a possibly stale copy
 	f.newScript("id-a", `{"tok":"A-live"}`).serve(a)
-	if err := f.h.Swap(context.Background(), me, "B"); err != nil {
+	if _, err := f.h.Swap(context.Background(), me, "B"); err != nil {
 		t.Fatal(err)
 	}
 	if o := f.reg.OwnerOf("A"); o.HostID == other {

@@ -702,17 +702,29 @@ func oauthBlock(raw json.RawMessage) (json.RawMessage, error) {
 	return raw, nil
 }
 
+// SwapOutcome says which of Swap's two successes happened. A swap that changes nothing is not an
+// error, but it is not a swap either, and the admin UI has to tell the operator which it was.
+type SwapOutcome string
+
+const (
+	// SwapDone means the target login was written to the host.
+	SwapDone SwapOutcome = "swapped"
+	// SwapAlreadyActive means the host already held the target account, so nothing was written.
+	SwapAlreadyActive SwapOutcome = "already-active"
+)
+
 // Swap makes hostID use accountID. Order: offline check, export the live block, match it to a
 // vault account (else ErrUnknownLiveAccount, nothing sent), write it back to the vault, then
-// send the target block. Ownership changes only after the agent reports success.
-func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
+// send the target block. Ownership changes only after the agent reports success. On any error the
+// outcome is empty: a caller must never read one off a failure.
+func (h *Hub) Swap(ctx context.Context, hostID, accountID string) (SwapOutcome, error) {
 	h.mu.Lock()
 	h.sweepLocked(h.now())
 	ho := h.hosts[hostID]
 	known := ho != nil && !ho.Revoked
 	h.mu.Unlock()
 	if !known {
-		return ErrUnknownHost
+		return "", ErrUnknownHost
 	}
 	ho.swapMu.Lock()
 	defer ho.swapMu.Unlock()
@@ -721,35 +733,35 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 	c := ho.c
 	h.mu.Unlock()
 	if c == nil {
-		return ErrAgentOffline
+		return "", ErrAgentOffline
 	}
 	target, ok := h.vault.Get(accountID)
 	if !ok {
-		return ErrUnknownAccount
+		return "", ErrUnknownAccount
 	}
 	if len(target.Block) == 0 {
-		return fmt.Errorf("%w: account has no stored login", ErrUnknownAccount)
+		return "", fmt.Errorf("%w: account has no stored login", ErrUnknownAccount)
 	}
 
 	raw, err := h.request(ctx, c, proto.TypeExportReq, proto.TypeExportRes, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var exp proto.ExportRes
 	if err := json.Unmarshal(raw, &exp); err != nil {
-		return fmt.Errorf("hub: bad export reply: %w", err)
+		return "", fmt.Errorf("hub: bad export reply: %w", err)
 	}
 	if exp.Err != "" {
-		return fmt.Errorf("hub: export failed: %s", logx.Redact(exp.Err))
+		return "", fmt.Errorf("hub: export failed: %s", logx.Redact(exp.Err))
 	}
 	block, err := oauthBlock(exp.Block)
 	if err != nil {
-		return err
+		return "", err
 	}
 	live, how := h.liveAccount(ho, exp.Identity, block)
 	if live == nil {
 		h.log.Warn("swap refused", "action", "swap", "host_id", hostID, "result", "unknown live account")
-		return ErrUnknownLiveAccount
+		return "", ErrUnknownLiveAccount
 	}
 	if live.ID == target.ID {
 		// Already active: nothing is written to the vault, not even a fresher block.
@@ -761,7 +773,7 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 		ho.noteSwapLocked(exp.Identity, target.ID, target.Identity)
 		h.mu.Unlock()
 		h.log.Info("swap no-op", "action", "swap", "host_id", hostID, "account", accountID, "result", "already active")
-		return nil
+		return SwapAlreadyActive, nil
 	}
 
 	// Write back only what this host may speak for: the Active holder. A Shared or Stale holder
@@ -781,7 +793,7 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 		live.Block = block
 		live.Updated = h.now()
 		if err := h.vault.Put(*live); err != nil {
-			return fmt.Errorf("hub: write back live login: %w", err)
+			return "", fmt.Errorf("hub: write back live login: %w", err)
 		}
 	}
 
@@ -795,15 +807,15 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 		h.mu.Unlock()
 		h.log.Warn("swap outcome unknown", "action", "swap", "host_id", hostID, "account", accountID,
 			"result", "unknown", logx.Err(err))
-		return fmt.Errorf("%w: %w", ErrSwapOutcomeUnknown, err)
+		return "", fmt.Errorf("%w: %w", ErrSwapOutcomeUnknown, err)
 	}
 	var res proto.SwapRes
 	if err := json.Unmarshal(raw, &res); err != nil {
-		return fmt.Errorf("hub: bad swap reply: %w", err)
+		return "", fmt.Errorf("hub: bad swap reply: %w", err)
 	}
 	if !res.OK {
 		h.log.Warn("swap failed", "action", "swap", "host_id", hostID, "account", accountID, "result", "agent refused", "reason", res.Reason)
-		return fmt.Errorf("hub: agent refused swap: %s", logx.Redact(res.Reason))
+		return "", fmt.Errorf("hub: agent refused swap: %s", logx.Redact(res.Reason))
 	}
 	// No SwapAway on the old account: it would promote the previous holder to Active with a
 	// possibly rotated-out copy. The vault already holds this host's fresh block, so the host stays
@@ -815,5 +827,5 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) error {
 	ho.noteSwapLocked(exp.Identity, target.ID, target.Identity)
 	h.mu.Unlock()
 	h.log.Info("swap done", "action", "swap", "host_id", hostID, "account", accountID, "result", "ok")
-	return nil
+	return SwapDone, nil
 }
