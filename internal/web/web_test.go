@@ -1104,6 +1104,98 @@ func TestUIHasAccountMenuHoldingTheSettingsActions(t *testing.T) {
 	}
 }
 
+// The main column is two tabs, so neither list pushes the other off the screen. The markup has to
+// carry the whole tablist contract: a reader on a screen reader gets the same two destinations a
+// sighted reader sees, and the inactive panel is really hidden rather than merely scrolled past.
+func TestUIMainColumnIsAccountsAndHostsTabs(t *testing.T) {
+	r := newRig(t)
+	s := r.login()
+	p := page(r, s)
+
+	for _, want := range []string{
+		`role="tablist"`, `id="tabs"`,
+		`id="tab-accounts"`, `id="tab-hosts"`,
+		`id="panel-accounts"`, `id="panel-hosts"`,
+		`id="tab-accounts-n"`, `id="tab-hosts-n"`,
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+
+	// Each tab: role, selection, the panel it controls, and a roving tabindex that leaves exactly
+	// one tab in the Tab order.
+	for _, c := range []struct{ id, selected, controls, tabindex string }{
+		{"tab-accounts", "true", "panel-accounts", `tabindex="0"`},
+		{"tab-hosts", "false", "panel-hosts", `tabindex="-1"`},
+	} {
+		tab := element(t, p, `id="`+c.id+`"`, ">")
+		for _, want := range []string{`role="tab"`, `aria-selected="` + c.selected + `"`,
+			`aria-controls="` + c.controls + `"`, c.tabindex} {
+			if !strings.Contains(tab, want) {
+				t.Errorf("%s lacks %q, got %q", c.id, want, tab)
+			}
+		}
+	}
+
+	// Each panel names its tab, and only the unselected one ships hidden.
+	for _, c := range []struct {
+		id, labelledby string
+		hidden         bool
+	}{
+		{"panel-accounts", "tab-accounts", false},
+		{"panel-hosts", "tab-hosts", true},
+	} {
+		panel := element(t, p, `id="`+c.id+`"`, ">")
+		for _, want := range []string{`role="tabpanel"`, `aria-labelledby="` + c.labelledby + `"`} {
+			if !strings.Contains(panel, want) {
+				t.Errorf("%s lacks %q, got %q", c.id, want, panel)
+			}
+		}
+		if got := strings.Contains(panel, "hidden"); got != c.hidden {
+			t.Errorf("%s hidden = %v, want %v (got %q)", c.id, got, c.hidden, panel)
+		}
+	}
+
+	// The lists themselves still live inside their panels, so the tab really switches the content.
+	if acc := element(t, p, `id="panel-accounts"`, "</section>"); !strings.Contains(acc, `id="accounts"`) {
+		t.Error("the accounts panel does not hold #accounts")
+	}
+	if hs := element(t, p, `id="panel-hosts"`, "</section>"); !strings.Contains(hs, `id="hosts"`) {
+		t.Error("the hosts panel does not hold #hosts")
+	}
+
+	// Keyboard: the arrows, Home/End and Enter/Space all drive the tablist.
+	for _, want := range []string{"'ArrowRight'", "'ArrowLeft'", "'Home'", "'End'", "'Enter'"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the tablist script lacks the %s key", want)
+		}
+	}
+	// The selected tab is remembered through the one layout-preference key, not a second store.
+	if !strings.Contains(p, "pref('tab'") {
+		t.Error("the selected tab is not read back from the layout preferences")
+	}
+
+	// Pending connections stays above the tabs: an unapproved agent must never sit behind a tab.
+	tabsAt, pendAt := strings.Index(p, `id="tabs"`), strings.Index(p, `id="pending-panel"`)
+	if pendAt < 0 || tabsAt < 0 || pendAt > tabsAt {
+		t.Errorf("pending connections is not above the tab bar (pending at %d, tabs at %d)", pendAt, tabsAt)
+	}
+	// web_test.go's empty-queue test reads #pending-panel up to the first </section>, so that
+	// element must stay free of nested sections.
+	if inner := element(t, p, `id="pending-panel"`, "</section>"); strings.Contains(inner, "<section") {
+		t.Error("#pending-panel now nests a <section>, which breaks the empty-queue assertion")
+	}
+
+	// The sidebar host jump-list and the two section folds it drove are gone: with a Hosts tab they
+	// only duplicated the tab's own content.
+	for _, gone := range []string{`id="hostnav"`, `data-fold="hosts"`, `data-fold="sidehosts"`} {
+		if strings.Contains(p, gone) {
+			t.Errorf("index.html still carries the pre-tabs sidebar host list %q", gone)
+		}
+	}
+}
+
 func TestUnknownHubErrorIsGenericBadGateway(t *testing.T) {
 	r := newRig(t)
 	r.fh.swapErr = errors.New("boom detail-that-stays-in-the-log")
