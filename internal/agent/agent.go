@@ -213,6 +213,13 @@ type agent struct {
 	scan      func(context.Context) ([]proto.Session, error)
 	readBack  func(path string) (json.RawMessage, error)
 	replace   func(path string, block json.RawMessage, onPrev func(json.RawMessage) error) (string, error)
+
+	// Add-account sign-in (login.go). At most one job is live.
+	login                               loginRunner
+	urlTimeout, jobTimeout, exitTimeout time.Duration
+	loginMu                             sync.Mutex
+	logins                              map[string]*loginJob
+	loginWG                             sync.WaitGroup
 }
 
 func newAgent(c Config, log *slog.Logger) *agent {
@@ -222,6 +229,8 @@ func newAgent(c Config, log *slog.Logger) *agent {
 		delay: NextDelay, identity: func() string { return readIdentity(claudeJSONPath()) },
 		scan: sessions.Scan, readBack: credfile.ReadBlock,
 		replace: credfile.ReplaceWith,
+		login:   execRunner{}, logins: map[string]*loginJob{},
+		urlTimeout: defaultURLTimeout, jobTimeout: defaultJobTimeout, exitTimeout: defaultExitTimeout,
 	}
 }
 
@@ -256,6 +265,7 @@ func Run(ctx context.Context, c Config) error {
 }
 
 func (a *agent) run(ctx context.Context) error {
+	cleanStaleLogins(a.cfg.StateDir) // a crash can leave a throwaway sign-in dir behind
 	if err := a.recoverJournal(); err != nil {
 		a.log.Error("swap recovery failed", "action", "recover", "result", "failed", logx.Err(err))
 	}
@@ -324,6 +334,7 @@ func (a *agent) session(ctx context.Context) error {
 		a.beat(sctx, s)
 	}()
 	defer wg.Wait()
+	defer a.loginWG.Wait() // sign-in jobs kill their child and remove their dir before the session returns
 	defer cancel()
 
 	for {
@@ -361,13 +372,27 @@ func (a *agent) beat(ctx context.Context, s *sess) {
 
 func (a *agent) handle(ctx context.Context, s *sess, env proto.Envelope) error {
 	switch env.Type {
-	case proto.TypeExportReq, proto.TypeSwapReq:
+	case proto.TypeExportReq, proto.TypeSwapReq, proto.TypeLoginStart, proto.TypeLoginCode, proto.TypeLoginCancel:
 		if env.ID == "" {
 			a.log.Warn("request without id", "action", env.Type, "result", "ignored")
 			return nil
 		}
 	default:
 		a.log.Debug("unhandled message", "action", logx.Redact(env.Type), "result", "ignored")
+		return nil
+	}
+	switch env.Type {
+	case proto.TypeLoginStart:
+		a.startLogin(ctx, s, env.ID)
+		return nil
+	case proto.TypeLoginCode:
+		var lc proto.LoginCode
+		if json.Unmarshal(env.Body, &lc) != nil || a.loginCode(env.ID, lc.Code) != nil {
+			a.loginReply(ctx, s, env.ID, "no sign-in is waiting for a code")
+		}
+		return nil
+	case proto.TypeLoginCancel:
+		a.cancelLogin(env.ID)
 		return nil
 	}
 	if env.Type == proto.TypeExportReq {
