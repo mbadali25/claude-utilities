@@ -26,6 +26,9 @@ const (
 	configEnv   = "CLAUDE_CONFIG_DIR"
 	backupExt   = ".json"
 	backupStamp = "20060102T150405.000000000Z"
+	// staleLockAge is how old a .swaplock must be before it is treated as left
+	// behind by a crashed process and reclaimed. A swap takes milliseconds.
+	staleLockAge = 2 * time.Minute
 )
 
 var (
@@ -165,7 +168,7 @@ func ReadBlock(path string) (json.RawMessage, error) {
 		return nil, err
 	}
 	b, ok := findOAuth(entries)
-	if !ok {
+	if !ok || string(bytes.TrimSpace(b)) == "null" {
 		return nil, ErrNoBlock
 	}
 	return b, nil
@@ -196,17 +199,29 @@ func ValidateBlock(b json.RawMessage) error {
 	return nil
 }
 
+// acquire takes the swap lock. A lock older than staleLockAge is assumed to
+// belong to a crashed process and is reclaimed.
 func acquire(path string) (release func(), err error) {
 	lock := path + lockSuffix
-	f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
+	for attempt := 0; attempt < 3; attempt++ {
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			f.Close()
+			return func() { os.Remove(lock) }, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("credfile: lock: %w", err)
+		}
+		st, serr := os.Stat(lock)
+		if serr != nil {
+			continue // lock vanished between open and stat; retry
+		}
+		if time.Since(st.ModTime()) < staleLockAge {
 			return nil, ErrBusy
 		}
-		return nil, fmt.Errorf("credfile: lock: %w", err)
+		os.Remove(lock)
 	}
-	f.Close()
-	return func() { os.Remove(lock) }, nil
+	return nil, ErrBusy
 }
 
 func hashFile(path string) ([sha256.Size]byte, error) {
@@ -220,26 +235,60 @@ func hashFile(path string) ([sha256.Size]byte, error) {
 	return sha256.Sum256(data), nil
 }
 
+// isObject reports whether b is a valid JSON object.
+func isObject(b []byte) bool {
+	t := bytes.TrimSpace(b)
+	return len(t) > 0 && t[0] == '{' && json.Valid(t)
+}
+
+// resolvePath follows a symlinked credentials file so the swap replaces the
+// target, not the link. A path that does not exist yet is returned unchanged.
+func resolvePath(path string) string {
+	if r, err := filepath.EvalSymlinks(path); err == nil {
+		return r
+	}
+	return path
+}
+
 // Replace swaps only the claudeAiOauth block, after backing up the previous
-// block. It returns the backup path.
+// block. It returns the backup path. The block must be a JSON object; callers
+// should also run ValidateBlock. Backups hold old refresh tokens at 0600 in a
+// 0700 directory, are capped at backupKeep, and are retained after success by
+// design so a bad swap can be undone. On Windows mode bits are not enforced;
+// files inherit the parent directory's ACL.
+//
+// Residual race: Claude Code can write the file between the final hash check
+// and the rename. ErrChangedDuringSwap narrows that window but cannot close it
+// without a cross-process lock Claude Code does not take.
 func Replace(path string, block json.RawMessage) (string, error) {
-	if !json.Valid(block) {
-		return "", errors.New("credfile: new block is not valid JSON")
+	if !isObject(block) {
+		return "", errors.New("credfile: new block is not a JSON object")
 	}
 	return swap(path, block, true)
 }
 
 // Restore puts the block saved in backup back into the credentials file.
+// backup must live inside the credentials file's .swap-backups directory.
 func Restore(path, backup string) error {
-	data, err := os.ReadFile(backup)
+	path = resolvePath(path)
+	bd, err1 := filepath.Abs(filepath.Join(filepath.Dir(path), backupDir))
+	ba, err2 := filepath.Abs(backup)
+	if err1 != nil || err2 != nil {
+		return errors.New("credfile: backup path not resolvable")
+	}
+	rel, err := filepath.Rel(bd, ba)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return errors.New("credfile: backup is outside the backup directory")
+	}
+	data, err := os.ReadFile(ba)
 	if err != nil {
 		return fmt.Errorf("credfile: read backup: %w", err)
 	}
 	data = bytes.TrimSpace(data)
 	var block json.RawMessage
 	if string(data) != "null" {
-		if !json.Valid(data) {
-			return errors.New("credfile: backup is not valid JSON")
+		if !isObject(data) {
+			return errors.New("credfile: backup is not a JSON object")
 		}
 		block = data
 	}
@@ -248,6 +297,7 @@ func Restore(path, backup string) error {
 }
 
 func swap(path string, block json.RawMessage, withBackup bool) (backup string, err error) {
+	path = resolvePath(path)
 	release, err := acquire(path)
 	if err != nil {
 		return "", err
@@ -271,27 +321,32 @@ func swap(path string, block json.RawMessage, withBackup bool) (backup string, e
 		}
 	}
 
+	// A clean abort before the rename deletes the backup it just wrote so
+	// failed attempts do not evict real history from the capped set.
+	abort := func(e error) (string, error) {
+		if backup != "" {
+			os.Remove(backup)
+		}
+		return "", e
+	}
 	out, err := encodeTop(setOAuth(entries, block))
 	if err != nil {
-		return backup, err
+		return abort(err)
 	}
-	mode := os.FileMode(0o600)
-	if st, serr := os.Stat(path); serr == nil {
-		mode = st.Mode().Perm()
-	}
-	tmp, err := writeTemp(filepath.Dir(path), out, mode)
+	// Always 0600: never inherit a looser mode from the existing file.
+	tmp, err := writeTemp(filepath.Dir(path), out, 0o600)
 	if err != nil {
-		return backup, err
+		return abort(err)
 	}
 	beforeRenameFn()
 	after, herr := hashFile(path)
 	if herr != nil {
 		os.Remove(tmp)
-		return backup, fmt.Errorf("credfile: re-read: %w", herr)
+		return abort(fmt.Errorf("credfile: re-read: %w", herr))
 	}
 	if after != before {
 		os.Remove(tmp)
-		return backup, ErrChangedDuringSwap
+		return abort(ErrChangedDuringSwap)
 	}
 	if err := renameFn(tmp, path); err != nil {
 		os.Remove(tmp)
@@ -354,13 +409,16 @@ func writeBackup(dir string, prev json.RawMessage) (string, error) {
 		if !errors.Is(err, os.ErrExist) {
 			return "", fmt.Errorf("credfile: create backup: %w", err)
 		}
-		name = filepath.Join(bdir, fmt.Sprintf("%s-%d%s", nowFn().UTC().Format(backupStamp), i, backupExt))
+		name = filepath.Join(bdir, fmt.Sprintf("%s-%06d%s", nowFn().UTC().Format(backupStamp), i, backupExt))
 	}
-	pruneBackups(bdir)
+	pruneBackups(bdir, filepath.Base(name))
 	return name, nil
 }
 
-func pruneBackups(bdir string) {
+// pruneBackups keeps the newest backupKeep files, never removing keep (the
+// backup just written). Names sort by stem so "X" < "X-000001" < "X-000002";
+// sorting the raw name would put "X-1.json" before "X.json" ('-' < '.').
+func pruneBackups(bdir, keep string) {
 	ents, err := os.ReadDir(bdir)
 	if err != nil {
 		return
@@ -371,9 +429,14 @@ func pruneBackups(bdir string) {
 			names = append(names, e.Name())
 		}
 	}
-	sort.Strings(names)
+	stem := func(n string) string { return strings.TrimSuffix(n, backupExt) }
+	sort.Slice(names, func(a, b int) bool { return stem(names[a]) < stem(names[b]) })
 	for len(names) > backupKeep {
-		os.Remove(filepath.Join(bdir, names[0]))
-		names = names[1:]
+		i := 0
+		if names[0] == keep {
+			i = 1
+		}
+		os.Remove(filepath.Join(bdir, names[i]))
+		names = append(names[:i], names[i+1:]...)
 	}
 }
