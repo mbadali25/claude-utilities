@@ -75,11 +75,28 @@ func Fingerprint(h Hello) string {
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:])[:8])
 }
 
+// Session is one running Claude Code session on a host. Every field after StartedAt is
+// additive and omitempty, so an older agent that sends none of them still decodes.
+//
+// Name, Cwd and RemoteName are agent-supplied text that may name a person or a path: they
+// are UI-only and must never be logged (logx would drop the key anyway). Nothing here is a
+// credential, so Session needs no masking LogValue.
 type Session struct {
 	PID       int       `json:"pid"`
 	ID        string    `json:"id"`
 	Cwd       string    `json:"cwd"`
 	StartedAt time.Time `json:"startedAt"`
+	// Name is the session's own name, as `/rename` sets it (sessions file field "name").
+	Name string `json:"name,omitempty"`
+	// RemoteName is a remote-control name, kept separate from Name. Claude Code 2.1.318
+	// writes no such field, so this is normally empty; it exists so a future one surfaces
+	// without another protocol change.
+	RemoteName string `json:"remoteName,omitempty"`
+	// Status is the session's own activity word ("idle", "busy"); empty when unreported.
+	Status string `json:"status,omitempty"`
+	// RemoteControl is true when the session is bound to a remote-control bridge. It is
+	// derived from the sessions file's bridgeSessionId; the id itself never leaves the host.
+	RemoteControl bool `json:"remoteControl,omitempty"`
 }
 
 type Report struct {

@@ -25,16 +25,37 @@ import (
 var ErrNotImplemented = errors.New("sessions: scan not implemented on this OS")
 
 // record is one session file. procStart is kept for liveness checks only.
+//
+// Name is the session's own name: Claude Code 2.1.318 writes it to the sessions file as
+// "name" (with "nameSource" saying whether it came from `/rename` or was derived), so a
+// name never requires reading a transcript. Only this file is read.
+//
+// RemoteName has no producer in 2.1.318 — the sessions file carries no remote-control name
+// — so it decodes as empty; it is read so a future field surfaces without a parser change.
+// BridgeSessionID is the one remote-control marker the file does carry. It may be JSON
+// null, which leaves it empty, and only the derived boolean leaves the host.
 type record struct {
-	PID       int    `json:"pid"`
-	SessionID string `json:"sessionId"`
-	Cwd       string `json:"cwd"`
-	StartedAt int64  `json:"startedAt"` // unix ms
-	ProcStart string `json:"procStart"`
+	PID             int    `json:"pid"`
+	SessionID       string `json:"sessionId"`
+	Cwd             string `json:"cwd"`
+	StartedAt       int64  `json:"startedAt"` // unix ms
+	ProcStart       string `json:"procStart"`
+	Name            string `json:"name"`
+	RemoteName      string `json:"remoteName"`
+	Status          string `json:"status"`
+	BridgeSessionID string `json:"bridgeSessionId"`
 }
 
 func (r record) session() proto.Session {
-	return proto.Session{PID: r.PID, ID: r.SessionID, Cwd: r.Cwd, StartedAt: time.UnixMilli(r.StartedAt)}
+	return proto.Session{
+		PID: r.PID, ID: r.SessionID, Cwd: r.Cwd, StartedAt: time.UnixMilli(r.StartedAt),
+		// A whitespace-only name is no name: the UI falls back to the pid rather than
+		// rendering a blank, invisible row heading.
+		Name:          strings.TrimSpace(r.Name),
+		RemoteName:    strings.TrimSpace(r.RemoteName),
+		Status:        strings.TrimSpace(r.Status),
+		RemoteControl: strings.TrimSpace(r.BridgeSessionID) != "",
+	}
 }
 
 func parseRecords(raw []byte) ([]record, error) {

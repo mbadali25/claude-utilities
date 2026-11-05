@@ -187,7 +187,19 @@
   details.sess summary { cursor:pointer; color:var(--mut); font-size:.88rem; min-height:32px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   details.sess summary:hover { color:var(--fg); }
   details.sess ul { list-style:none; margin:6px 0 0; padding:0; display:grid; gap:6px; font-size:.82rem; }
-  details.sess li { padding:6px 8px; background:var(--sunk); border-radius:6px; overflow-wrap:anywhere; display:flex; gap:8px; justify-content:space-between; align-items:center; flex-wrap:wrap; }
+  /* A session stacks: its name heads the row, pid and cwd sit under it, and the restart
+     command comes last. A grid, not a flex row, so a long name cannot push the chips off. */
+  details.sess li { padding:7px 9px; background:var(--sunk); border-radius:6px; display:grid; gap:3px; min-width:0; }
+  details.sess li .srow { display:flex; gap:6px; align-items:center; flex-wrap:wrap; min-width:0; }
+  /* The name is the row's heading. It stays on one line and truncates; the full name is in
+     its title attribute, so nothing is lost. min-width:0 is what lets it shrink to ellipsis. */
+  .sname { font-weight:650; color:var(--fg); font-size:.88rem; min-width:0; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* An unnamed session is headed by its pid, muted so a real name always reads stronger. */
+  .sname.nameless { font-weight:550; color:var(--mut); }
+  .smeta { color:var(--mut); display:flex; gap:6px; align-items:baseline; flex-wrap:wrap; min-width:0; }
+  .smeta .scwd { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  /* A remote-control name is a name, not a path, so it keeps the body font. */
+  .smeta .srem { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .swap { display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-top:1px solid var(--line); padding-top:12px; min-height:56px; }
   /* 120px basis: select, Swap and Revoke share one row in a 300px card instead of Revoke wrapping alone. */
   .swap select { flex:1 1 120px; min-width:0; }
@@ -824,6 +836,63 @@
   }
 
   function sessKey(h) { return 'sess.' + h.hostId; }
+
+  // shortCwd keeps the last two path segments, so a deep path reads as a place without
+  // filling the row. Both separators appear: hosts are Windows and Linux. The full path
+  // stays in the element's title.
+  function shortCwd(cwd) {
+    var parts = String(cwd).split(/[\\/]+/).filter(function (p) { return p !== ''; });
+    if (parts.length <= 2) return cwd;
+    return '…/' + parts.slice(-2).join('/');
+  }
+  // STATUS_CAP bounds the status word: it is agent-supplied, and a chip is not a place for
+  // a paragraph. The name is not capped here - it truncates by CSS and keeps its full title.
+  var STATUS_CAP = 24;
+  // sessionItem renders one session: its name heading first, then pid and cwd, then the
+  // restart command. Every value goes in through el()/textContent, never innerHTML, because
+  // a name, a cwd and a status all arrive from the agent.
+  function sessionItem(s) {
+    var li = el('li');
+    var head = el('div', undefined, 'srow');
+    var named = !!s.name;
+    var heading = el('span', named ? s.name : 'pid ' + s.pid, 'sname' + (named ? '' : ' nameless'));
+    // A truncated name must still be readable in full, and the title is also what a
+    // screen-reader user hears when the text is clipped.
+    if (named) heading.title = s.name;
+    head.appendChild(heading);
+    if (s.status) {
+      var st = chip(String(s.status).slice(0, STATUS_CAP));
+      // "busy" on its own does not say what it describes, and the other chips do. The label
+      // is hidden text rather than aria-label: a span carries no role, and aria-label on a
+      // role-less element is not reliably exposed.
+      st.insertBefore(el('span', 'Status: ', 'sr'), st.firstChild);
+      head.appendChild(st);
+    }
+    if (s.remoteControl) head.appendChild(chip('Remote control', undefined, 'info'));
+    if (s.needsReload) head.appendChild(chip('Needs reload', 'warn', 'warn'));
+    li.appendChild(head);
+
+    // pid and cwd are secondary: the pid only repeats here when the name heads the row.
+    var meta = el('div', undefined, 'smeta');
+    if (named) meta.appendChild(el('span', 'pid ' + s.pid));
+    if (s.cwd) {
+      var cw = el('span', shortCwd(s.cwd), 'scwd');
+      cw.title = s.cwd;
+      meta.appendChild(cw);
+    }
+    // A remote-control name is a separate field from the session's own name. Claude Code
+    // writes none today, so this line normally does not appear.
+    if (s.remoteName) {
+      var rn = el('span', 'remote: ' + s.remoteName, 'srem');
+      rn.title = s.remoteName;
+      meta.appendChild(rn);
+    }
+    if (meta.childNodes.length) li.appendChild(meta);
+
+    // Nothing can reload a running session's login, so hand over the restart command.
+    if (s.restartCommand) li.appendChild(restartLine(s.restartCommand));
+    return li;
+  }
   function hostCard(h) {
     var c = el('article', undefined, 'card'); c.dataset.host = h.hostId; c.tabIndex = -1;
     var top = el('div', undefined, 'row between');
@@ -860,13 +929,7 @@
       if (stale) sm.appendChild(chip(stale === 1 ? '1 needs reload' : stale + ' need reload', 'warn', 'warn'));
       d.appendChild(sm);
       var ul = el('ul');
-      h.sessions.forEach(function (s) {
-        var li = el('li'); li.appendChild(el('span', (s.cwd || 'pid ' + s.pid)));
-        if (s.needsReload) li.appendChild(chip('Needs reload', 'warn', 'warn'));
-        // Nothing can reload a running session's login, so hand over the restart command.
-        if (s.restartCommand) li.appendChild(restartLine(s.restartCommand));
-        ul.appendChild(li);
-      });
+      h.sessions.forEach(function (s) { ul.appendChild(sessionItem(s)); });
       d.appendChild(ul);
       c.appendChild(d);
     }

@@ -25,7 +25,10 @@ import (
 
 func init() {
 	// Audit and operational fields; none carries a secret, an email or a payload.
-	logx.Allow("host_name", "os", "source_ip", "fingerprint")
+	// namedCount and remoteCount are counts of sessions, never a session's name or cwd:
+	// those may carry a person's name or a path and are never logged. (sessionCount is
+	// allowlisted by logx itself.)
+	logx.Allow("host_name", "os", "source_ip", "fingerprint", "namedCount", "remoteCount")
 }
 
 const (
@@ -152,6 +155,30 @@ type host struct {
 	// it had before the swap. swapFrom is that stale identity, swapTarget the account swapped in and
 	// swapIdent its identity; while reports still say swapFrom, the login is swapTarget's. In memory only.
 	swapFrom, swapTarget, swapIdent string
+	// tally is the last logged session census, so a report that changes nothing logs nothing:
+	// reports arrive on every heartbeat. In memory only.
+	tally sessionTally
+}
+
+// sessionTally counts a host's reported sessions. Counts only: a session's name and cwd may
+// carry a person's name or a path, so neither is ever logged.
+type sessionTally struct {
+	total, named, remote int
+	// set is false on a host that has not reported yet, so the first report always logs.
+	set bool
+}
+
+func tallySessions(ss []proto.Session) sessionTally {
+	t := sessionTally{set: true, total: len(ss)}
+	for _, s := range ss {
+		if s.Name != "" || s.RemoteName != "" {
+			t.named++
+		}
+		if s.RemoteControl {
+			t.remote++
+		}
+	}
+	return t
 }
 
 // noteSwapLocked remembers that account (identity ident) was put on the host while the agent
@@ -442,6 +469,12 @@ func (h *Hub) touch(c *conn, rep *proto.Report) {
 		} else {
 			ho.forgetSwapLocked() // the identity changed since (a manual login): trust it again
 		}
+	}
+	// Reports arrive on every heartbeat, so the census is logged only when it changes.
+	if t := tallySessions(rep.Sessions); t != ho.tally {
+		ho.tally = t
+		h.log.Info("host sessions changed", "host_id", ho.ID, "action", "report",
+			"sessionCount", t.total, "namedCount", t.named, "remoteCount", t.remote)
 	}
 	live := map[string]struct{}{}
 	for _, s := range rep.Sessions {

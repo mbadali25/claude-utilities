@@ -511,12 +511,24 @@ func (s *server) accounts(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// sessionJSON is one running session for the Hosts tab. Name, RemoteName and Cwd are
+// agent-supplied text that may carry a person's name or a path, so they go to the browser
+// and nowhere else: the UI writes them with textContent and nothing here is logged.
 type sessionJSON struct {
-	PID         int       `json:"pid"`
-	ID          string    `json:"id"`
-	Cwd         string    `json:"cwd"`
-	StartedAt   time.Time `json:"startedAt"`
-	NeedsReload bool      `json:"needsReload"`
+	PID int    `json:"pid"`
+	ID  string `json:"id"`
+	// Name is the session's own name (`/rename`); empty when it has none.
+	Name string `json:"name,omitempty"`
+	// RemoteName is a remote-control name, separate from Name. Claude Code writes none
+	// today, so it is normally absent.
+	RemoteName string `json:"remoteName,omitempty"`
+	// Status is the session's activity word ("idle", "busy"), empty when unreported.
+	Status string `json:"status,omitempty"`
+	// RemoteControl says the session is bound to a remote-control bridge.
+	RemoteControl bool      `json:"remoteControl,omitempty"`
+	Cwd           string    `json:"cwd"`
+	StartedAt     time.Time `json:"startedAt"`
+	NeedsReload   bool      `json:"needsReload"`
 	// RestartCommand is set only on a session that needs a reload, for the operator to copy.
 	RestartCommand string `json:"restartCommand,omitempty"`
 }
@@ -557,7 +569,9 @@ func (s *server) hosts(w http.ResponseWriter, _ *http.Request) {
 		j := hostJSON{HostID: h.HostID, Name: h.Name, OS: h.OS, Online: h.Online, ActiveAccount: h.ActiveAccount,
 			SwapBlocked: h.SwapBlocked, Sessions: make([]sessionJSON, 0, len(h.Sessions))}
 		for _, x := range h.Sessions {
-			j.Sessions = append(j.Sessions, sessionJSON{PID: x.PID, ID: x.ID, Cwd: x.Cwd, StartedAt: x.StartedAt,
+			j.Sessions = append(j.Sessions, sessionJSON{PID: x.PID, ID: x.ID, Name: x.Name,
+				RemoteName: x.RemoteName, Status: x.Status, RemoteControl: x.RemoteControl,
+				Cwd: x.Cwd, StartedAt: x.StartedAt,
 				NeedsReload: x.NeedsReload, RestartCommand: restartCommand(x)})
 			j.NeedsReload = j.NeedsReload || x.NeedsReload
 		}
