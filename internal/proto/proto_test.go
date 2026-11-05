@@ -107,7 +107,8 @@ func TestDecodeRejectsOversize(t *testing.T) {
 
 func TestSwapResOnlyOKAndReason(t *testing.T) {
 	rt := reflect.TypeOf(SwapRes{})
-	if rt.NumField() != 2 || rt.Field(0).Name != "OK" || rt.Field(1).Name != "Reason" {
+	// Home is a fixed code (HomeLive, HomeMoved), never a path; it joined OK and Reason in v8.
+	if rt.NumField() != 3 || rt.Field(0).Name != "OK" || rt.Field(1).Name != "Reason" || rt.Field(2).Name != "Home" {
 		t.Fatalf("SwapRes fields changed; review for credential leakage: %v", rt)
 	}
 }

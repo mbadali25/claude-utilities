@@ -97,6 +97,9 @@ type Config struct {
 	Pin       string `json:"pin"`
 	CredsPath string `json:"credsPath,omitempty"`
 	StateDir  string `json:"-"`
+	// homeState is set by Run from resolveCredsPathState: proto.HomeLive, proto.HomeMoved or
+	// proto.ReasonNoHome. Empty (a Config built directly) means the normal live home.
+	homeState string
 }
 
 const mask = "[redacted]"
@@ -270,20 +273,29 @@ func newAgent(c Config, log *slog.Logger) *agent {
 // The recorded path stays the fallback for a unit that passes no home at all - that host ran before
 // and must keep running. A divergence is logged as a code: these paths name users' homes.
 func resolveCredsPath(c Config, log *slog.Logger) (string, error) {
+	p, _, err := resolveCredsPathState(c, log)
+	return p, err
+}
+
+// resolveCredsPathState is resolveCredsPath plus the code a swap reports: proto.HomeLive,
+// proto.HomeMoved (the recorded path named another home, the live one won) or proto.ReasonNoHome
+// (no home resolved, the recorded path is the fallback and a swap is refused).
+func resolveCredsPathState(c Config, log *slog.Logger) (string, string, error) {
 	live, err := credfile.ResolvePath()
 	if err != nil {
 		if c.CredsPath == "" {
-			return "", err
+			return "", "", err
 		}
 		log.Warn("no home to resolve the credentials path from; using the recorded one",
 			"action", "config", "result", "fallback", "reason", proto.ReasonNoHome)
-		return c.CredsPath, nil
+		return c.CredsPath, proto.ReasonNoHome, nil
 	}
 	if c.CredsPath != "" && c.CredsPath != live {
 		log.Warn("recorded credentials path is not in this run's home; following the home",
 			"action", "config", "result", "ignored", "reason", reasonHomeMoved)
+		return live, proto.HomeMoved, nil
 	}
-	return live, nil
+	return live, proto.HomeLive, nil
 }
 
 // Run connects, reports and serves swap requests until ctx ends. It redials with NextDelay
@@ -293,11 +305,11 @@ func Run(ctx context.Context, c Config) error {
 	if c.Token == "" {
 		return ErrNotEnrolled
 	}
-	p, err := resolveCredsPath(c, logx.New(os.Stderr))
+	p, state, err := resolveCredsPathState(c, logx.New(os.Stderr))
 	if err != nil {
 		return err
 	}
-	c.CredsPath = p
+	c.CredsPath, c.homeState = p, state
 	if c.StateDir == "" {
 		d, err := DefaultStateDir()
 		if err != nil {
@@ -551,6 +563,9 @@ func (a *agent) applySwap(req proto.SwapReq) proto.SwapRes {
 		a.log.Warn("swap refused", "action", "swap", "account", logx.Redact(req.Account), "result", reason, logx.Err(err))
 		return proto.SwapRes{Reason: logx.Redact(reason)}
 	}
+	if a.cfg.homeState == proto.ReasonNoHome {
+		return fail(proto.ReasonNoHome, nil)
+	}
 	if err := credfile.ValidateBlock(req.Block); err != nil {
 		if errors.Is(err, credfile.ErrRefreshExpired) {
 			return fail(reasonExpired, nil)
@@ -606,7 +621,11 @@ func (a *agent) applySwap(req proto.SwapReq) proto.SwapRes {
 		a.log.Warn("journal clear failed", "action", "swap", "result", "continuing", logx.Err(err))
 	}
 	a.log.Info("swap applied", "action", "swap", "account", logx.Redact(req.Account), "result", "ok")
-	return proto.SwapRes{OK: true}
+	home := a.cfg.homeState
+	if home != proto.HomeMoved {
+		home = proto.HomeLive
+	}
+	return proto.SwapRes{OK: true, Home: home}
 }
 
 func sameBlock(a, b json.RawMessage) bool {
