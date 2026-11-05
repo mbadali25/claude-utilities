@@ -63,13 +63,20 @@ const (
 	// inboxSendTimeout bounds the whole dial-write-close, which runs off the calling goroutine. It
 	// is the only bound on Windows, where opening a pipe client either succeeds or fails at once.
 	inboxSendTimeout = 3 * time.Second
-	// inboxVerifyWindow and inboxVerifyPoll bound the read-back of the session's own name. Kept
-	// deliberately short: a repair over a host full of sessions pays this per renamed session, and
-	// the hub fails a target that has no verdict after 60 s. A rename frame is processed
-	// immediately, off the inbox's serialising chain, so the session writes its file promptly or
-	// not at all.
-	inboxVerifyWindow = 500 * time.Millisecond
-	inboxVerifyPoll   = 50 * time.Millisecond
+	// inboxVerifyWindow and inboxVerifyPoll bound the read-back of the session's own name.
+	//
+	// The arithmetic matters, because the agent handles hub frames SERIALLY on one connection: a
+	// slow command does not just delay its own reply, it holds up every later target and the
+	// heartbeat behind it. The hub fans out at most 256 targets per request (maxCommandTargets)
+	// and fails a target with no verdict 60 s after dispatch, so the whole burst has 60 s. A
+	// repair is three steps per session, which caps one burst at about 85 renames; at 400 ms each
+	// that is a ~34 s tail, inside the deadline with room for the other 170 targets.
+	//
+	// The window is only paid in full when the rename FAILED. The loop reads before it sleeps and
+	// polls every 25 ms, and the session processes a rename frame immediately rather than behind
+	// its queued messages, so a rename that works is normally confirmed in a poll or two.
+	inboxVerifyWindow = 400 * time.Millisecond
+	inboxVerifyPoll   = 25 * time.Millisecond
 	// maxSessionFileBytes bounds a <pid>.json read.
 	maxSessionFileBytes = 1 << 16
 	// maxKeyFileBytes mirrors the 4096-byte bound Claude Code itself puts on a key file.

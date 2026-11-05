@@ -240,6 +240,16 @@ says the ask reached the session and never that the remote name is fixed.
 If `name` did not change, the agent declines (`unsupported-inbox-no-change`) and the relaunch
 fallback answers. It does not retry, and it does not claim anything.
 
+**Why the window is 400 ms and not longer.** The agent handles hub frames **serially** on one
+connection, so a slow mechanism does not merely delay its own reply — it holds up every later
+target and the heartbeat behind it. One request fans out to at most 256 targets and the whole burst
+has 60 s, so a `repair` caps at about 85 renames; at 400 ms each that is a ~34 s tail, inside the
+deadline with room for the other 170 targets. The full window is only paid when the rename
+**failed**: the loop reads before it sleeps, polls every 25 ms, and a rename frame is processed
+immediately rather than behind the session's queued messages, so a rename that works normally costs
+one read and no wait. `TestInboxVerifyBudgetIsBoundedAndCostsNothingOnSuccess` holds both halves. If
+the fan-out bound ever grows, this arithmetic is what has to be redone.
+
 #### A key file does not prove a live session
 
 A **cleanly exited** session unlinks its own socket and key file. A session **killed** with

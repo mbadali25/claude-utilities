@@ -403,6 +403,43 @@ func TestInboxKeyDecodesAStringOrNumberProcStart(t *testing.T) {
 	}
 }
 
+// The agent handles hub frames serially, so a mechanism that waited too long would hold up every
+// later target and the heartbeat behind it. The read-back's worst case is bounded, it is only paid
+// when the rename failed, and a rename that works costs one read and no sleep at all.
+func TestInboxVerifyBudgetIsBoundedAndCostsNothingOnSuccess(t *testing.T) {
+	// Failure: the full window, in inboxVerifyPoll steps, and no more.
+	f := newInboxFixture(t, nil)
+	var slept time.Duration
+	var naps int
+	f.m.sleep = func(d time.Duration) { slept += d; naps++ }
+	if res := f.m.Execute(f.task("never-taken")); res.Code != proto.CodeInboxNoChange {
+		t.Fatalf("res = %+v", res)
+	}
+	if slept > inboxVerifyWindow {
+		t.Fatalf("slept %v, over the %v window", slept, inboxVerifyWindow)
+	}
+	if want := int(inboxVerifyWindow / inboxVerifyPoll); naps > want {
+		t.Fatalf("polled %d times, want at most %d", naps, want)
+	}
+	// 85 renames is the worst a repair burst can hold (256 targets / 3 steps per session); the
+	// whole burst has the hub's 60 s, so the tail has to leave room for the other targets.
+	if tail := 85 * inboxVerifyWindow; tail > 40*time.Second {
+		t.Fatalf("85 failed renames would block the connection for %v", tail)
+	}
+
+	// Success: the loop reads before it sleeps, so a session that took the name costs no wait.
+	g := newInboxFixture(t, nil)
+	g.renameOnSend = "taken"
+	var gNaps int
+	g.m.sleep = func(time.Duration) { gNaps++ }
+	if res := g.m.Execute(g.task("taken")); res.Status != proto.StatusDelivered {
+		t.Fatalf("res = %+v", res)
+	}
+	if gNaps != 0 {
+		t.Fatalf("slept %d times on a rename that worked", gNaps)
+	}
+}
+
 func TestInboxFramesAreOneJSONObjectPerLine(t *testing.T) {
 	b, err := inboxFrames(testPeerToken, testSession, "a name")
 	if err != nil {
