@@ -18,6 +18,13 @@
       "reach": "local",
       "why": "a syntax error in a harness script makes every gate report a failure that is not in the code. reach: local - bash -n parses only." },
 
+    { "id": "install-agent-scripts",
+      "paths": ["scripts/install-agent.sh", "scripts/install-agent.ps1", "_verify/cases/install-agent-sh.sh"],
+      "run": ["bash -n scripts/install-agent.sh", "bash _verify/cases/install-agent-sh.sh"],
+      "seconds": 2,
+      "reach": "local",
+      "why": "bash -n parses install-agent.sh, then the stub case runs it against fake agent/systemctl binaries in a throwaway HOME (36 checks, exit 77 = skipped). NOT covered: scripts/install-agent.ps1 has no automated check (no PowerShell parse step in this gate; Windows install is verified by hand per docs/runbooks). reach: local - no network, no live host, nothing outside a temp dir is touched." },
+
     { "id": "gitattributes-eol",
       "paths": [".gitattributes", "_verify/cases/gitattributes-check.sh"],
       "run": ["bash _verify/cases/gitattributes-check.sh"],

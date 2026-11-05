@@ -16,8 +16,8 @@ For Codex and any agent that reads AGENTS.md. Claude Code does not load it (CLAU
 - `bash -n _verify/smoke.sh`
 - `bash -n _verify/run-all.sh`
 - `bash -n _verify/cases/go-checks.sh`
-- `bash _verify/cases/gitattributes-check.sh`
-- ...and 1 more in `.crew/verify.json`.
+- `bash -n scripts/install-agent.sh`
+- ...and 3 more in `.crew/verify.json`.
 
 ## Hard rules
 <!-- crew:keep:start -->
