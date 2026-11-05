@@ -4,6 +4,7 @@ package credfile
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"os/user"
 )
@@ -12,6 +13,10 @@ const isWindows = true
 
 // syncDir is a no-op on Windows: directories cannot be fsynced.
 func syncDir(string) {}
+
+// preserveOwner is a no-op on Windows: there is no uid/gid to hand over, and
+// restrictACL already pins the new file's ACL to the current user.
+func preserveOwner(string, os.FileInfo) error { return nil }
 
 // restrictACL removes inherited access and grants the current user full control
 // only, so token files do not inherit the parent directory's ACL. For a

@@ -8,7 +8,7 @@ import (
 
 func TestKnownIdentityReason(t *testing.T) {
 	for _, c := range []string{ReasonNoClaudeJSON, ReasonNoOAuthAccount, ReasonUnreadable,
-		ReasonConfigDirElsewhere, ReasonHomeMismatch, ReasonParseError, ReasonNoCredentials} {
+		ReasonConfigDirElsewhere, ReasonHomeMismatch, ReasonParseError, ReasonNoCredentials, ReasonNoHome} {
 		if !KnownIdentityReason(c) {
 			t.Errorf("KnownIdentityReason(%q) = false, want true", c)
 		}

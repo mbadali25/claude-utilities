@@ -517,6 +517,20 @@ Every directory from the home down must be owned by that user (or at least trave
 
 **`claude auth login` signed in, but the host still shows no identity.** The sign-in wrote `~/.claude.json` in *your* home, and the agent reads only the home it was installed for. Check which that is with `systemctl show -p User claude-swap-agent.service` (or `grep User= /etc/systemd/system/claude-swap-agent.service`), then sign in as that user. Running `claude auth login` as root only helps if the agent runs as root.
 
+**The card says "No home directory".** The agent reported `no_home`: `HOME` is empty in its environment and `CLAUDE_CONFIG_DIR` is unset, so there is no `~/.claude.json` to read and no account to report. systemd passes **no** environment to a unit, so a system unit must carry it:
+
+```bash
+systemctl show -p Environment -p User claude-swap-agent.service   # expect HOME=<the user's home>
+```
+
+`scripts/install-agent.sh` already writes `Environment="HOME=$run_home"`, so a unit without it was written by hand or by an older installer — re-run the installer with `--system --reconfigure` rather than patching the unit. Keep `CLAUDESWAP_STATE_DIR` and `CLAUDE_CONFIG_DIR` identical at `enrol` and `run`, or `run` will not find `agent.json` either.
+
+The same note applies to any wrapper that execs the agent: `env -i` or a `cron` entry leaves `HOME` unset.
+
+What this check **cannot** catch is `HOME` pointing at the *wrong* home. systemd defaults a root service to `HOME=/root`, which resolves fine and simply has no login in it, so the host reads as "no identity" with no reason attached. `systemctl show -p User -p Environment` is still the answer; the user and the home must be the same person's.
+
+Worth being explicit about what a swap then does to that user: it replaces **only** the `claudeAiOauth` block of that user's `~/.claude/.credentials.json`, leaving every other key (`mcpOAuth` among them) byte for byte, and it hands the rewritten file, the `.swap-backups` directory and the backups back to that user's uid and gid when the agent runs as root. It never touches `~/.claude.json`, which is why the card can keep showing the pre-swap account for a while.
+
 **The service runs but the host stays offline.** The agent dials out and pins the certificate, so check the pin first — a wrong `--pin` fails every connection. Re-run the installer with the pin the server prints now; a regenerated server certificate changes it.
 
 ## Tests

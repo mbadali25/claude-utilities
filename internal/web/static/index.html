@@ -828,6 +828,7 @@
   var IDENTITY_WHY = {
     no_claude_json: { why: 'No Claude Code account is signed in on this host.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
     no_oauth_account: { why: 'Claude Code has run on this host, but no account is signed in.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
+    no_home: { why: 'The agent has no home directory, so it cannot read the signed-in account.', fix: 'A system service needs Environment=HOME=<the user\'s home> in its unit (install-agent.sh sets it), then a restart. See docs/runbooks/linux-agent-install.md.' },
     no_credentials: { why: 'This host holds no Claude Code login for the agent to read.', fix: SIGN_IN_FIX, cmd: LOGIN_CMD },
     parse_error: { why: "This host's Claude Code state file is not readable as JSON, so it names no account.", fix: 'Sign in again as the user the agent runs as to rewrite it.', cmd: LOGIN_CMD },
     home_mismatch: { why: 'The user the agent runs as has no account signed in; another user on this host does.', fix: 'Run the agent as that user, or sign in as the user the agent runs as.', cmd: LOGIN_CMD },

@@ -75,8 +75,8 @@ func (p identityProbe) path() (string, bool) {
 // email address; the code never is.
 func (p identityProbe) run() (string, string) {
 	path, viaEnv := p.path()
-	if path == "" { // no home directory: there is nowhere for a login to be
-		return "", proto.ReasonNoClaudeJSON
+	if path == "" { // no home directory and no CLAUDE_CONFIG_DIR: there is nowhere for a login to be
+		return "", proto.ReasonNoHome
 	}
 	data, err := os.ReadFile(filepath.Clean(path))
 	switch {

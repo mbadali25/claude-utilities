@@ -76,7 +76,7 @@ func TestIdentityProbeReasons(t *testing.T) {
 		}
 	})
 	t.Run("no home", func(t *testing.T) {
-		if id, reason := (identityProbe{}).run(); id != "" || reason != proto.ReasonNoClaudeJSON {
+		if id, reason := (identityProbe{}).run(); id != "" || reason != proto.ReasonNoHome {
 			t.Fatalf("got %q/%q", id, reason)
 		}
 	})

@@ -20,6 +20,10 @@ const (
 	ReasonParseError = "parse_error"
 	// ReasonNoCredentials: an account is named but the host holds no usable login block.
 	ReasonNoCredentials = "no_credentials"
+	// ReasonNoHome: the agent has no home directory to read ~/.claude.json from (HOME empty and
+	// CLAUDE_CONFIG_DIR unset), as with a root system unit lacking Environment=HOME=. It cannot
+	// catch HOME pointing at the wrong user's home, which reads as no_claude_json.
+	ReasonNoHome = "no_home"
 )
 
 // KnownIdentityReason reports whether code is one of the identity reasons this version knows.
@@ -27,7 +31,7 @@ const (
 func KnownIdentityReason(code string) bool {
 	switch code {
 	case ReasonNoClaudeJSON, ReasonNoOAuthAccount, ReasonUnreadable, ReasonConfigDirElsewhere,
-		ReasonHomeMismatch, ReasonParseError, ReasonNoCredentials:
+		ReasonHomeMismatch, ReasonParseError, ReasonNoCredentials, ReasonNoHome:
 		return true
 	}
 	return false
