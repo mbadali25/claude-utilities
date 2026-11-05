@@ -34,9 +34,9 @@ Scope is a separate axis, so every command works at every scope:
 **"Apply to all needs-reload sessions"** is therefore `{"command":"repair","scope":"all",
 "onlyNeedsReload":true,"confirm":true}`.
 
-`rename_remote` takes a `name` only at `session` scope. At `host` or `all` scope a single name is
-refused (`ErrNameNotAllowed`): every session would end up with the same title. Use `repair`, which
-derives each name from the session's own.
+`rename_remote` works at `session` scope only, where `name` is required. At `host` or `all` scope it
+is refused outright (`ErrNameNotAllowed`, 400): one name would give every session the same title,
+and no name would fail every target. Use `repair`, which derives each name from the session's own.
 
 ## Statuses
 

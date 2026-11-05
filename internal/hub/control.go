@@ -254,10 +254,12 @@ func validateCommandRequest(req *CommandRequest) error {
 	req.Name = proto.CleanRemoteName(req.Name)
 	if req.Command == proto.CmdRenameRemote {
 		switch {
-		case req.Scope == ScopeSession && req.Name == "":
-			return ErrNameRequired
-		case req.Scope != ScopeSession && req.Name != "":
+		case req.Scope != ScopeSession:
+			// One name for many sessions would give them all the same title, and no name at all
+			// would fail every target. Either way the composite is what the operator wants.
 			return ErrNameNotAllowed
+		case req.Name == "":
+			return ErrNameRequired
 		}
 	}
 	if req.Command != proto.CmdRenameRemote {
@@ -503,6 +505,9 @@ func (h *Hub) sweepCommandsLocked(now time.Time) {
 			h.forgetCommandLocked(id, b)
 		}
 	}
+	// Sweeping is the one path every reader shares, so the history bound is applied here too,
+	// not only when a new request comes in.
+	h.pruneCommandsLocked()
 }
 
 // pruneCommandsLocked drops the oldest finished requests once the history is over its bound.

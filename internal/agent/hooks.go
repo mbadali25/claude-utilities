@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"claude-utilities/internal/proto"
 )
 
 // The host-side hook. `agent hooks install` puts one entry per event into the user's
@@ -300,12 +302,12 @@ func instructionText(entries []queueEntry) string {
 	b.WriteString(" for this session, because its login was swapped while it was running.\n")
 	for _, e := range entries {
 		switch e.Command {
-		case "reload_plugins":
+		case proto.CmdReloadPlugins:
 			b.WriteString("- Run /reload-plugins now.\n")
-		case "remote_control_enable":
+		case proto.CmdRemoteControlEnable:
 			b.WriteString("- Remote Control cannot be enabled from outside a running session. " +
 				"Tell the user this session must be restarted with `claude --resume <id> --remote-control <name>`.\n")
-		case "rename_remote":
+		case proto.CmdRenameRemote:
 			name := e.Name
 			if name == "" {
 				name = "(no name given)"

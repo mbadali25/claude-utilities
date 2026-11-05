@@ -7,6 +7,7 @@ import (
 
 	"claude-utilities/internal/hub"
 	"claude-utilities/internal/logx"
+	"claude-utilities/internal/proto"
 )
 
 // POST /api/sessions/command: the one route that asks a session to do something. It needs a
@@ -159,7 +160,7 @@ func (s *server) sessionCommand(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusTooManyRequests, "too many command requests; wait a minute")
 		return
 	}
-	if len(in.Name) > maxLabel*4 || len(in.RequestID) > maxCommandRequestID {
+	if len(in.Name) > proto.MaxRemoteName*4 || len(in.RequestID) > maxCommandRequestID {
 		writeErr(w, http.StatusBadRequest, "name or requestId too long")
 		return
 	}
@@ -171,10 +172,11 @@ func (s *server) sessionCommand(w http.ResponseWriter, r *http.Request) {
 		commandError(w, err)
 		return
 	}
-	// Audit: the command, the scope and the counts. Never the name, the session's name or the hint.
-	logger.Info("session command accepted", "action", "command", "command", v.Command,
-		"scope", string(v.Scope), "targetCount", v.Counts.Total, "queuedCount", v.Counts.Queued,
-		"failedCount", v.Counts.Failed, "result", "accepted", "source_ip", ip)
+	// The hub logs the dispatch itself with the same audit fields, so this route logs only what
+	// the hub never sees: which address asked, at debug level so an operator polling a UI does
+	// not drown the log.
+	logger.Debug("session command accepted", "action", "command", "command", v.Command,
+		"scope", string(v.Scope), "targetCount", v.Counts.Total, "result", "accepted", "source_ip", ip)
 	writeJSON(w, http.StatusAccepted, requestView(v))
 }
 

@@ -158,7 +158,8 @@ func TestSessionCommandRejectsAnUnknownBodyFieldAndOversizeText(t *testing.T) {
 	s := r.login()
 	bodies := []string{
 		`{"command":"reload_plugins","scope":"session","host":"h-1","session":"s-1","extra":true}`,
-		`{"command":"rename_remote","scope":"session","host":"h-1","session":"s-1","name":"` + strings.Repeat("x", 600) + `"}`,
+		`{"command":"rename_remote","scope":"session","host":"h-1","session":"s-1","name":"` +
+			strings.Repeat("x", proto.MaxRemoteName*4+1) + `"}`,
 		`{"command":"reload_plugins","scope":"session","requestId":"` + strings.Repeat("r", 200) + `"}`,
 	}
 	for _, b := range bodies {
