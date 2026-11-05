@@ -112,7 +112,7 @@ func (t *cmdTarget) setLocked(status, code, mechanism, hint string, now time.Tim
 	if !proto.ValidCommandStatus(status) || t.terminal() {
 		return false
 	}
-	if status != proto.StatusQueued && statusRank(status) < statusRank(t.status) {
+	if statusRank(status) < statusRank(t.status) {
 		return false
 	}
 	t.status, t.updated = status, now

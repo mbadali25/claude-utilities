@@ -405,7 +405,7 @@
        which is when an operator wants it, and it never hides what the ask can and cannot do. -->
   <!-- A div, not a section: web_test.go reads #panel-hosts up to the first </section>, and a
        nested one would cut that short. The h2 still names it in the heading outline. -->
-  <div class="callout" id="ctl-repair" role="group" aria-labelledby="ctl-repair-h" hidden>
+  <div class="callout" id="ctl-repair" role="group" aria-labelledby="ctl-repair-h" tabindex="-1" hidden>
     <h2 id="ctl-repair-h">Sessions are still on an old login</h2>
     <p class="sub" id="ctl-repair-sub"></p>
     <div class="row wrap">
@@ -432,6 +432,7 @@
       <div class="stat"><dt>Low or out</dt><dd id="st-low">-</dd></div>
       <div class="stat" id="st-attn-box"><dt>Need attention</dt><dd id="st-attn">-</dd></div>
     </dl>
+    <button type="button" class="btn" id="st-attn-go" hidden>Show sessions needing reload</button>
   </section>
 
   <section class="panel" id="flt-acc" aria-labelledby="flt-h">
@@ -1192,11 +1193,19 @@
   function renderRepair() {
     var c = staleSessions();
     $('#ctl-repair').hidden = !c.sessions;
+    $('#st-attn-go').hidden = !c.sessions;
     if (!c.sessions) return;
     $('#ctl-repair-sub').textContent = c.sessions + (c.sessions === 1 ? ' session on ' : ' sessions on ') +
       c.hosts + (c.hosts === 1 ? ' host still ' : ' hosts still ') +
       (c.sessions === 1 ? 'carries' : 'carry') + ' the login from before the swap.';
   }
+  // The callout lives in the Hosts tab; this sidebar button is visible from either tab.
+  $('#st-attn-go').addEventListener('click', function () {
+    selectTab($('#tab-hosts'), false);
+    var c = $('#ctl-repair');
+    c.scrollIntoView({ block: 'center' });
+    c.focus();
+  });
   $('#ctl-repair-go').addEventListener('click', function () {
     var n = staleSessions().sessions;
     askConfirm('Apply to all needs-reload sessions',

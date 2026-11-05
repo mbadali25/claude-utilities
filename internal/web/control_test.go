@@ -242,6 +242,7 @@ func TestPageCarriesSessionControlSurface(t *testing.T) {
 		"'Reload all'", "'Enable remote on all'", "Apply to all needs-reload sessions",
 		// The regions they live in.
 		`id="ctl-repair"`, `id="ctl-repair-go"`, `id="ctl-repair-sub"`, `id="ctl-summary"`,
+		`id="st-attn-go"`, "selectTab($('#tab-hosts'), false)",
 		`id="ctl-confirm"`, `id="ctl-confirm-h"`, `id="ctl-confirm-body"`, `id="ctl-confirm-note"`,
 		`id="ctl-confirm-msg"`, `id="ctl-confirm-go"`,
 		`id="ctl-name"`, `id="ctl-name-form"`, `id="ctl-name-input"`, `id="ctl-name-hint"`,
