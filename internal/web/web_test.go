@@ -50,6 +50,26 @@ type fakeHub struct {
 	statusFn func(id string) (hub.AddView, error)
 	codeFn   func(id, code string) error
 	cancelFn func(id string) error
+
+	commandCalls []hub.CommandRequest
+	commandView  hub.CommandView
+	commandErr   error
+}
+
+func (f *fakeHub) Command(_ context.Context, req hub.CommandRequest) (hub.CommandView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commandCalls = append(f.commandCalls, req)
+	if f.commandErr != nil {
+		return hub.CommandView{}, f.commandErr
+	}
+	return f.commandView, nil
+}
+
+func (f *fakeHub) commands() []hub.CommandRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]hub.CommandRequest(nil), f.commandCalls...)
 }
 
 func (f *fakeHub) AddAccount(_ context.Context, host, label string) (string, error) {

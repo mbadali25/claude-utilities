@@ -120,7 +120,8 @@ func writeSettings(path string, m map[string]any) error {
 	data = append(data, '\n')
 	// #nosec G304 -- path comes from SettingsPath or an operator-supplied config dir
 	if prev, rerr := os.ReadFile(filepath.Clean(path)); rerr == nil {
-		if werr := os.WriteFile(path+backupSuffix, prev, 0o600); werr != nil {
+		// #nosec G306,G703 -- the backup sits beside the settings file the caller named, owner-only
+		if werr := os.WriteFile(filepath.Clean(path)+backupSuffix, prev, 0o600); werr != nil {
 			return fmt.Errorf("agent: write settings backup: %w", werr)
 		}
 	} else if !errors.Is(rerr, os.ErrNotExist) {

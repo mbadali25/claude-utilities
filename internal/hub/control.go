@@ -414,16 +414,20 @@ func (h *Hub) Command(ctx context.Context, req CommandRequest) (CommandView, err
 		"scope", string(req.Scope), "targetCount", v.Counts.Total, "queuedCount", v.Counts.Queued,
 		"failedCount", v.Counts.Failed, "result", "queued")
 
+	// The fan-out deliberately outlives the caller's context, which dies as soon as the HTTP
+	// response is written: WithoutCancel keeps the caller's values and drops its cancellation.
+	// Each send still ends at h.reqTimeout, at the connection's close, or at the request's
+	// deadline, which sweepCommandsLocked enforces.
+	sendCtx := context.WithoutCancel(ctx)
 	for hostID, targets := range byHost {
-		// One goroutine per host, targets sent in order: a host's agent answers one request at a
-		// time, and the request context dies with the HTTP response, so this runs detached.
-		go h.sendCommands(hostID, conns[hostID], targets)
+		// One goroutine per host, targets sent in order: a host's agent answers one at a time.
+		go h.sendCommands(sendCtx, hostID, conns[hostID], targets)
 	}
 	return v, nil
 }
 
 // sendCommands sends one host's targets in order and records each verdict.
-func (h *Hub) sendCommands(hostID string, c *conn, targets []*cmdTarget) {
+func (h *Hub) sendCommands(ctx context.Context, hostID string, c *conn, targets []*cmdTarget) {
 	for _, t := range targets {
 		if c == nil {
 			h.finishTarget(t, proto.StatusFailed, proto.CodeAgentOffline, "", "")
@@ -433,7 +437,7 @@ func (h *Hub) sendCommands(hostID string, c *conn, targets []*cmdTarget) {
 		req := proto.CommandReq{CommandID: t.id, Command: t.command, SessionID: t.sessionID,
 			PID: t.pid, Name: t.name}
 		h.mu.Unlock()
-		raw, err := h.request(context.Background(), c, proto.TypeCommandReq, proto.TypeCommandRes, req)
+		raw, err := h.request(ctx, c, proto.TypeCommandReq, proto.TypeCommandRes, req)
 		if err != nil {
 			code := proto.CodeTimeout
 			if errors.Is(err, ErrAgentOffline) {

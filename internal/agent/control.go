@@ -432,7 +432,7 @@ func (q *queue) confirmReported(ss []proto.SessionCommandStatus) {
 		}
 		keep := make([]queueEntry, 0, len(f.Entries))
 		for _, x := range f.Entries {
-			if !(x.DeliveredAt != nil && done[x.CommandID]) {
+			if x.DeliveredAt == nil || !done[x.CommandID] {
 				keep = append(keep, x)
 			}
 		}

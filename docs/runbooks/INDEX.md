@@ -4,6 +4,7 @@
 |---|---|
 | [claude-swap-e2e.md](claude-swap-e2e.md) | Walking the whole server-plus-agents flow by hand, with Matthew at the keyboard. Steps marked **[LIVE CREDS]** touch a real credentials file. |
 | [linux-agent-install.md](linux-agent-install.md) | Installing, verifying or removing the agent on a Linux host: build the binary, run `scripts/install-agent.sh`, enrol, systemd user unit, linger, troubleshooting, and the durable reverse SSH tunnels the hosts reach the server through. |
+| [session-control.md](session-control.md) | Asking a running session to reload plugins, enable Remote Control or carry a remote name: the commands, the scopes, which mechanism each one ends up using, what is honestly unsupported, and how to install or remove the host-side hook. |
 | [session-reload.md](session-reload.md) | A running Claude Code session still shows the old login after a swap and cannot reload it: the UI shows a Needs reload chip and a copyable restart command. |
 
 The Windows host install has no runbook of its own yet. `scripts/install-agent.ps1` takes the same environment variables as the Linux script (`CLAUDESWAP_DRY_RUN=1` shows what it would do) and ends with `agent install`, which registers the `ClaudeSwapAgent` logon task. It refuses to run with `CLAUDESWAP_STATE_DIR` set, because `schtasks` passes no environment and the task could only ever use the default state dir.
