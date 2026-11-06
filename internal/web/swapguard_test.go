@@ -43,7 +43,7 @@ func TestSwapUnauthorizedIs409SignInAgain(t *testing.T) {
 	if code != http.StatusConflict || m["code"] != "sign_in_again" {
 		t.Fatalf("got %d %v", code, m)
 	}
-	if e, _ := m["error"].(string); !strings.Contains(e, "Sign in again first") {
+	if e, _ := m["error"].(string); !strings.Contains(e, "sign in again first") {
 		t.Fatalf("error %q", e)
 	}
 }

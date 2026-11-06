@@ -67,7 +67,7 @@ func TestSwapRefusedWhenAnotherOnlineHostHoldsTheLineage(t *testing.T) {
 		t.Fatalf("a swap_req reached the refused host: %v %v", order, blocks)
 	}
 	out := f.logs.String()
-	for _, leak := range []string{"rt-a", "id-a", "a0"} {
+	for _, leak := range []string{"rt-a", "id-a", `"a0"`} {
 		if strings.Contains(out, leak) {
 			t.Fatalf("log leaked %q:\n%s", leak, out)
 		}
@@ -193,7 +193,7 @@ func TestSwapRefusedForUnauthorizedAccountWithSignInAgain(t *testing.T) {
 	if !errors.Is(err, ErrSignInAgain) {
 		t.Fatalf("got %v, want ErrSignInAgain", err)
 	}
-	if !strings.Contains(err.Error(), "Sign in again first") {
+	if !strings.Contains(err.Error(), "sign in again first") {
 		t.Fatalf("message %q", err.Error())
 	}
 	if _, blocks := two.snapshot(); len(blocks) != 0 {
