@@ -71,6 +71,65 @@ func TestSwapFollowsLiveHomeNotStoredCredsPath(t *testing.T) {
 	}
 }
 
+// The swap result tells the server which credentials file it wrote, as a code: the live home when
+// the recorded path agrees, home_moved when the recorded path named another home and the live one won.
+func TestSwapResultReportsWhichHomeItWrote(t *testing.T) {
+	live, other := t.TempDir(), t.TempDir()
+	liveCreds := filepath.Join(live, ".credentials.json")
+	otherCreds := filepath.Join(other, ".credentials.json")
+	writeCreds(t, liveCreds, testBlock("ACCESS-LIVE-HOME", future()))
+	t.Setenv(claudeConfigDirEnv, live)
+
+	for _, tc := range []struct{ name, recorded, want string }{
+		{"recorded path agrees", liveCreds, proto.HomeLive},
+		{"recorded path names another home", otherCreds, proto.HomeMoved},
+		{"nothing recorded", "", proto.HomeLive},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &syncBuf{}
+			p, state, err := resolveCredsPathState(Config{CredsPath: tc.recorded}, logx.New(logs))
+			if err != nil || p != liveCreds {
+				t.Fatalf("resolved %q, %v", p, err)
+			}
+			res := newAgent(Config{CredsPath: p, homeState: state, StateDir: t.TempDir()}, logx.New(logs)).
+				applySwap(proto.SwapReq{Block: testBlock(newSecret, future()), Account: "acct"})
+			if !res.OK || res.Home != tc.want {
+				t.Fatalf("result %+v, want OK with home %q", res, tc.want)
+			}
+			if strings.Contains(logs.String(), ".credentials.json") {
+				t.Fatalf("a path leaked into the log:\n%s", logs.String())
+			}
+		})
+	}
+}
+
+// With no home to resolve, the recorded path is only good enough to start and to read. A swap
+// would write to a home nobody can show is the live one, so it is refused with a code.
+func TestSwapRefusedWhenNoHomeResolves(t *testing.T) {
+	t.Setenv(claudeConfigDirEnv, "")
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	stored := filepath.Join(t.TempDir(), ".credentials.json")
+	writeCreds(t, stored, testBlock("ACCESS-STORED", future()))
+	before, err := os.ReadFile(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &syncBuf{}
+	p, state, err := resolveCredsPathState(Config{CredsPath: stored}, logx.New(logs))
+	if err != nil || p != stored {
+		t.Fatalf("got %q, %v", p, err)
+	}
+	res := newAgent(Config{CredsPath: p, homeState: state, StateDir: t.TempDir()}, logx.New(logs)).
+		applySwap(proto.SwapReq{Block: testBlock(newSecret, future()), Account: "acct"})
+	if res.OK || res.Reason != proto.ReasonNoHome {
+		t.Fatalf("result %+v, want a refusal with %q", res, proto.ReasonNoHome)
+	}
+	if after, _ := os.ReadFile(stored); !bytes.Equal(before, after) {
+		t.Fatal("the recorded file was rewritten")
+	}
+}
+
 // A stored path that agrees with the live home is the normal case and says nothing.
 func TestResolveCredsPathSilentWhenStoredPathAgrees(t *testing.T) {
 	dir := t.TempDir()

@@ -295,6 +295,8 @@
      the one answer the card's own data cannot show. */
   .acct-note { font-size:var(--fs2); color:var(--mut); }
   .acct-note.bad { color:var(--bad); }
+  /* An old stored login is a caution, not a failure: the same amber the Low windows and Stale chips use. */
+  .acct-note.warn { color:var(--warn); }
   .acct-note:empty { display:none; }
   /* An account whose login the endpoint refuses. The sentence says it in words and the primary
      button is the one way out, so it sits on the collapsed face where the card is scanned. */
@@ -374,10 +376,16 @@
      select, and the row reserves its height so the card does not jump when the verdict lands. */
   .swap .why, .swap .swapmsg { flex:1 1 100%; font-size:var(--fs1); }
   .swap .why { color:var(--mut); }
+  .swap .why:empty { display:none; }
+  /* The caution inside the open confirm: a stored login that is old enough to have expired. */
+  .confirm .cwarn { flex:1 1 100%; font-size:var(--fs1); color:var(--warn); background:var(--warn-bg);
+                    border-radius:var(--r); padding:var(--s3) var(--s4); }
   .swapmsg { display:flex; gap:var(--s3); align-items:baseline; color:var(--mut); }
   .swapmsg:empty { display:none; }
   .swapmsg.ok { color:var(--ok); }
   .swapmsg.bad { color:var(--bad); }
+  /* Swapped, with something the operator should know about (an old copy, an offline holder). */
+  .swapmsg.warn { color:var(--warn); }
   /* A no-op is neither good nor bad news, so it stays neutral rather than borrowing the ok green. */
   .swapmsg.info { color:var(--mut); }
   .swapmsg .dot { flex:none; width:7px; height:7px; border-radius:50%; background:currentColor; align-self:center; }
@@ -393,6 +401,7 @@
            box-shadow:var(--sh-pop); animation:toastin .18s ease-out; }
   .toast.ok { border-left-color:var(--ok); }
   .toast.bad { border-left-color:var(--bad); }
+  .toast.warn { border-left-color:var(--warn); }
   .toast .who { color:var(--mut); font-size:var(--fs1); }
   @keyframes toastin { from { opacity:0; transform:translateY(6px); } }
   @media (prefers-reduced-motion: reduce) {
@@ -1457,6 +1466,12 @@
     brief.appendChild(meter('7-day window', a.sevenDay));
     c.appendChild(brief);
 
+    // An old stored login: amber, on the face, because it decides whether a swap onto this account
+    // will come up signed in. A refused login says the stronger thing below instead.
+    if (a.stale && a.error !== 'unauthorized' && a.copyAgeHours != null) {
+      c.appendChild(el('p', 'Stored login is ' + a.copyAgeHours + ' h old. A swap onto it works only if its refresh token is still valid.', 'acct-note warn stale-copy'));
+    }
+
     // A refused login cannot recover by waiting: say so in words and offer the one fix, on the face.
     if (a.error === 'unauthorized') {
       var rs = el('div', undefined, 'acct-resign');
@@ -2211,7 +2226,7 @@
     if (!box) return;
     var key = 'h' + hostName;
     if (toastTimers[key]) { clearTimeout(toastTimers[key].t); toastTimers[key].n.remove(); }
-    var n = el('div', undefined, 'toast' + (st.kind === 'bad' ? ' bad' : st.kind === 'ok' ? ' ok' : ''));
+    var n = el('div', undefined, 'toast' + (st.kind === 'bad' ? ' bad' : st.kind === 'ok' ? ' ok' : st.kind === 'warn' ? ' warn' : ''));
     n.appendChild(el('div', hostName, 'who'));
     n.appendChild(el('div', st.text));
     box.appendChild(n);
@@ -2364,15 +2379,42 @@
     // The account the host already holds is marked rather than hidden: the operator can still see
     // where the host is. It is never the open selection, so the default press always changes
     // something.
+    // A refused login and an old stored copy are named in the option itself, so the choice is made
+    // knowing it. Neither is hidden: the server decides what is allowed.
     accountsCache.forEach(function (a) {
-      var o = el('option', a.id === h.activeAccount ? a.label + ' (current)' : a.label);
+      // The suffix is short because the closed select is narrow on a host card; the title says it in full.
+      var t = a.label, full = '';
+      if (a.id === h.activeAccount) t += ' (current)';
+      else if (a.error === 'unauthorized') { t += ' (refused)'; full = 'Anthropic refused the stored login: sign in again first'; }
+      else if (a.stale && a.copyAgeHours != null) { t += ' (' + a.copyAgeHours + ' h old)'; full = 'Stored login is ' + a.copyAgeHours + ' h old'; }
+      var o = el('option', t);
+      if (full) o.title = full;
       o.value = a.id; pick.appendChild(o);
     });
-    var other = accountsCache.filter(function (a) { return a.id !== h.activeAccount; })[0];
+    // The open selection is the first account the host does not hold, preferring one that can be
+    // swapped in without signing in again.
+    var others = accountsCache.filter(function (a) { return a.id !== h.activeAccount; });
+    var other = others.filter(function (a) { return a.error !== 'unauthorized'; })[0] || others[0];
     if (other) pick.value = other.id;
 
     var why = swapWhyNot(h, other);
     var go = el('button', 'Swap', 'btn primary'); go.type = 'button'; go.disabled = !!why;
+    // Why the CHOSEN account cannot be swapped in; it follows the select, unlike the host-wide reason.
+    var pwhy = el('div', undefined, 'why'); pwhy.id = 'swappick-' + h.hostId;
+    function pickWhy() {
+      var a = accountsCache.filter(function (x) { return x.id === pick.value; })[0];
+      if (a && a.id !== h.activeAccount && a.error === 'unauthorized') {
+        return 'Sign in again first: Anthropic refused the stored login for ' + a.label + '. Use Sign in again on its account card.';
+      }
+      return '';
+    }
+    function syncPick() {
+      if (why || (swapState[h.hostId] && swapState[h.hostId].working)) return; // those already own the button
+      var w = pickWhy();
+      pwhy.textContent = w; go.disabled = !!w;
+      if (w) go.setAttribute('aria-describedby', pwhy.id); else go.removeAttribute('aria-describedby');
+    }
+    pick.addEventListener('change', syncPick);
     var rv = el('button', 'Revoke', 'btn danger'); rv.type = 'button';
     var reason = el('div', why, 'why');
     if (why) {
@@ -2393,6 +2435,7 @@
       confirming = null; sw.textContent = '';
       sw.appendChild(pick); sw.appendChild(go); sw.appendChild(rv);
       if (why) sw.appendChild(reason);
+      sw.appendChild(pwhy);
       sw.appendChild(verdict);
     }
     go.addEventListener('click', function () {
@@ -2402,6 +2445,10 @@
       confirming = h.hostId; sw.textContent = '';
       var box = el('div', undefined, 'confirm');
       box.appendChild(el('div', 'Swap ' + h.name + ' to ' + label + '?', 'q'));
+      var sel = accountsCache.filter(function (x) { return x.id === pick.value; })[0];
+      if (sel && sel.stale && sel.copyAgeHours != null) {
+        box.appendChild(el('div', 'Stored login is ' + sel.copyAgeHours + ' h old. Its access token has probably expired; the swap signs the host in only if the refresh token is still valid.', 'cwarn'));
+      }
       var yes = el('button', 'Confirm swap', 'btn primary'); yes.type = 'button';
       var no = el('button', 'Cancel', 'btn'); no.type = 'button';
       no.addEventListener('click', function () { idle(); go.focus(); });
@@ -2420,6 +2467,12 @@
             var done = (j && j.outcome) === 'already-active'
               ? { kind: 'info', text: 'No change: ' + h.name + ' already holds ' + label + '.' }
               : { kind: 'ok', text: 'Swapped ' + h.name + ' to ' + label + '.' };
+            // Cautions and where the agent wrote ride on the same line. Any caution turns the
+            // verdict amber: the swap happened, and the operator should still read the rest.
+            if (done.kind === 'ok') {
+              var extra = swapNotes(j);
+              if (extra.text) { done.text += ' ' + extra.text; if (extra.warn) done.kind = 'warn'; }
+            }
             // refresh() first, so the rebuild that follows carries both the new host data and the
             // verdict; setSwap then forces the paint a no-op would otherwise never trigger.
             return refresh().then(function () { setSwap(h.hostId, done); notify(h.name, done); });
@@ -2435,8 +2488,23 @@
       if (!confirm('Revoke ' + h.name + '?')) return;
       call('POST', '/api/hosts/' + encodeURIComponent(h.hostId) + '/revoke').then(refresh).catch(function (e) { say(e.message); });
     });
+    syncPick();
     idle();
     return sw;
+  }
+
+  // swapNotes turns a swap answer's warnings and home code into one sentence each. Host names come
+  // from agents and go in as text only. home is a fixed code, never a path.
+  function swapNotes(j) {
+    var parts = [], warn = false;
+    ((j && j.warnings) || []).forEach(function (w) {
+      warn = true;
+      if (w.code === 'stale_copy') parts.push('Stored login was ' + w.ageHours + ' h old: sign in again if the host comes up signed out.');
+      else if (w.code === 'holder_offline') parts.push(w.host + ' is offline and may still hold this login.');
+    });
+    if (j && j.home === 'home_moved') { warn = true; parts.push('Wrote to the live home (the recorded path differs).'); }
+    else if (j && j.home === 'live_home') parts.push('Wrote to the live home.');
+    return { text: parts.join(' '), warn: warn };
   }
 
   function renderHosts(force) {

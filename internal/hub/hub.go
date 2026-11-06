@@ -3,6 +3,8 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +30,8 @@ func init() {
 	// namedCount and remoteCount are counts of sessions, never a session's name or cwd:
 	// those may carry a person's name or a path and are never logged. (sessionCount is
 	// allowlisted by logx itself.)
-	logx.Allow("host_name", "os", "source_ip", "fingerprint", "namedCount", "remoteCount")
+	// "holder" is the host id of the host that blocked a swap.
+	logx.Allow("host_name", "os", "source_ip", "fingerprint", "namedCount", "remoteCount", "holder")
 }
 
 const (
@@ -60,7 +63,53 @@ var (
 	// may or may not have applied it. Ownership is left unchanged and the host's identity is
 	// cleared until its next report.
 	ErrSwapOutcomeUnknown = errors.New("hub: swap outcome unknown")
+	// ErrHeldElsewhere means the target account's refresh token is live on another online host, so
+	// swapping it in would put one refresh token on two holders and the first refresh would
+	// invalidate the other. It is always a *HeldError.
+	ErrHeldElsewhere = errors.New("hub: account held by another host")
+	// ErrSignInAgain means the account's stored login was rejected (usage state "unauthorized"), so
+	// swapping it onto a host would only sign that host out.
+	ErrSignInAgain = errors.New("sign in again first: the stored login for this account was rejected")
 )
+
+// HeldError is ErrHeldElsewhere with the holder's name. Host is agent-supplied text; the message
+// redacts it and the log never carries it (only the host id).
+type HeldError struct{ Host string }
+
+func (e *HeldError) Error() string {
+	return "Held by " + logx.Redact(e.Host) + ": swap that host to another account first, or sign in again"
+}
+func (e *HeldError) Is(target error) bool { return target == ErrHeldElsewhere }
+
+// Swap warning codes. A warning never blocks a swap; the UI shows it beside the result.
+const (
+	// WarnStaleCopy: the stored login is older than StaleAfter, so its access token has probably
+	// expired. The refresh token may still be good, which is why this only warns.
+	WarnStaleCopy = "stale_copy"
+	// WarnHolderOffline: an offline host last held this account's lineage and may still hold it.
+	WarnHolderOffline = "holder_offline"
+)
+
+// DefaultStaleAfter is how old a stored login may be before it is flagged. Access tokens last
+// about eight hours, so six leaves margin.
+const DefaultStaleAfter = 6 * time.Hour
+
+// SwapWarning is one non-blocking caution on a successful swap.
+type SwapWarning struct {
+	Code string
+	// Host names the offline holder for WarnHolderOffline.
+	Host string
+	// AgeHours is the stored login's age in whole hours for WarnStaleCopy.
+	AgeHours int
+}
+
+// SwapResult is what a swap reports: the outcome, the cautions, and the agent's home code.
+type SwapResult struct {
+	Outcome  SwapOutcome
+	Warnings []SwapWarning
+	// Home is the proto.Home* code the agent reported; empty from an older agent.
+	Home string
+}
 
 type connState int
 
@@ -165,6 +214,21 @@ type host struct {
 	// tally is the last logged session census, so a report that changes nothing logs nothing:
 	// reports arrive on every heartbeat. In memory only.
 	tally sessionTally
+	// lineage is the SHA-256 of the refresh token this host last held, as far as the hub knows: set
+	// from an export and from a swap the host accepted, cleared when a swap's outcome is unknown.
+	// It survives a disconnect, which is how an offline holder is still named. A hash, never the
+	// token. In memory only: after a server restart nothing is known until the next export.
+	lineage string
+}
+
+// lineageHash fingerprints a login block's refresh token; "" when it has none.
+func lineageHash(block json.RawMessage) string {
+	rt := refreshToken(block)
+	if rt == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(rt))
+	return hex.EncodeToString(sum[:])
 }
 
 // sessionTally counts a host's reported sessions. Counts only: a session's name and cwd may
@@ -224,6 +288,10 @@ type Hub struct {
 	onSwap func(accountID string)
 	// onReplaced is told when an account's stored login was replaced (SetOnReplaced).
 	onReplaced func(accountID string)
+	// unauthorized says an account's stored login was rejected (SetUnauthorized); nil means never.
+	unauthorized func(accountID string) bool
+	// staleAfter is the age past which a stored login is flagged (SetStaleAfter).
+	staleAfter time.Duration
 
 	mu         sync.Mutex
 	hosts      map[string]*host
@@ -247,7 +315,7 @@ type Hub struct {
 func New(v *vault.Vault, r *ownership.Registry, tokensPath string, log *slog.Logger) *Hub {
 	h := &Hub{
 		vault: v, reg: r, tokensPath: tokensPath, log: log.With("component", "hub"),
-		now: time.Now, reqTimeout: requestTimout,
+		now: time.Now, reqTimeout: requestTimout, staleAfter: DefaultStaleAfter,
 		ipOf: func(r *http.Request) string {
 			host, _, err := net.SplitHostPort(r.RemoteAddr)
 			if err != nil {
@@ -779,6 +847,78 @@ const (
 // send the target block. Ownership changes only after the agent reports success. On any error the
 // outcome is empty: a caller must never read one off a failure.
 func (h *Hub) Swap(ctx context.Context, hostID, accountID string) (SwapOutcome, error) {
+	var out SwapResult
+	return h.swap(ctx, hostID, accountID, &out)
+}
+
+// SwapEx is Swap plus the cautions and the agent's home code. On an error the result is empty.
+func (h *Hub) SwapEx(ctx context.Context, hostID, accountID string) (SwapResult, error) {
+	var out SwapResult
+	o, err := h.swap(ctx, hostID, accountID, &out)
+	if err != nil {
+		return SwapResult{}, err
+	}
+	out.Outcome = o
+	return out, nil
+}
+
+// SetUnauthorized installs the check for an account whose stored login the usage endpoint
+// rejected. Swapping onto such an account is refused with ErrSignInAgain.
+func (h *Hub) SetUnauthorized(fn func(accountID string) bool) {
+	h.mu.Lock()
+	h.unauthorized = fn
+	h.mu.Unlock()
+}
+
+// SetStaleAfter sets the age past which a stored login is flagged; d <= 0 restores the default.
+func (h *Hub) SetStaleAfter(d time.Duration) {
+	if d <= 0 {
+		d = DefaultStaleAfter
+	}
+	h.mu.Lock()
+	h.staleAfter = d
+	h.mu.Unlock()
+}
+
+// StaleAfter is the age past which a stored login is flagged.
+func (h *Hub) StaleAfter() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.staleAfter
+}
+
+// holdersLocked names the other hosts that may hold target's refresh-token lineage: those whose
+// last known lineage is the target's, and those with no known lineage that ownership still lists as
+// the target's Active holder. A host the hub swapped to another account is neither, even though
+// ownership keeps listing it (see the comment above SwapIn in Swap). Callers hold h.mu.
+func (h *Hub) holdersLocked(self string, target vault.Account) (online, offline []*host) {
+	tl := lineageHash(target.Block)
+	using := h.reg.HostsUsing(target.ID)
+	for _, ho := range h.hosts {
+		if ho.ID == self || ho.Revoked {
+			continue
+		}
+		held := tl != "" && ho.lineage == tl
+		if st, listed := using[ho.ID]; ho.lineage == "" && listed && st == ownership.Active {
+			held = true
+		}
+		switch {
+		case !held:
+		case ho.c != nil:
+			online = append(online, ho)
+		default:
+			offline = append(offline, ho)
+		}
+	}
+	byName := func(s []*host) {
+		sort.Slice(s, func(i, j int) bool { return s[i].Name < s[j].Name || (s[i].Name == s[j].Name && s[i].ID < s[j].ID) })
+	}
+	byName(online)
+	byName(offline)
+	return online, offline
+}
+
+func (h *Hub) swap(ctx context.Context, hostID, accountID string, out *SwapResult) (SwapOutcome, error) {
 	h.mu.Lock()
 	h.sweepLocked(h.now())
 	ho := h.hosts[hostID]
@@ -819,6 +959,11 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) (SwapOutcome, 
 	if err != nil {
 		return "", err
 	}
+	h.mu.Lock()
+	if l := lineageHash(block); l != "" {
+		ho.lineage = l
+	}
+	h.mu.Unlock()
 	live, how := h.liveAccount(ho, exp.Identity, block)
 	if live == nil {
 		h.log.Warn("swap refused", "action", "swap", "host_id", hostID, "result", "unknown live account")
@@ -835,6 +980,33 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) (SwapOutcome, 
 		h.mu.Unlock()
 		h.log.Info("swap no-op", "action", "swap", "host_id", hostID, "account", accountID, "result", "already active")
 		return SwapAlreadyActive, nil
+	}
+
+	// Guards, in order of how certain the refusal is. A rejected stored login would only sign the
+	// host out. A refresh token live on another online host would end up on two holders, and the
+	// first refresh invalidates the other. Neither check logs a token, an identity or a host name.
+	h.mu.Lock()
+	unauth, staleAfter := h.unauthorized, h.staleAfter
+	h.mu.Unlock()
+	if unauth != nil && unauth(target.ID) {
+		h.log.Warn("swap refused", "action", "swap", "host_id", hostID, "account", accountID, "result", "refused", "reason", "unauthorized")
+		return "", ErrSignInAgain
+	}
+	h.mu.Lock()
+	online, offline := h.holdersLocked(hostID, target)
+	h.mu.Unlock()
+	if len(online) > 0 {
+		h.log.Warn("swap refused", "action", "swap", "host_id", hostID, "account", accountID, "result", "refused",
+			"reason", "held_elsewhere", "holder", online[0].ID)
+		return "", &HeldError{Host: online[0].Name}
+	}
+	for _, ho2 := range offline[:min(len(offline), 1)] {
+		out.Warnings = append(out.Warnings, SwapWarning{Code: WarnHolderOffline, Host: ho2.Name})
+	}
+	if !target.Updated.IsZero() {
+		if age := h.now().Sub(target.Updated); age > staleAfter {
+			out.Warnings = append(out.Warnings, SwapWarning{Code: WarnStaleCopy, AgeHours: int(age / time.Hour)})
+		}
 	}
 
 	// Write back only what this host may speak for: the Active holder. A Shared or Stale holder
@@ -864,6 +1036,7 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) (SwapOutcome, 
 		h.mu.Lock()
 		ho.markReloadLocked()
 		ho.identity = ""
+		ho.lineage = "" // the host may hold either login now
 		ho.forgetSwapLocked()
 		h.mu.Unlock()
 		h.log.Warn("swap outcome unknown", "action", "swap", "host_id", hostID, "account", accountID,
@@ -883,8 +1056,10 @@ func (h *Hub) Swap(ctx context.Context, hostID, accountID string) (SwapOutcome, 
 	// the recorded owner until another host swaps in or the host is lost.
 	h.reg.SwapIn(accountID, hostID)
 	h.noteSwap(accountID)
+	out.Home = res.Home
 	h.mu.Lock()
 	ho.markReloadLocked()
+	ho.lineage = lineageHash(target.Block)
 	ho.identity = target.Identity
 	ho.noteSwapLocked(exp.Identity, target.ID, target.Identity)
 	h.mu.Unlock()

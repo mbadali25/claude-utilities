@@ -61,7 +61,10 @@ var pageTmpl = template.Must(template.New("index").Parse(indexHTML))
 type hubAPI interface {
 	Hosts() []hub.HostView
 	Pending() []hub.PendingView
-	Swap(ctx context.Context, hostID, accountID string) (hub.SwapOutcome, error)
+	// SwapEx is Swap plus the cautions and the agent's home code (internal/hub).
+	SwapEx(ctx context.Context, hostID, accountID string) (hub.SwapResult, error)
+	// StaleAfter is the age past which a stored login is flagged on the account cards.
+	StaleAfter() time.Duration
 	NewEnrolCode() (string, time.Time)
 	Revoke(hostID string) error
 	Import(ctx context.Context, hostID, label string) (vault.Account, error)
@@ -548,6 +551,12 @@ type accountView struct {
 	Tier          string `json:"tier,omitempty"`
 	CheckEverySec int64  `json:"checkEverySec,omitempty"`
 	RetryInSec    *int64 `json:"retryInSec,omitempty"`
+	// CopyAgeHours is how old the stored login is, in whole hours, from the vault's Updated time
+	// (import, write-back, sign-in-again). Null when the vault never recorded one. Stale says it is
+	// older than the hub's threshold: the access token has probably expired, the refresh token may
+	// not have.
+	CopyAgeHours *int `json:"copyAgeHours"`
+	Stale        bool `json:"stale"`
 }
 
 func window(w usage.Window) *windowView {
@@ -590,6 +599,14 @@ func (s *server) view(a vault.Account, owners map[string]string) accountView {
 			}
 			v.RetryInSec = &left
 		}
+	}
+	if !a.Updated.IsZero() {
+		age := s.now().Sub(a.Updated)
+		if age < 0 {
+			age = 0
+		}
+		hrs := int(age / time.Hour)
+		v.CopyAgeHours, v.Stale = &hrs, age > s.hub.StaleAfter()
 	}
 	in := s.usage.Info(a.ID)
 	v.Tier, v.CheckEverySec = string(in.Tier), int64(in.Every.Seconds())
@@ -767,14 +784,44 @@ func (s *server) swap(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "host and account are required")
 		return
 	}
-	out, err := s.hub.Swap(r.Context(), in.Host, in.Account)
-	if err != nil {
+	res, err := s.hub.SwapEx(r.Context(), in.Host, in.Account)
+	var held *hub.HeldError
+	switch {
+	case errors.As(err, &held):
+		// A refusal the UI can explain: the code picks the copy, holder names the host to swap first.
+		logger.Warn("swap refused", "action", "swap", "result", "refused", "reason", "held_elsewhere")
+		writeJSON(w, http.StatusConflict, map[string]string{"error": logx.Redact(err.Error()), "code": "held_elsewhere", "holder": logx.Redact(held.Host)})
+		return
+	case errors.Is(err, hub.ErrSignInAgain):
+		logger.Warn("swap refused", "action", "swap", "result", "refused", "reason", "sign_in_again")
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "code": "sign_in_again"})
+		return
+	case err != nil:
 		hubError(w, err)
 		return
 	}
 	// outcome separates the two successes: a login was written, or the host already held the
-	// account and nothing was. Both are 200; only the UI copy differs.
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "outcome": string(out)})
+	// account and nothing was. Both are 200; only the UI copy differs. warnings are cautions on a
+	// swap that went through; home is the agent's code for which credentials file it wrote.
+	body := map[string]any{"ok": true, "outcome": string(res.Outcome), "warnings": warningsJSON(res.Warnings)}
+	if res.Home != "" {
+		body["home"] = res.Home
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+type warningJSON struct {
+	Code     string `json:"code"`
+	Host     string `json:"host,omitempty"`
+	AgeHours int    `json:"ageHours,omitempty"`
+}
+
+func warningsJSON(ws []hub.SwapWarning) []warningJSON {
+	out := make([]warningJSON, 0, len(ws))
+	for _, w := range ws {
+		out = append(out, warningJSON{Code: w.Code, Host: logx.Redact(w.Host), AgeHours: w.AgeHours})
+	}
+	return out
 }
 
 func (s *server) enrolCode(w http.ResponseWriter, _ *http.Request) {

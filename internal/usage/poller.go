@@ -538,7 +538,7 @@ func (p *Poller) record(id string, u Usage, err error, epoch uint64) Usage {
 	u.Err = category(err)
 	u.RetryAt = p.nextAt[id]
 	logger.Warn("poll failed", "action", "poll", "result", "failed", "account", id, "tier", string(TierBackoff),
-		"reason", u.Err, "field", SchemaField(err), "durationms", wait.Milliseconds())
+		"reason", u.Err, "status", HTTPStatus(err), "field", SchemaField(err), "durationms", wait.Milliseconds())
 	p.last[id] = u
 	return u
 }

@@ -68,6 +68,9 @@ func (h *Hub) Import(ctx context.Context, hostID, label string) (vault.Account, 
 	h.reg.SwapIn(acct.ID, hostID)
 	h.mu.Lock()
 	ho.identity = exp.Identity
+	if b, berr := oauthBlock(exp.Block); berr == nil { // the imported account is now live on this host
+		ho.lineage = lineageHash(b)
+	}
 	h.mu.Unlock()
 	h.log.Info("login imported", "action", "import", "host_id", hostID, "account", acct.ID, "result", "ok")
 	return acct, nil

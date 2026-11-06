@@ -46,6 +46,31 @@ func SchemaField(err error) string {
 	return ""
 }
 
+// StatusError is a non-success HTTP answer: Kind is the sentinel it matches under errors.Is
+// (ErrUnauthorized, errUnavailable) and Status the code, which the poller logs.
+type StatusError struct {
+	Status int
+	Kind   error
+}
+
+func (e *StatusError) Error() string { return e.Kind.Error() }
+func (e *StatusError) Unwrap() error { return e.Kind }
+
+// HTTPStatus is the HTTP status behind a failed fetch, or 0 when there was none (a transport
+// failure, a schema error). The bare ErrUnauthorized counts as 401.
+func HTTPStatus(err error) int {
+	var se *StatusError
+	switch {
+	case errors.As(err, &se):
+		return se.Status
+	case errors.Is(err, ErrRateLimited):
+		return http.StatusTooManyRequests
+	case errors.Is(err, ErrUnauthorized):
+		return http.StatusUnauthorized
+	}
+	return 0
+}
+
 // RateLimitError carries the server's Retry-After (zero when absent).
 type RateLimitError struct{ RetryAfter time.Duration }
 
@@ -164,9 +189,9 @@ func Fetch(ctx context.Context, d Doer, accessToken string) (Usage, error) {
 	case resp.StatusCode == http.StatusTooManyRequests:
 		return Usage{}, &RateLimitError{RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return Usage{}, ErrUnauthorized
+		return Usage{}, &StatusError{Status: resp.StatusCode, Kind: ErrUnauthorized}
 	case resp.StatusCode != http.StatusOK:
-		return Usage{}, errUnavailable
+		return Usage{}, &StatusError{Status: resp.StatusCode, Kind: errUnavailable}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
