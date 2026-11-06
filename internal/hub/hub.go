@@ -69,7 +69,7 @@ var (
 	ErrHeldElsewhere = errors.New("hub: account held by another host")
 	// ErrSignInAgain means the account's stored login was rejected (usage state "unauthorized"), so
 	// swapping it onto a host would only sign that host out.
-	ErrSignInAgain = errors.New("Sign in again first: the stored login for this account was rejected")
+	ErrSignInAgain = errors.New("Sign in again first: the stored login for this account was rejected") //nolint:staticcheck // shown to the admin verbatim, so it reads as a sentence
 )
 
 // HeldError is ErrHeldElsewhere with the holder's name. Host is agent-supplied text; the message
