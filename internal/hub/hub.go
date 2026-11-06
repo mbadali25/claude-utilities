@@ -219,6 +219,8 @@ type host struct {
 	// It survives a disconnect, which is how an offline holder is still named. A hash, never the
 	// token. In memory only: after a server restart nothing is known until the next export.
 	lineage string
+	// lastAdopt is when Run last asked this host for its live login (adopt.go). In memory only.
+	lastAdopt time.Time
 }
 
 // lineageHash fingerprints a login block's refresh token; "" when it has none.
@@ -380,7 +382,9 @@ func (h *Hub) Run(ctx context.Context) {
 			h.sweepLocked(h.now())
 			h.sweepAddsLocked(h.now())
 			h.sweepCommandsLocked(h.now())
+			due := h.adoptDueLocked(h.now())
 			h.mu.Unlock()
+			h.adoptSweep(ctx, due)
 		}
 	}
 }
