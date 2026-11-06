@@ -437,6 +437,8 @@ type script struct {
 	// staleIdentity mimics the real agent: a swap rewrites the login but never ~/.claude.json,
 	// so the reported identity keeps naming the previous account.
 	staleIdentity bool
+	// home is the proto.Home* code the fake agent reports in its swap result ("" like an older agent).
+	home string
 }
 
 func (f *fixture) newScript(identity, block string) *script {
@@ -471,7 +473,7 @@ func (s *script) serve(a *agent) {
 				if acct, ok := s.f.v.Get(s.identityFor()); ok {
 					s.liveAtSwap = acct.Block
 				}
-				ok, delay, mute := s.swapOK, s.swapDelay, s.stopSwapRes
+				ok, delay, mute, home := s.swapOK, s.swapDelay, s.stopSwapRes, s.home
 				s.mu.Unlock()
 				if mute {
 					continue // never answer: the hub must time out
@@ -486,7 +488,7 @@ func (s *script) serve(a *agent) {
 				}
 				s.inflight--
 				s.mu.Unlock()
-				res := proto.SwapRes{OK: ok}
+				res := proto.SwapRes{OK: ok, Home: home}
 				if !ok {
 					res.Reason = "refused by test"
 				}

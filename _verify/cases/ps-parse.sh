@@ -11,5 +11,5 @@ for c in pwsh pwsh.exe powershell.exe powershell; do
 done
 [ -n "${PS:-}" ] || { echo "no PowerShell available"; exit 77; }
 
-FILES=(scripts/claude-swap-tunnels.ps1 scripts/install-tunnels-task.ps1 scripts/install-agent.ps1)
+FILES=(scripts/claude-swap-tunnels.ps1 scripts/install-tunnels-task.ps1 scripts/install-agent.ps1 scripts/start-server.ps1)
 "$PS" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File _verify/cases/ps-parse.ps1 "${FILES[@]}"

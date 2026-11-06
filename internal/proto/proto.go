@@ -193,7 +193,19 @@ func (r SwapReq) LogValue() slog.Value {
 type SwapRes struct {
 	OK     bool   `json:"ok"`
 	Reason string `json:"reason,omitempty"`
+	// Home says which credentials file a successful swap wrote to, as one of the Home* codes. It is
+	// a code, never a path: those name users' homes. Additive and omitted by an older agent.
+	Home string `json:"home,omitempty"`
 }
+
+// Home* say where a swap wrote. Reasons are reported through SwapRes.Reason, so a refusal for a
+// missing home uses ReasonNoHome.
+const (
+	// HomeLive: the file in the home this agent runs in, which is also the recorded path.
+	HomeLive = "live_home"
+	// HomeMoved: the recorded path names another home; the live one won and was written.
+	HomeMoved = "home_moved"
+)
 
 // Reason goes on the wire as-is; logging redacts it (callers should still logx.Redact before setting).
 func (r SwapRes) String() string {
