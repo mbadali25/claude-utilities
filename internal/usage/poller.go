@@ -141,6 +141,8 @@ type Poller struct {
 	inflight    map[string]*flight
 	refresher   Refresher
 	onRefreshed func(accountID string, block json.RawMessage)
+
+	refreshAllowed func(accountID string) bool
 }
 
 // NewPoller returns a poller with the given schedule.
@@ -198,6 +200,14 @@ func (p *Poller) SetRefresher(r Refresher, onRefreshed func(accountID string, bl
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.refresher, p.onRefreshed = r, onRefreshed
+}
+
+// SetRefreshAllowed limits the refresh-and-retry to accounts for which allowed returns true; any
+// other account's 401 is reported as unauthorized without touching the refresher. Unset means all.
+func (p *Poller) SetRefreshAllowed(allowed func(accountID string) bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshAllowed = allowed
 }
 
 // Last returns the last known usage for an account.
@@ -472,9 +482,9 @@ func (p *Poller) fetchAccount(ctx context.Context, a vault.Account) (Usage, erro
 		return u, err
 	}
 	p.mu.Lock()
-	r, cb := p.refresher, p.onRefreshed
+	r, cb, allowed := p.refresher, p.onRefreshed, p.refreshAllowed
 	p.mu.Unlock()
-	if r == nil {
+	if r == nil || (allowed != nil && !allowed(a.ID)) {
 		return u, err
 	}
 	nb, rerr := r.Refresh(ctx, a.Block)

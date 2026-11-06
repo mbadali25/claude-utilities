@@ -3,13 +3,76 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"claude-utilities/internal/adminpw"
+	"claude-utilities/internal/usage"
+	"claude-utilities/internal/vault"
 )
+
+type doerFunc func(*http.Request) (*http.Response, error)
+
+func (f doerFunc) Do(r *http.Request) (*http.Response, error) { return f(r) }
+
+func refreshPoller(t *testing.T, id string, enabled bool, serverOwned bool) (hits *int32, persisted *[]byte, wired bool, p *usage.Poller) {
+	t.Helper()
+	var n int32
+	var saved []byte
+	tok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&n, 1)
+		_, _ = io.WriteString(w, `{"access_token":"new-a","expires_in":60}`)
+	}))
+	t.Cleanup(tok.Close)
+	api := doerFunc(func(r *http.Request) (*http.Response, error) {
+		code := 401
+		if r.Header.Get("Authorization") == "Bearer new-a" {
+			code = 200
+		}
+		return &http.Response{StatusCode: code, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})
+	p = usage.NewPoller(api, usage.Config{})
+	blk := json.RawMessage(`{"accessToken":"old-a","refreshToken":"old-r","mcpOAuth":{"x":1}}`)
+	p.SetAccounts(func() []vault.Account { return []vault.Account{{ID: id, Block: blk}} })
+	r := usage.NewOAuthRefresher()
+	r.URL = tok.URL
+	wired = wireRefresher(p, enabled, r, func(string) bool { return serverOwned }, func(_ string, b json.RawMessage) error {
+		saved = append([]byte(nil), b...)
+		return nil
+	})
+	return &n, &saved, wired, p
+}
+
+func TestRefreshFlagOffWiresNothing(t *testing.T) {
+	hits, saved, wired, p := refreshPoller(t, "a", false, true)
+	p.RefreshNow(context.Background(), []string{"a"})
+	if wired || *hits != 0 || *saved != nil {
+		t.Fatalf("wired=%v hits=%d saved=%q", wired, *hits, *saved)
+	}
+}
+
+func TestRefreshFlagOnRefreshesServerOwnedAndPersists(t *testing.T) {
+	hits, saved, wired, p := refreshPoller(t, "a", true, true)
+	p.RefreshNow(context.Background(), []string{"a"})
+	if !wired || *hits != 1 || !strings.Contains(string(*saved), `"new-a"`) || !strings.Contains(string(*saved), `"mcpOAuth":{"x":1}`) {
+		t.Fatalf("wired=%v hits=%d saved=%q", wired, *hits, *saved)
+	}
+}
+
+func TestRefreshFlagOnNeverRefreshesHeldAccount(t *testing.T) {
+	hits, saved, _, p := refreshPoller(t, "a", true, false)
+	res := p.RefreshNow(context.Background(), []string{"a"})
+	if *hits != 0 || *saved != nil || res[0].Usage.Err != "unauthorized" {
+		t.Fatalf("hits=%d saved=%q res=%+v", *hits, *saved, res[0])
+	}
+}
 
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
