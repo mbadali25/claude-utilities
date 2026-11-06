@@ -8,6 +8,7 @@
 | [session-reload.md](session-reload.md) | A running Claude Code session still shows the old login after a swap and cannot reload it: the UI shows a Needs reload chip and a copyable restart command. |
 | [remove-account.md](remove-account.md) | Removing a stored account: what the server deletes, why it refuses while an online host is signed in as it, recovering from `vault.bin.bak`, and the `force` escape hatch the UI deliberately does not offer. |
 | [sign-in-again.md](sign-in-again.md) | An account card says `unauthorized`: replacing its stored login through the Sign in again button, the identity check, what resets, and the held-live case. |
+| [token-refresh.md](token-refresh.md) | Turning on `--refresh-tokens` so the server renews expired logins of accounts no host holds: what it merges, what it never touches, the provisional client id, and the first live test on `anewdevteam`. |
 
 The Windows host install has no runbook of its own yet. `scripts/install-agent.ps1` takes the same environment variables as the Linux script (`CLAUDESWAP_DRY_RUN=1` shows what it would do) and ends with `agent install`, which registers the `ClaudeSwapAgent` logon task. It refuses to run with `CLAUDESWAP_STATE_DIR` set, because `schtasks` passes no environment and the task could only ever use the default state dir.
 

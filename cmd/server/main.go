@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -45,7 +46,10 @@ const usageText = `usage: server <flags> | server set-password [--data-dir DIR]
                          show the Tunnels tab. OFF by default: it must not run at the
                          same time as the interim claude-swap-tunnels scheduled task,
                          because two supervisors dialling one host fight over its port.
-  --stale-after DUR      flag a stored login older than this (default 6h; access tokens
+  --refresh-tokens       refresh an expired stored login through the OAuth token endpoint.
+                         OFF by default. Only accounts no host holds are refreshed; a
+                         failure is not retried before the 1 h unauthorized backoff.
+  --stale-after DUR     flag a stored login older than this (default 6h; access tokens
                          last about 8h). A flagged login still swaps, with a warning.
   set-password           replace the admin UI password; it is read from a no-echo
                          prompt when stdin is a terminal, else one line of stdin.
@@ -75,6 +79,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, in io.R
 	listen := fs.String("listen", "", "host:port to listen on (required, no default)")
 	dataDir := fs.String("data-dir", defaultDataDir(), "directory for the vault, host list, TLS certificate and admin password hash")
 	tunnels := fs.Bool("tunnels", false, "supervise the reverse SSH tunnels and show the Tunnels tab (must not overlap the interim scheduled task)")
+	refreshTokens := fs.Bool("refresh-tokens", false, "refresh expired logins of accounts no host holds, through the OAuth token endpoint")
 	staleAfter := fs.Duration("stale-after", hub.DefaultStaleAfter, "flag a stored login older than this")
 	if err := fs.Parse(args); err != nil {
 		_, _ = fmt.Fprintln(errOut, usageText)
@@ -107,7 +112,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, in io.R
 		_, _ = fmt.Fprintf(errOut, "server: set %s (admin UI password) or run `server set-password` first\n", passwordEnv)
 		return 2
 	}
-	if err := serve(ctx, *listen, *dataDir, pw, *tunnels, *staleAfter, errOut); err != nil && !errors.Is(err, context.Canceled) {
+	if err := serve(ctx, *listen, *dataDir, pw, *tunnels, *refreshTokens, *staleAfter, errOut); err != nil && !errors.Is(err, context.Canceled) {
 		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
 		return 1
 	}
@@ -189,7 +194,25 @@ func readNewPassword(in io.Reader, errOut io.Writer) (string, error) {
 // maxStdinPassword bounds a piped password so a stuck or hostile producer cannot be read forever.
 const maxStdinPassword = 4 << 10
 
-func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunnels bool, staleAfter time.Duration, errOut io.Writer) error {
+// wireRefresher turns on server-side token refresh when enabled, and reports whether it did. It
+// refreshes only accounts for which serverOwned is true: a refresh rotates the refresh token, so
+// doing it for a login a host holds would sign that host out. A failed refresh is not retried here;
+// the poller's unauthorized backoff applies. A persist failure is logged by account only.
+func wireRefresher(p *usage.Poller, enabled bool, r usage.Refresher, serverOwned func(string) bool,
+	persist func(id string, block json.RawMessage) error) bool {
+	if !enabled {
+		return false
+	}
+	p.SetRefreshAllowed(serverOwned)
+	p.SetRefresher(r, func(id string, b json.RawMessage) {
+		if err := persist(id, b); err != nil {
+			logx.New(os.Stderr).Error("persist refreshed login failed", "action", "refresh", "result", "failed", "account", id)
+		}
+	})
+	return true
+}
+
+func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunnels, refreshTokens bool, staleAfter time.Duration, errOut io.Writer) error {
 	certFile, keyFile, fp, err := hub.EnsureCert(filepath.Join(dataDir, "tls"))
 	if err != nil {
 		return err
@@ -201,8 +224,13 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 	log := logx.New(errOut)
 	reg := ownership.New()
 	h := hub.New(v, reg, filepath.Join(dataDir, "hosts.json"), log)
-	// Without a refresher (spike S2 deferred) an expired token shows as "unauthorized" in the UI.
+	// Without --refresh-tokens an expired token shows as "unauthorized" in the UI.
 	poller := usage.NewPoller(&http.Client{Timeout: 20 * time.Second}, usage.DefaultConfig())
+	if wireRefresher(poller, refreshTokens, usage.NewOAuthRefresher(),
+		func(id string) bool { return reg.OwnerOf(id).Server },
+		func(id string, b json.RawMessage) error { return v.ReplaceBlock(id, b, time.Now()) }) {
+		log.Warn("token refresh enabled", "action", "refresh", "result", "enabled")
+	}
 
 	// The tunnel supervisor, only with --tunnels. It is started after the vault passphrase has
 	// been accepted, because the keyring is unlocked with the same one, and stopped before the
