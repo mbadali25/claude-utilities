@@ -46,6 +46,15 @@ if [ "$REAL_UID" = "0" ]; then
   exit 77
 fi
 
+# The mode assertions need a filesystem that keeps POSIX permission bits. Git Bash
+# on NTFS reports 755/644 whatever chmod asked for, so the 0700 checks could never
+# pass there: an absent environment, not a failure of the installer.
+: >"$TMP/modeprobe" && chmod 0700 "$TMP/modeprobe"
+if ! mode_is "$TMP/modeprobe" 700; then
+  echo "this filesystem does not honour chmod 0700 (Git Bash on NTFS?): the mode checks cannot run here"
+  exit 77
+fi
+
 # ------------------------------------------------------------------ stubs
 
 STUB="$TMP/stub"

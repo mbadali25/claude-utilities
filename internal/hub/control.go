@@ -471,6 +471,10 @@ func (h *Hub) finishTarget(t *cmdTarget, status, code, mechanism, hint string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	t.setLocked(status, code, mechanism, hint, h.now())
+	// A verdict can be what makes the oldest request finished, so the history bound is applied
+	// here too: otherwise requests that were all live at the last Command stay over the bound
+	// until some reader happens to sweep.
+	h.pruneCommandsLocked()
 }
 
 // applyCommandStatusesLocked folds a report's command statuses into the hub's records. A status
@@ -490,6 +494,7 @@ func (h *Hub) applyCommandStatusesLocked(hostID string, ss []proto.SessionComman
 				"command", t.command, "target", t.sessionID, "result", t.status, "reason", t.code)
 		}
 	}
+	h.pruneCommandsLocked()
 }
 
 // sweepCommandsLocked fails targets past their request's deadline and forgets old requests.
