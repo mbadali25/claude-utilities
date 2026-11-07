@@ -1,8 +1,10 @@
 package usage
 
 // OAuthRefresher renews a stored claudeAiOauth block through the OAuth token endpoint. It is only
-// wired when the operator passes --refresh-tokens, and only ever for accounts no host holds: a
-// refresh may rotate the refresh token, so the server stays conservative and leaves a login a host is using to that host (a sign-out from this is unproven, not observed).
+// wired when the operator passes --refresh-tokens, and only for accounts named in --refresh-accounts
+// (none listed = nothing). The ownership gate (OwnerOf(id).Server) is in-memory and empty after a
+// restart, so it is true for every account until a swap or import in that process: the allowlist is the
+// real scope control. A refresh may rotate the refresh token; effect on other hosts: not observed; unproven.
 
 import (
 	"bytes"

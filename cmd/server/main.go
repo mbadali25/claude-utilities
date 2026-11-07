@@ -48,8 +48,14 @@ const usageText = `usage: server <flags> | server set-password [--data-dir DIR]
                          same time as the interim claude-swap-tunnels scheduled task,
                          because two supervisors dialling one host fight over its port.
   --refresh-tokens       refresh an expired stored login through the OAuth token endpoint.
-                         OFF by default. Only accounts no host holds are refreshed; a
-                         failure is not retried before the 1 h unauthorized backoff.
+                         OFF by default. Refreshes ONLY the accounts named in --refresh-accounts
+                         (none listed = nothing refreshed); a failure is not retried before the
+                         1 h unauthorized backoff.
+  --refresh-accounts a,b comma-separated account ids that --refresh-tokens may refresh. Needs
+                         --refresh-tokens (ignored with a warning otherwise). Ownership is
+                         in-memory and empty after a restart, so this list is the real scope
+                         control; the ownership check only skips accounts swapped or imported
+                         since start.
   --stale-after DUR     flag a stored login older than this (default 6h; access tokens
                          last about 8h). A flagged login still swaps, with a warning.
   set-password           replace the admin UI password; it is read from a no-echo
@@ -80,7 +86,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, in io.R
 	listen := fs.String("listen", "", "host:port to listen on (required, no default)")
 	dataDir := fs.String("data-dir", defaultDataDir(), "directory for the vault, host list, TLS certificate and admin password hash")
 	tunnels := fs.Bool("tunnels", false, "supervise the reverse SSH tunnels and show the Tunnels tab (must not overlap the interim scheduled task)")
-	refreshTokens := fs.Bool("refresh-tokens", false, "refresh expired logins of accounts no host holds, through the OAuth token endpoint")
+	refreshTokens := fs.Bool("refresh-tokens", false, "refresh expired logins, only of the accounts named in --refresh-accounts, through the OAuth token endpoint")
+	refreshAccounts := fs.String("refresh-accounts", "", "comma-separated account ids --refresh-tokens may refresh (none = refresh nothing)")
 	staleAfter := fs.Duration("stale-after", hub.DefaultStaleAfter, "flag a stored login older than this")
 	if err := fs.Parse(args); err != nil {
 		_, _ = fmt.Fprintln(errOut, usageText)
@@ -113,7 +120,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, in io.R
 		_, _ = fmt.Fprintf(errOut, "server: set %s (admin UI password) or run `server set-password` first\n", passwordEnv)
 		return 2
 	}
-	if err := serve(ctx, *listen, *dataDir, pw, *tunnels, *refreshTokens, *staleAfter, errOut); err != nil && !errors.Is(err, context.Canceled) {
+	if err := serve(ctx, *listen, *dataDir, pw, *tunnels, *refreshTokens, parseRefreshAccounts(*refreshAccounts), *staleAfter, errOut); err != nil && !errors.Is(err, context.Canceled) {
 		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
 		return 1
 	}
@@ -195,16 +202,25 @@ func readNewPassword(in io.Reader, errOut io.Writer) (string, error) {
 // maxStdinPassword bounds a piped password so a stuck or hostile producer cannot be read forever.
 const maxStdinPassword = 4 << 10
 
-// wireRefresher turns on server-side token refresh when enabled, and reports whether it did. It
-// refreshes only accounts for which serverOwned is true: a refresh may rotate the refresh token, so
-// the server leaves a login a host holds to that host (conservative; sign-out is not observed). A failed refresh is not retried here;
-// the poller's unauthorized backoff applies. A persist failure is logged by account only.
-func wireRefresher(p *usage.Poller, enabled bool, r usage.Refresher, log *slog.Logger, serverOwned func(string) bool,
+// wireRefresher turns on server-side token refresh when enabled, and reports whether it did. An
+// account refreshes only if its id is in listed (the --refresh-accounts allowlist) AND serverOwned
+// is true. An empty list refreshes nothing (fail closed). The ownership registry is in-memory and
+// empty after a restart, so serverOwned is true for every account until a swap or import in this
+// process; host connect or report does not populate it. The allowlist is therefore the real scope
+// control, and the ownership check only skips accounts swapped or imported since start. Effect on
+// other hosts of refreshing a login a host holds: not observed; unproven. A failed refresh is not
+// retried here; the poller's unauthorized backoff applies. A persist failure is logged by account only.
+func wireRefresher(p *usage.Poller, enabled bool, r usage.Refresher, log *slog.Logger, listed []string, serverOwned func(string) bool,
 	persist func(id string, block json.RawMessage) error) bool {
 	if !enabled {
 		return false
 	}
-	p.SetRefreshAllowed(serverOwned)
+	p.SetRefreshAllowed(refreshGate(listed, serverOwned))
+	if len(listed) == 0 {
+		log.Warn("token refresh has no accounts: --refresh-accounts is empty, refreshing nothing", "action", "refresh", "result", "fail-closed", "count", 0)
+	} else {
+		log.Info("token refresh allowlist", "action", "refresh", "result", "allowlist", "count", len(listed))
+	}
 	p.SetRefresher(r, func(id string, b json.RawMessage) {
 		if err := persist(id, b); err != nil {
 			log.Error("persist refreshed login failed", "action", "refresh", "result", "failed", "account", id)
@@ -216,7 +232,7 @@ func wireRefresher(p *usage.Poller, enabled bool, r usage.Refresher, log *slog.L
 	return true
 }
 
-func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunnels, refreshTokens bool, staleAfter time.Duration, errOut io.Writer) error {
+func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunnels, refreshTokens bool, refreshAccounts []string, staleAfter time.Duration, errOut io.Writer) error {
 	certFile, keyFile, fp, err := hub.EnsureCert(filepath.Join(dataDir, "tls"))
 	if err != nil {
 		return err
@@ -230,10 +246,14 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 	h := hub.New(v, reg, filepath.Join(dataDir, "hosts.json"), log)
 	// Without --refresh-tokens an expired token shows as "unauthorized" in the UI.
 	poller := usage.NewPoller(&http.Client{Timeout: 20 * time.Second}, usage.DefaultConfig())
-	if wireRefresher(poller, refreshTokens, usage.NewOAuthRefresher(), log,
+	warnRefreshAccountsIgnored(log, refreshTokens, refreshAccounts)
+	if wireRefresher(poller, refreshTokens, usage.NewOAuthRefresher(), log, refreshAccounts,
 		func(id string) bool { return reg.OwnerOf(id).Server },
 		func(id string, b json.RawMessage) error { return v.ReplaceBlock(id, b, time.Now()) }) {
 		log.Warn("token refresh enabled", "action", "refresh", "result", "enabled")
+		if n := countUnmatched(refreshAccounts, v.List()); n > 0 {
+			log.Warn("listed accounts match no stored account", "action", "refresh", "result", "unmatched", "count", n)
+		}
 	}
 
 	// The tunnel supervisor, only with --tunnels. It is started after the vault passphrase has
