@@ -51,6 +51,8 @@ func SchemaField(err error) string {
 type StatusError struct {
 	Status int
 	Kind   error
+	// BodyClass is a fixed class of a 401/403 body (see classifyBody); empty for other statuses.
+	BodyClass string
 }
 
 func (e *StatusError) Error() string { return e.Kind.Error() }
@@ -189,7 +191,7 @@ func Fetch(ctx context.Context, d Doer, accessToken string) (Usage, error) {
 	case resp.StatusCode == http.StatusTooManyRequests:
 		return Usage{}, &RateLimitError{RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return Usage{}, &StatusError{Status: resp.StatusCode, Kind: ErrUnauthorized}
+		return Usage{}, &StatusError{Status: resp.StatusCode, Kind: ErrUnauthorized, BodyClass: readErrClass(resp.Body)}
 	case resp.StatusCode != http.StatusOK:
 		return Usage{}, &StatusError{Status: resp.StatusCode, Kind: errUnavailable}
 	}

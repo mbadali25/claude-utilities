@@ -25,7 +25,8 @@ var logger = logx.New(os.Stderr).With("component", "usage")
 func init() {
 	// "field" carries a response field path (five_hour.resets_at) and never a value.
 	// "tier" is one of active, idle, backoff.
-	logx.Allow("field", "tier")
+	// "body_class" is a fixed class of a 401/403 body (token_expired, ...), never body text.
+	logx.Allow("field", "tier", "body_class")
 }
 
 // Tier says how often an account is polled.
@@ -548,7 +549,7 @@ func (p *Poller) record(id string, u Usage, err error, epoch uint64) Usage {
 	u.Err = category(err)
 	u.RetryAt = p.nextAt[id]
 	logger.Warn("poll failed", "action", "poll", "result", "failed", "account", id, "tier", string(TierBackoff),
-		"reason", u.Err, "status", HTTPStatus(err), "field", SchemaField(err), "durationms", wait.Milliseconds())
+		"reason", u.Err, "status", HTTPStatus(err), "field", SchemaField(err), "body_class", BodyClass(err), "durationms", wait.Milliseconds())
 	p.last[id] = u
 	return u
 }

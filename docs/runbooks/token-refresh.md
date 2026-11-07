@@ -16,4 +16,5 @@ Use the throwaway account `anewdevteam`, with Matthew present. Do not point it a
 1. Store the throwaway login, make sure no host holds it, start the server with `--refresh-tokens`.
 2. Let the token expire (or wait for a 401), then press Refresh on its card.
 3. Expect: the card shows usage, the Account's stored login has a new `expiresAt` (check key names and sizes only, never print a token), and the vault holds `vault.bin.bak`.
-4. If it shows `unauthorized`, check the server log for `action=refresh`. Stop the flag and fall back to Sign in again.
+4. A `poll failed ... reason=unauthorized` log line carries `body_class`: `token_expired`, `token_revoked`, `invalid_credentials`, `permission`, `other`, `no_body` or `unparseable`. It is a class chosen by the server from assumed error-body wording (unverified against the live endpoint); the body itself is never logged.
+5. If it shows `unauthorized`, check the server log for `action=refresh`. Stop the flag and fall back to Sign in again.
