@@ -34,6 +34,7 @@ The server (`cmd/server`) is one TLS listener: `/ws` for agents, everything else
 - Landmine: a swap must replace only the `claudeAiOauth` block; never drop `mcpOAuth`, never log a token or an identity (it can be an email).
 
 ## Gotchas
+- `agent hooks install` bakes `--state-dir` into the hook command because Claude runs hooks without the unit's `CLAUDESWAP_STATE_DIR`. Install from the unit's environment and re-run after upgrading; an old entry without the flag reads the default dir and silently returns `{}`.
 - The agent reads the signed-in identity from `~/.claude.json` `oauthAccount` (email, else account uuid), or `$CLAUDE_CONFIG_DIR/.claude.json`. Do not set `CLAUDE_CONFIG_DIR` for the default profile; set it only for a sandbox config dir.
 - Keep `CLAUDESWAP_STATE_DIR` and `CLAUDE_CONFIG_DIR` identical at `enrol` and `run`; the logon task passes no environment, so a state dir set only at enrol makes `run` report a missing `agent.json` (see `agent-run.log`).
 - Import dedupes by the identity string: a login already stored is refused (`ErrAlreadyStored`), and a host with no `oauthAccount` cannot import.
