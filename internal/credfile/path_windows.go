@@ -4,12 +4,20 @@ package credfile
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
+	"syscall"
 )
 
 const isWindows = true
+
+// Win32 codes (winerror.h) the syscall package does not name.
+const (
+	errAccessDenied     syscall.Errno = 5
+	errSharingViolation syscall.Errno = 32
+)
 
 // syncDir is a no-op on Windows: directories cannot be fsynced.
 func syncDir(string) {}
@@ -17,6 +25,18 @@ func syncDir(string) {}
 // preserveOwner is a no-op on Windows: there is no uid/gid to hand over, and
 // restrictACL already pins the new file's ACL to the current user.
 func preserveOwner(string, os.FileInfo) error { return nil }
+
+// renameTransient reports whether a rename failed because another process briefly holds the
+// destination open. Go opens files without FILE_SHARE_DELETE, so any reader of the credentials file
+// (the agent's own report loop, Claude Code, Defender, an indexer) makes MoveFileEx fail with
+// access denied or a sharing violation until it closes the handle.
+func renameTransient(err error) bool {
+	if errors.Is(err, fs.ErrPermission) {
+		return true
+	}
+	var en syscall.Errno
+	return errors.As(err, &en) && (en == errAccessDenied || en == errSharingViolation)
+}
 
 // wellKnownSIDs are the accounts a freshly created file can carry as explicit (not inherited) ACEs:
 // a process under an elevated token takes its default DACL from the token, which names SYSTEM and

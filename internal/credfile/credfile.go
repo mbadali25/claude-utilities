@@ -38,6 +38,9 @@ const (
 	// maxExpiryMs bounds refreshTokenExpiresAt before the float64 to int64 conversion.
 	maxExpiryMs = 1e15
 	tempPattern = ".credentials-*.tmp"
+	// renameAttempts x renameBackoff (about 2 s) bounds the wait for a reader to close the file.
+	renameAttempts = 100
+	renameBackoff  = 20 * time.Millisecond
 )
 
 var (
@@ -65,6 +68,7 @@ var (
 	renameFn       = os.Rename
 	beforeRenameFn = func() {}
 	nowFn          = time.Now
+	sleepFn        = time.Sleep
 	// afterBackupFn runs right after the backup is written, before the temp file.
 	afterBackupFn = func(string) {}
 )
@@ -524,12 +528,25 @@ func swap(path string, block json.RawMessage, withBackup bool, onPrev func(json.
 		removeQuiet(tmp)
 		return abort(ErrChangedDuringSwap)
 	}
-	if err := renameFn(tmp, path); err != nil {
+	if err := renameWithRetry(tmp, path); err != nil {
 		removeQuiet(tmp)
 		return backup, fmt.Errorf("credfile: rename: %w", err)
 	}
 	syncDir(filepath.Dir(path))
 	return backup, nil
+}
+
+// renameWithRetry renames tmp over path, retrying briefly while another process holds path open
+// (renameTransient; Windows only). Any other error, or the last transient one, is returned.
+func renameWithRetry(tmp, path string) error {
+	var err error
+	for i := 0; i < renameAttempts; i++ {
+		if err = renameFn(tmp, path); err == nil || !renameTransient(err) {
+			return err
+		}
+		sleepFn(renameBackoff)
+	}
+	return err
 }
 
 func writeTemp(dir string, data []byte, mode os.FileMode) (string, error) {
