@@ -122,6 +122,8 @@ type sessionFile struct {
 	SessionID           string      `json:"sessionId"`
 	Name                string      `json:"name"`
 	NameSource          string      `json:"nameSource"`
+	Cwd                 string      `json:"cwd"`
+	Status              string      `json:"status"`
 	ProcStart           looseString `json:"procStart"`
 	PidDomain           string      `json:"pidDomain"`
 	BridgeSessionID     string      `json:"bridgeSessionId"`

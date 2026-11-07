@@ -121,6 +121,10 @@ type Report struct {
 	// additive and omitted when empty, so an older hub sees the report shape it expects. Bounded
 	// by MaxCommandsPerReport.
 	Commands []SessionCommandStatus `json:"commands,omitempty"`
+	// HookInstalled says whether the claude-swap-session-control hook entries exist in Claude's
+	// settings.json. A pointer: nil (omitted) is "unknown" - an older agent, or a settings file
+	// that cannot be read - and must not read as "not installed". It carries no path.
+	HookInstalled *bool `json:"hookInstalled,omitempty"`
 }
 
 type ExportRes struct {

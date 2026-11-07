@@ -24,6 +24,7 @@ specific to this build.
 | `remote_control_enable` | Bind a Remote Control bridge for the session. |
 | `rename_remote` | Make the session carry a given remote-visible title. |
 | `restart_sessions` | Ask for the restart that actually fixes a stale session. **Copy-only: it stops nothing.** See [The restart action](#the-restart-action-copy-only-by-decision). |
+| `relaunch_remote` | **Kills one idle session's process and starts `claude --resume <id> --remote-control` in its cwd.** The only command that stops anything. See [relaunch_remote](#relaunch_remote-the-one-command-that-stops-a-process). |
 | `repair` | The composite: `reload_plugins`, `remote_control_enable`, `rename_remote`, in that order, per session. It takes no name; each session is named after its own name. It never expands to `restart_sessions`. |
 
 Scope is a separate axis, so every command works at every scope:
@@ -47,6 +48,22 @@ where the scope rule above is not enough, because the confirm is what proves the
 which sessions are named. `proto.IsRestartCommand` is the predicate the hub tests, so a second
 restart-type command cannot be added without every confirm gate picking it up.
 
+## What the nudge is, and what it is not
+
+`reload_plugins` is shown in the UI as **"Nudge: ask session to reload plugins"** (per session and
+per host; the protocol value is still `reload_plugins`). It writes an instruction the hook later
+puts in front of the model, so the best it can reach is `delivered`, shown as **"Delivered (asked,
+unverified)"**. The UI also shows the line that does it for certain: type `/reload-plugins` in
+that session.
+
+The host card carries a **hook installed?** indicator (`Hook installed` / `Hook not installed` /
+`Hook state unknown`). The agent reports one boolean in `Report.hookInstalled`: true only when this
+program's entries (the `claude-swap-session-control` tag) exist under **both** `SessionStart` and
+`UserPromptSubmit` in the host's `settings.json`. It is a pointer on the wire: an older agent, or a
+settings file that cannot be read or parsed, is omitted and reads as *unknown*, never as *not
+installed*. No path or setting value rides in the report. With the hook not installed, a nudge is
+queued and nothing reads it.
+
 ## Statuses
 
 | Status | Means |
@@ -60,7 +77,9 @@ restart-type command cannot be added without every confirm gate picking it up.
 Reason codes are short and machine-readable: `unsupported-requires-restart`,
 `unsupported-no-bridge`, `unsupported-no-inbox`, `unsupported-inbox-no-change`,
 `inbox-send-failed`, `no-mechanism`, `unknown-command`, `bad-session-id`, `no-name`, `queue-full`,
-`queue-write-failed`, `agent-offline`, `timeout`, `bad-reply`.
+`queue-write-failed`, `agent-offline`, `timeout`, `bad-reply`; and for `relaunch_remote`:
+`relaunched` (the only success code), `not-idle`, `session-gone`, `bad-cwd`, `no-claude`,
+`kill-failed`, `start-failed`.
 
 `unsupported-inbox-unproven` is **gone.** The frame is no longer unproven, so a code that said so
 would be a lie in the other direction; what used to answer with it now answers `no-mechanism`
@@ -447,6 +466,50 @@ they bite:
   two-account run. Nothing in the UI or the docs may imply the bridge survives a swap. See
   [Not verified](#not-verified).
 
+## relaunch_remote: the one command that stops a process
+
+`restart_sessions` above stays copy-only. `relaunch_remote` is the separate, deliberate exception,
+added because a relaunch is the only thing that binds Remote Control to a running session. It does
+**not** reverse the decision above: it is a different command, per session, behind its own gates.
+
+**What it does** (`internal/agent/relaunch.go`, mechanism `relaunch-process`): re-checks everything,
+kills the session's pid, waits for it to exit, then starts `claude --resume <sessionId>
+--remote-control` in the session's cwd with the agent's `CLAUDE_CONFIG_DIR`, detached (setsid on
+Linux, a new console and process group on Windows). Arguments are an exec vector; there is no shell
+and nothing from a file is interpolated into a command line.
+
+**The cost, which the confirm names:** the process is killed, the running turn and its tools are
+lost, and the new process needs a terminal (a new console window on Windows; on Linux it is
+detached with no tty).
+
+**Gates**, hub first and then the agent again from the session's own file:
+
+| Gate | Refusal |
+|---|---|
+| Session scope only | `ErrRelaunchScope`, 400 |
+| `confirm: true` | `ErrConfirmRequired`, 409 (it is a restart-type command, `proto.IsRestartCommand`) |
+| Session reported `idle` | `ErrSessionNotIdle`, 409; the agent re-reads `status` and answers `failed` / `not-idle` |
+| Session id is a UUID | `failed` / `bad-session-id` |
+| The pid's file carries that id and the pid is alive with its recorded start time | `failed` / `session-gone` |
+| cwd is an absolute existing directory, no control characters | `failed` / `bad-cwd` |
+| `claude` is on PATH, checked **before** the kill | `failed` / `no-claude` |
+
+Never part of `repair`, never registered for the inbox, never reachable at host or all scope. The UI
+offers the button only for an idle session, behind the shared confirm dialog.
+
+**Outcome.** The result stays `unsupported` / `unsupported-requires-restart` (with the manual
+command in the hint) until a read-back sees the resumed session, the same session id on a different
+live pid, publish a `bridgeSessionId` that is set and different from the old one. Only then is it
+`done` / `relaunched`. A successful start proves nothing about the bridge. Failures after the kill:
+`kill-failed` (the pid did not die, nothing was started) and `start-failed` (the old one is gone,
+the new one did not start; the hint carries the manual command). The read-back waits up to about
+10 s and the agent handles frames serially, so a relaunch holds that host's connection that long.
+
+**Unproven:** whether `--resume` re-enables the bridge for a session that had none, and so whether
+relaunching can *disable* it. A resume may bring the bridge straight back, so do not use this to turn
+Remote Control off. Also unverified: Linux detached-start behaviour with no tty, and any live run.
+The tests inject the kill and start functions; none starts a real `claude` or stops a real process.
+
 ## The API
 
 ### POST /api/sessions/command
@@ -520,13 +583,14 @@ targets per request, and a target with no verdict after 60 seconds becomes
 Everything above is driven from the **Hosts** tab of the admin UI
 (`internal/web/static/index.html`), and nowhere else:
 
-- **Per session**, inside the host card's session list: *Reload plugins*, *Enable remote* and
-  *Fix name*. *Fix name* opens a small dialog with a labelled field prefilled from the session's
+- **Per session**, inside the host card's session list: *Nudge: ask session to reload plugins*,
+  *Enable remote*, *Fix name* and, for an idle session only, *Relaunch with remote control* (behind a
+  confirm that names the cost). *Fix name* opens a small dialog with a labelled field prefilled from the session's
   current remote name, capped at 256 characters. There is deliberately **no per-session Restart
   button**: a stale session's row already carries its own relaunch command with a Copy button, which
   is the whole of what a restart can give one session. `restart_sessions` is still reachable at
   `session` scope through the API, with `confirm: true` like every other scope.
-- **Per host**, on their own rule above the swap row: *Reload all*, *Enable remote on all* and
+- **Per host**, on their own rule above the swap row: *Nudge: ask session to reload plugins*, *Enable remote on all* and
   *Restart sessions*. The first two go through a confirm dialog that states how many sessions are
   affected and that no session is stopped, killed or restarted — the UI side of the `confirm: true`
   the hub insists on. *Restart sessions* goes to its own dialog, because a count cannot name the
@@ -542,7 +606,7 @@ the `unsupported` status, split on the reason code, because an operator acts on 
 
 | Chip | When | The sentence beside it |
 |---|---|---|
-| Delivered | status `delivered` | "Delivered: the ask reached the session. It does not mean the session acted on it." |
+| Delivered (asked, unverified) | status `delivered` | "Delivered: the ask reached the session. It does not mean the session acted on it." |
 | Restart required | `unsupported-requires-restart`, or `unsupported-no-bridge` | "Restart required: cannot be done on a running session. Nothing was stopped." (the no-bridge variant names the missing bridge) |
 | Unsupported | `unsupported` + any other code | "Unsupported: no proven mechanism can do this on a running session", or the specific sentence for `unsupported-no-inbox` / `unsupported-inbox-no-change` |
 | Failed | status `failed` | "Failed: nothing was asked of the session", or for `inbox-send-failed`, "the session would not take the ask. Nothing reached it." |

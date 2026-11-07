@@ -523,7 +523,8 @@ func (a *agent) report(ctx context.Context) proto.Report {
 		sessions[i].Name = capRunes(sessions[i].Name, maxNameRunes)
 		sessions[i].RemoteName = capRunes(sessions[i].RemoteName, maxNameRunes)
 	}
-	rep := proto.Report{Sessions: sessions, SwapBlocked: a.blocked.Load(), Commands: a.ctl.q.delivered()}
+	rep := proto.Report{Sessions: sessions, SwapBlocked: a.blocked.Load(), Commands: a.ctl.q.delivered(),
+		HookInstalled: HooksInstalled()}
 	id, reason := a.ident.current()
 	switch _, err := credfile.ReadBlock(a.cfg.CredsPath); {
 	case err == nil:

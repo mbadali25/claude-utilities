@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -49,6 +50,76 @@ func ourEntries(t *testing.T, m map[string]any, event string) int {
 		}
 	}
 	return n
+}
+
+func TestHooksInstalledTracksInstallAndUninstall(t *testing.T) {
+	path := sandboxSettings(t)
+	if got := HooksInstalled(); got == nil || *got {
+		t.Fatalf("no settings file: got %v, want false", got)
+	}
+	if _, err := InstallHooks("/opt/claude-swap/agent"); err != nil {
+		t.Fatal(err)
+	}
+	if got := HooksInstalled(); got == nil || !*got {
+		t.Fatalf("after install: got %v, want true", got)
+	}
+	// One event missing is not installed: the SessionStart-only host would never nudge a running
+	// session, which is the whole point of the hook.
+	m := readRaw(t, path)
+	delete(m["hooks"].(map[string]any), "UserPromptSubmit")
+	if err := writeSettings(path, m); err != nil {
+		t.Fatal(err)
+	}
+	if got := HooksInstalled(); got == nil || *got {
+		t.Fatalf("one event only: got %v, want false", got)
+	}
+	if _, err := InstallHooks("/opt/claude-swap/agent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := UninstallHooks(); err != nil {
+		t.Fatal(err)
+	}
+	if got := HooksInstalled(); got == nil || *got {
+		t.Fatalf("after uninstall: got %v, want false", got)
+	}
+}
+
+func TestHooksInstalledIsUnknownWhenSettingsCannotBeRead(t *testing.T) {
+	path := sandboxSettings(t)
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := HooksInstalled(); got != nil {
+		t.Fatalf("unparseable settings: got %v, want nil (unknown)", *got)
+	}
+	// A foreign hook that merely mentions nothing of ours is not ours.
+	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo hi"}]}],"UserPromptSubmit":[]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := HooksInstalled(); got == nil || *got {
+		t.Fatalf("foreign hooks only: got %v, want false", got)
+	}
+}
+
+func TestReportCarriesTheHookState(t *testing.T) {
+	sandboxSettings(t)
+	r := newRig(t, "https://x", strings.Repeat("0", 64))
+	rep := r.a.report(context.Background())
+	if rep.HookInstalled == nil || *rep.HookInstalled {
+		t.Fatalf("not installed: got %v, want false", rep.HookInstalled)
+	}
+	if _, err := InstallHooks("/opt/claude-swap/agent"); err != nil {
+		t.Fatal(err)
+	}
+	rep = r.a.report(context.Background())
+	if rep.HookInstalled == nil || !*rep.HookInstalled {
+		t.Fatalf("installed: got %v, want true", rep.HookInstalled)
+	}
+	// Names and booleans only: no settings path may ride in the report.
+	raw, _ := json.Marshal(rep)
+	if strings.Contains(string(raw), "settings") {
+		t.Fatalf("report mentions the settings file: %s", raw)
+	}
 }
 
 func TestInstallHooksIsIdempotent(t *testing.T) {

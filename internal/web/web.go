@@ -686,10 +686,13 @@ type hostJSON struct {
 	// IdentityReason is why the host names no signed-in account: one of the fixed codes the hub
 	// knows (proto.Reason*), never a path, a user name or an address. The UI turns it into a
 	// sentence and a one-line fix; omitted when the host names an account.
-	IdentityReason string        `json:"identityReason,omitempty"`
-	NeedsReload    bool          `json:"needsReload"`
-	SwapBlocked    bool          `json:"swapBlocked"`
-	Sessions       []sessionJSON `json:"sessions"`
+	IdentityReason string `json:"identityReason,omitempty"`
+	NeedsReload    bool   `json:"needsReload"`
+	SwapBlocked    bool   `json:"swapBlocked"`
+	// HookInstalled is whether the session-control hook entries exist in Claude's settings.json on
+	// the host. A pointer so "unknown" (older agent, unreadable file) is omitted, never false.
+	HookInstalled *bool         `json:"hookInstalled,omitempty"`
+	Sessions      []sessionJSON `json:"sessions"`
 	// Tunnel is this host's reverse-SSH tunnel, when it has one. It is a SEPARATE indicator from
 	// Online and is never merged with it: a tunnel can be up while the agent is still offline,
 	// and that is the diagnostic case rather than a contradiction. A host with no tunnel leaves
@@ -721,7 +724,7 @@ func (s *server) hosts(w http.ResponseWriter, _ *http.Request) {
 	out := make([]hostJSON, 0, len(hs))
 	for _, h := range hs {
 		j := hostJSON{HostID: h.HostID, Name: h.Name, OS: h.OS, RunAs: h.RunAs, Online: h.Online, ActiveAccount: h.ActiveAccount,
-			IdentityReason: h.IdentityReason, SwapBlocked: h.SwapBlocked,
+			IdentityReason: h.IdentityReason, SwapBlocked: h.SwapBlocked, HookInstalled: h.HookInstalled,
 			Sessions: make([]sessionJSON, 0, len(h.Sessions))}
 		if t, ok := tunnels[h.HostID]; ok {
 			j.Tunnel = &hostTunnelJSON{ID: t.ID, State: string(t.State), Since: t.Since,
