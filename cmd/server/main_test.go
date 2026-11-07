@@ -23,7 +23,18 @@ type doerFunc func(*http.Request) (*http.Response, error)
 
 func (f doerFunc) Do(r *http.Request) (*http.Response, error) { return f(r) }
 
-func refreshPoller(t *testing.T, id string, enabled bool, serverOwned bool) (hits *int32, persisted *[]byte, wired bool, p *usage.Poller) {
+func refreshPoller(t *testing.T, id string, enabled bool, serverOwned bool, listed ...string) (hits *int32, persisted *[]byte, wired bool, p *usage.Poller) {
+	t.Helper()
+	return refreshPollerGate(t, id, enabled, listed, func(string) bool { return serverOwned })
+}
+
+// refreshPollerOwned wires the flag on with the given ownership gate and allowlist.
+func refreshPollerOwned(t *testing.T, id string, listed []string, serverOwned func(string) bool) (hits *int32, persisted *[]byte, wired bool, p *usage.Poller) {
+	t.Helper()
+	return refreshPollerGate(t, id, true, listed, serverOwned)
+}
+
+func refreshPollerGate(t *testing.T, id string, enabled bool, listed []string, serverOwned func(string) bool) (hits *int32, persisted *[]byte, wired bool, p *usage.Poller) {
 	t.Helper()
 	var n int32
 	var saved []byte
@@ -44,7 +55,7 @@ func refreshPoller(t *testing.T, id string, enabled bool, serverOwned bool) (hit
 	p.SetAccounts(func() []vault.Account { return []vault.Account{{ID: id, Block: blk}} })
 	r := usage.NewOAuthRefresher()
 	r.URL = tok.URL
-	wired = wireRefresher(p, enabled, r, logx.New(io.Discard), func(string) bool { return serverOwned }, func(_ string, b json.RawMessage) error {
+	wired = wireRefresher(p, enabled, r, logx.New(io.Discard), listed, serverOwned, func(_ string, b json.RawMessage) error {
 		saved = append([]byte(nil), b...)
 		return nil
 	})
@@ -52,7 +63,7 @@ func refreshPoller(t *testing.T, id string, enabled bool, serverOwned bool) (hit
 }
 
 func TestRefreshFlagOffWiresNothing(t *testing.T) {
-	hits, saved, wired, p := refreshPoller(t, "a", false, true)
+	hits, saved, wired, p := refreshPoller(t, "a", false, true, "a")
 	p.RefreshNow(context.Background(), []string{"a"})
 	if wired || *hits != 0 || *saved != nil {
 		t.Fatalf("wired=%v hits=%d saved=%q", wired, *hits, *saved)
@@ -60,7 +71,7 @@ func TestRefreshFlagOffWiresNothing(t *testing.T) {
 }
 
 func TestRefreshFlagOnRefreshesServerOwnedAndPersists(t *testing.T) {
-	hits, saved, wired, p := refreshPoller(t, "a", true, true)
+	hits, saved, wired, p := refreshPoller(t, "a", true, true, "a")
 	p.RefreshNow(context.Background(), []string{"a"})
 	if !wired || *hits != 1 || !strings.Contains(string(*saved), `"new-a"`) || !strings.Contains(string(*saved), `"mcpOAuth":{"x":1}`) {
 		t.Fatalf("wired=%v hits=%d saved=%q", wired, *hits, *saved)
@@ -68,7 +79,7 @@ func TestRefreshFlagOnRefreshesServerOwnedAndPersists(t *testing.T) {
 }
 
 func TestRefreshFlagOnNeverRefreshesHeldAccount(t *testing.T) {
-	hits, saved, _, p := refreshPoller(t, "a", true, false)
+	hits, saved, _, p := refreshPoller(t, "a", true, false, "a")
 	res := p.RefreshNow(context.Background(), []string{"a"})
 	if *hits != 0 || *saved != nil || res[0].Usage.Err != "unauthorized" {
 		t.Fatalf("hits=%d saved=%q res=%+v", *hits, *saved, res[0])
@@ -96,7 +107,7 @@ func logRefresh(t *testing.T, persist func(id string, b json.RawMessage, logSoFa
 	p.SetAccounts(func() []vault.Account { return []vault.Account{{ID: "acct-1", Block: blk}} })
 	r := usage.NewOAuthRefresher()
 	r.URL = tok.URL
-	wireRefresher(p, true, r, logx.New(&buf), func(string) bool { return true },
+	wireRefresher(p, true, r, logx.New(&buf), []string{"acct-1"}, func(string) bool { return true },
 		func(id string, b json.RawMessage) error { return persist(id, b, buf.String()) })
 	p.RefreshNow(context.Background(), []string{"acct-1"})
 	return buf.String()
