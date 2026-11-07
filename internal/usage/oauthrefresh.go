@@ -47,6 +47,59 @@ func NewOAuthRefresher() *OAuthRefresher {
 	}
 }
 
+// Status classes of a failed token call: a small fixed set chosen here from the HTTP status, the
+// only thing about the failure that is logged (never the body, a token or an identity).
+const (
+	ClassBadRequest   = "bad_request"
+	ClassUnauthorized = "unauthorized"
+	ClassForbidden    = "forbidden"
+	ClassRateLimited  = "rate_limited"
+	ClassServerError  = "server_error"
+	ClassNetwork      = "network"
+	ClassOther        = "other"
+)
+
+// StatusClass maps the token endpoint's HTTP status to its class. 2xx is not a failure, so it and
+// any other unlisted status map to ClassOther.
+func StatusClass(code int) string {
+	switch {
+	case code == http.StatusBadRequest:
+		return ClassBadRequest
+	case code == http.StatusUnauthorized:
+		return ClassUnauthorized
+	case code == http.StatusForbidden:
+		return ClassForbidden
+	case code == http.StatusTooManyRequests:
+		return ClassRateLimited
+	case code >= 500 && code <= 599:
+		return ClassServerError
+	}
+	return ClassOther
+}
+
+// RefreshError is a failed token call. Its text is fixed (no body, token or transport text); the
+// poller reads StatusClass with errors.As to log it.
+type RefreshError struct {
+	StatusClass string
+	msg         string
+}
+
+func (e *RefreshError) Error() string {
+	if e.msg == "" {
+		return "oauth refresh: failed"
+	}
+	return e.msg
+}
+
+// RefreshStatusClass is the class of a refresher failure, ClassOther when err is not a RefreshError.
+func RefreshStatusClass(err error) string {
+	var re *RefreshError
+	if errors.As(err, &re) && re.StatusClass != "" {
+		return re.StatusClass
+	}
+	return ClassOther
+}
+
 type tokenReply struct {
 	AccessToken      string `json:"access_token"`
 	RefreshToken     string `json:"refresh_token"`
@@ -87,12 +140,13 @@ func (r *OAuthRefresher) Refresh(ctx context.Context, block json.RawMessage) (js
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := r.HTTP.Do(req)
 	if err != nil {
-		return nil, errors.New("oauth refresh: request failed") // the transport error can quote the URL
+		// the transport error can quote the URL, so only its class is kept
+		return nil, &RefreshError{StatusClass: ClassNetwork, msg: "oauth refresh: request failed"}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxRefreshReply))
-		return nil, fmt.Errorf("oauth refresh: status %d", resp.StatusCode)
+		return nil, &RefreshError{StatusClass: StatusClass(resp.StatusCode), msg: fmt.Sprintf("oauth refresh: status %d", resp.StatusCode)}
 	}
 	var tr tokenReply
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxRefreshReply)).Decode(&tr); err != nil {
