@@ -305,6 +305,8 @@ func TestPageNudgeWordingIsHonest(t *testing.T) {
 	p := page(r, r.login())
 	for _, want := range []string{
 		"'Nudge: ask session to reload plugins'",
+		// The per-host button nudges every session on the host, so its label must say so.
+		"'Nudge all sessions on this host to reload plugins'",
 		"Delivered (asked, unverified)",
 		"/reload-plugins",
 	} {

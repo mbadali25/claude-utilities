@@ -50,8 +50,8 @@ restart-type command cannot be added without every confirm gate picking it up.
 
 ## What the nudge is, and what it is not
 
-`reload_plugins` is shown in the UI as **"Nudge: ask session to reload plugins"** (per session and
-per host; the protocol value is still `reload_plugins`). It writes an instruction the hook later
+`reload_plugins` is shown in the UI as **"Nudge: ask session to reload plugins"** per session and
+**"Nudge all sessions on this host to reload plugins"** per host (the protocol value is still `reload_plugins`). It writes an instruction the hook later
 puts in front of the model, so the best it can reach is `delivered`, shown as **"Delivered (asked,
 unverified)"**. The UI also shows the line that does it for certain: type `/reload-plugins` in
 that session.
@@ -590,7 +590,7 @@ Everything above is driven from the **Hosts** tab of the admin UI
   button**: a stale session's row already carries its own relaunch command with a Copy button, which
   is the whole of what a restart can give one session. `restart_sessions` is still reachable at
   `session` scope through the API, with `confirm: true` like every other scope.
-- **Per host**, on their own rule above the swap row: *Nudge: ask session to reload plugins*, *Enable remote on all* and
+- **Per host**, on their own rule above the swap row: *Nudge all sessions on this host to reload plugins*, *Enable remote on all* and
   *Restart sessions*. The first two go through a confirm dialog that states how many sessions are
   affected and that no session is stopped, killed or restarted — the UI side of the `confirm: true`
   the hub insists on. *Restart sessions* goes to its own dialog, because a count cannot name the
