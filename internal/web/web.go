@@ -788,13 +788,7 @@ func (s *server) swap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.hub.SwapEx(r.Context(), in.Host, in.Account)
-	var held *hub.HeldError
 	switch {
-	case errors.As(err, &held):
-		// A refusal the UI can explain: the code picks the copy, holder names the host to swap first.
-		logger.Warn("swap refused", "action", "swap", "result", "refused", "reason", "held_elsewhere")
-		writeJSON(w, http.StatusConflict, map[string]string{"error": logx.Redact(err.Error()), "code": "held_elsewhere", "holder": logx.Redact(held.Host)})
-		return
 	case errors.Is(err, hub.ErrSignInAgain):
 		logger.Warn("swap refused", "action", "swap", "result", "refused", "reason", "sign_in_again")
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "code": "sign_in_again"})
@@ -804,27 +798,13 @@ func (s *server) swap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// outcome separates the two successes: a login was written, or the host already held the
-	// account and nothing was. Both are 200; only the UI copy differs. warnings are cautions on a
-	// swap that went through; home is the agent's code for which credentials file it wrote.
-	body := map[string]any{"ok": true, "outcome": string(res.Outcome), "warnings": warningsJSON(res.Warnings)}
+	// account and nothing was. Both are 200; only the UI copy differs. home is the agent's code
+	// for which credentials file it wrote.
+	body := map[string]any{"ok": true, "outcome": string(res.Outcome)}
 	if res.Home != "" {
 		body["home"] = res.Home
 	}
 	writeJSON(w, http.StatusOK, body)
-}
-
-type warningJSON struct {
-	Code     string `json:"code"`
-	Host     string `json:"host,omitempty"`
-	AgeHours int    `json:"ageHours,omitempty"`
-}
-
-func warningsJSON(ws []hub.SwapWarning) []warningJSON {
-	out := make([]warningJSON, 0, len(ws))
-	for _, w := range ws {
-		out = append(out, warningJSON{Code: w.Code, Host: logx.Redact(w.Host), AgeHours: w.AgeHours})
-	}
-	return out
 }
 
 func (s *server) enrolCode(w http.ResponseWriter, _ *http.Request) {

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"claude-utilities/internal/ownership"
 	"claude-utilities/internal/proto"
 	"claude-utilities/internal/vault"
 )
@@ -42,38 +44,37 @@ func swapEx(f *fixture, host, acct string) (SwapResult, error) {
 	return f.h.SwapEx(context.Background(), host, acct)
 }
 
-func TestSwapRefusedWhenAnotherOnlineHostHoldsTheLineage(t *testing.T) {
+func noLeak(t *testing.T, out string, secrets ...string) {
+	t.Helper()
+	for _, leak := range secrets {
+		if strings.Contains(out, leak) {
+			t.Fatalf("log leaked %q:\n%s", leak, out)
+		}
+	}
+}
+
+// One account may be swapped onto any number of hosts: the second swap is not refused, it reaches
+// the agent with the vault's login, and ownership records the later host as Active.
+func TestSwapSucceedsOnASecondHostHoldingTheSameAccount(t *testing.T) {
 	f := newFixture(t)
 	_, two, id1, id2, _ := f.twoHosts()
 	if _, err := swapEx(f, id1, "A"); err != nil { // host one now holds A's lineage
 		t.Fatal(err)
 	}
-	two.mu.Lock()
-	two.order = nil
-	two.mu.Unlock()
-
-	_, err := swapEx(f, id2, "A")
-	if !errors.Is(err, ErrHeldElsewhere) {
-		t.Fatalf("got %v, want ErrHeldElsewhere", err)
+	got, err := swapEx(f, id2, "A")
+	if err != nil || got.Outcome != SwapDone {
+		t.Fatalf("second host: %+v, %v", got, err)
 	}
-	var he *HeldError
-	if !errors.As(err, &he) || he.Host != "one" {
-		t.Fatalf("holder not named: %+v", he)
+	if _, blocks := two.snapshot(); len(blocks) != 1 || blocks[0] != f.vaultBlock("A") {
+		t.Fatalf("swap_req to the second host: %v", blocks)
 	}
-	if want := "Held by one: swap that host to another account first, or sign in again"; err.Error() != want {
-		t.Fatalf("message %q, want %q", err.Error(), want)
+	use := f.reg.HostsUsing("A")
+	if use[id2] != ownership.Active || use[id1] != ownership.Shared {
+		t.Fatalf("ownership of A: %v", use)
 	}
-	if order, blocks := two.snapshot(); len(blocks) != 0 {
-		t.Fatalf("a swap_req reached the refused host: %v %v", order, blocks)
-	}
-	out := f.logs.String()
-	for _, leak := range []string{"rt-a", "id-a", `"a0"`} {
-		if strings.Contains(out, leak) {
-			t.Fatalf("log leaked %q:\n%s", leak, out)
-		}
-	}
-	if !strings.Contains(out, "held_elsewhere") {
-		t.Fatalf("refusal reason not logged:\n%s", out)
+	noLeak(t, f.logs.String(), "rt-a", "id-a", `"a0"`)
+	if strings.Contains(f.logs.String(), "held_elsewhere") {
+		t.Fatalf("a held-elsewhere refusal was logged:\n%s", f.logs.String())
 	}
 }
 
@@ -83,26 +84,13 @@ func TestSwapAllowedForTheHolderItself(t *testing.T) {
 	if _, err := swapEx(f, id1, "A"); err != nil {
 		t.Fatal(err)
 	}
-	got, err := swapEx(f, id1, "A") // same host, same account: the no-op, never a refusal
+	got, err := swapEx(f, id1, "A") // same host, same account: the no-op
 	if err != nil || got.Outcome != SwapAlreadyActive {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 }
 
-func TestSwapAllowedOnceTheHolderMovedToAnotherAccount(t *testing.T) {
-	f := newFixture(t)
-	_, _, id1, id2, _ := f.twoHosts()
-	for _, target := range []string{"A", "B"} { // one holds A, then leaves it for B
-		if _, err := swapEx(f, id1, target); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := swapEx(f, id2, "A"); err != nil {
-		t.Fatalf("A is free now: %v", err)
-	}
-}
-
-func TestSwapWarnsWhenTheHolderIsOffline(t *testing.T) {
+func TestSwapAllowedWhenTheHolderIsOffline(t *testing.T) {
 	f := newFixture(t)
 	_, _, id1, id2, a1 := f.twoHosts()
 	if _, err := swapEx(f, id1, "A"); err != nil {
@@ -117,60 +105,22 @@ func TestSwapWarnsWhenTheHolderIsOffline(t *testing.T) {
 		}
 		return false
 	})
-	got, err := swapEx(f, id2, "A")
-	if err != nil {
+	if _, err := swapEx(f, id2, "A"); err != nil {
 		t.Fatalf("an offline holder must not block the swap: %v", err)
-	}
-	if len(got.Warnings) != 1 || got.Warnings[0].Code != WarnHolderOffline || got.Warnings[0].Host != "one" {
-		t.Fatalf("warnings: %+v", got.Warnings)
 	}
 }
 
-func TestSwapStaleCopyWarningThresholds(t *testing.T) {
-	cases := []struct {
-		name    string
-		age     time.Duration
-		after   time.Duration // 0 keeps the default
-		zeroAt  bool
-		warn    bool
-		wantHrs int
-	}{
-		{name: "fresh", age: 5 * time.Hour},
-		{name: "exactly at the threshold", age: 6 * time.Hour},
-		{name: "just over", age: 6*time.Hour + time.Minute, warn: true, wantHrs: 6},
-		{name: "old", age: 30 * time.Hour, warn: true, wantHrs: 30},
-		{name: "custom threshold", age: 2 * time.Hour, after: time.Hour, warn: true, wantHrs: 2},
-		{name: "unknown age is not flagged", zeroAt: true},
+// A stored login of any age is swapped without a caution: the result carries only the outcome and home.
+func TestSwapOfAnOldStoredLoginSucceeds(t *testing.T) {
+	f := newFixture(t)
+	_, _, id1, _, _ := f.twoHosts()
+	acct, _ := f.v.Get("A")
+	acct.Updated = f.clk.Now().Add(-30 * time.Hour)
+	if err := f.v.Put(acct); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newFixture(t)
-			_, _, id1, _, _ := f.twoHosts()
-			if tc.after > 0 {
-				f.h.SetStaleAfter(tc.after)
-			}
-			acct, _ := f.v.Get("A")
-			acct.Updated = f.clk.Now().Add(-tc.age)
-			if tc.zeroAt {
-				acct.Updated = time.Time{}
-			}
-			if err := f.v.Put(acct); err != nil {
-				t.Fatal(err)
-			}
-			got, err := swapEx(f, id1, "A")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !tc.warn {
-				if len(got.Warnings) != 0 {
-					t.Fatalf("unexpected warnings %+v", got.Warnings)
-				}
-				return
-			}
-			if len(got.Warnings) != 1 || got.Warnings[0].Code != WarnStaleCopy || got.Warnings[0].AgeHours != tc.wantHrs {
-				t.Fatalf("warnings %+v, want stale_copy at %d h", got.Warnings, tc.wantHrs)
-			}
-		})
+	if got, err := swapEx(f, id1, "A"); err != nil || got.Outcome != SwapDone {
+		t.Fatalf("got %+v, %v", got, err)
 	}
 }
 
@@ -184,11 +134,6 @@ func TestSwapRefusedForUnauthorizedAccountWithSignInAgain(t *testing.T) {
 	f := newFixture(t)
 	_, two, _, id2, _ := f.twoHosts()
 	f.h.SetUnauthorized(func(id string) bool { return id == "A" })
-	acct, _ := f.v.Get("A") // an old copy too: unauthorized wins over the stale warning
-	acct.Updated = f.clk.Now().Add(-48 * time.Hour)
-	if err := f.v.Put(acct); err != nil {
-		t.Fatal(err)
-	}
 	_, err := swapEx(f, id2, "A")
 	if !errors.Is(err, ErrSignInAgain) {
 		t.Fatalf("got %v, want ErrSignInAgain", err)
@@ -214,20 +159,20 @@ func TestUnauthorizedDoesNotBlockAnAlreadyActiveNoOp(t *testing.T) {
 	}
 }
 
-// Swap keeps its two-value shape for every existing caller and still applies the guards.
-func TestSwapWrapperAppliesTheGuards(t *testing.T) {
+// Swap keeps its two-value shape for every existing caller.
+func TestSwapWrapperAllowsAHeldAccount(t *testing.T) {
 	f := newFixture(t)
 	_, _, id1, id2, _ := f.twoHosts()
 	if _, err := f.h.Swap(context.Background(), id1, "A"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.h.Swap(context.Background(), id2, "A"); !errors.Is(err, ErrHeldElsewhere) {
+	if _, err := f.h.Swap(context.Background(), id2, "A"); err != nil {
 		t.Fatalf("got %v", err)
 	}
 }
 
-// An imported login is live on the importing host, so another host may not take it.
-func TestImportedAccountCountsAsHeldByTheImportingHost(t *testing.T) {
+// An imported login is live on the importing host; another host may take it too.
+func TestImportedAccountCanBeSwappedOntoAnotherHost(t *testing.T) {
 	f := newFixture(t)
 	f.seedStale()
 	a1, _, id1 := f.enrol("one")
@@ -239,8 +184,144 @@ func TestImportedAccountCountsAsHeldByTheImportingHost(t *testing.T) {
 	a2, _, id2 := f.enrol("two")
 	f.reg.SwapIn("C", id2)
 	f.newScript("id-c", `{"refreshToken":"rt-c","accessToken":"c1"}`).serve(a2)
-	if _, err := swapEx(f, id2, acct.ID); !errors.Is(err, ErrHeldElsewhere) {
-		t.Fatalf("got %v, want ErrHeldElsewhere", err)
+	if _, err := swapEx(f, id2, acct.ID); err != nil {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// Two hosts hold A. The vault copy follows the Active holder only: a Shared host's rotated login is
+// never adopted, and its swap-away never writes back over the vault.
+func TestSharedHostNeitherAdoptsNorWritesBackOverTheVault(t *testing.T) {
+	f := newFixture(t)
+	one, _, id1, id2, _ := f.twoHosts()
+	for _, id := range []string{id1, id2} {
+		if _, err := swapEx(f, id, "A"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := f.vaultBlock("A")
+	// Host one (Shared) now holds a rotated A login.
+	one.mu.Lock()
+	one.liveBlock = `{"refreshToken":"rt-a-one","accessToken":"a-one"}`
+	one.staleIdentity = true
+	one.mu.Unlock()
+	if err := f.h.AdoptHeld(context.Background(), id1); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.vaultBlock("A"); got != want {
+		t.Fatalf("adopt from a Shared host changed vault A: %s", got)
+	}
+	// Swapping the Shared host away writes nothing back either (identity names A, lineage differs).
+	if _, err := swapEx(f, id1, "B"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.vaultBlock("A"); got != want {
+		t.Fatalf("write-back from a Shared host changed vault A: %s", got)
+	}
+}
+
+// The Active host's rotation is adopted; a later rotation by a different, non-matching lineage on the
+// other host cannot displace it.
+func TestOnlyTheActiveHostsRotationIsAdoptedAndNeverAcrossLineages(t *testing.T) {
+	f := newFixture(t)
+	one, two, id1, id2, _ := f.twoHosts()
+	for _, id := range []string{id1, id2} {
+		if _, err := swapEx(f, id, "A"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rotated := `{"refreshToken":"rt-a-2","accessToken":"a2"}`
+	two.mu.Lock()
+	two.liveBlock = rotated
+	two.mu.Unlock()
+	if err := f.h.AdoptHeld(context.Background(), id2); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.vaultBlock("A"); got != rotated {
+		t.Fatalf("Active host's rotation not adopted: %s", got)
+	}
+	// Host two is then moved to another login out of band, and exports C's lineage while still
+	// recorded Active on A: nothing of C may land in A's slot.
+	two.mu.Lock()
+	two.liveBlock = `{"refreshToken":"rt-c","accessToken":"c9"}`
+	two.mu.Unlock()
+	if err := f.h.AdoptHeld(context.Background(), id2); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.vaultBlock("A"); got != rotated {
+		t.Fatalf("a different lineage reached vault A: %s", got)
+	}
+	// And the Shared host one still cannot overwrite it.
+	one.mu.Lock()
+	one.liveBlock = `{"refreshToken":"rt-a-one","accessToken":"x"}`
+	one.mu.Unlock()
+	if err := f.h.AdoptHeld(context.Background(), id1); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.vaultBlock("A"); got != rotated {
+		t.Fatalf("vault A = %s", got)
+	}
+}
+
+// An Active host whose live login has another lineage than the stored one (identity names A, token
+// does not match) must not write back into A's slot at swap time.
+func TestWriteBackFromAMismatchedLineageIsRefusedOnASharedAccount(t *testing.T) {
+	f := newFixture(t)
+	_, two, id1, id2, _ := f.twoHosts()
+	for _, id := range []string{id1, id2} {
+		if _, err := swapEx(f, id, "A"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := f.vaultBlock("A")
+	two.mu.Lock()
+	two.liveBlock = `{"refreshToken":"rt-unknown","accessToken":"u1"}`
+	two.staleIdentity = true
+	two.mu.Unlock()
+	if _, err := swapEx(f, id2, "B"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.vaultBlock("A"); got != want {
+		t.Fatalf("mismatched lineage written to vault A: %s", got)
+	}
+	noLeak(t, f.logs.String(), "rt-unknown", "rt-a", "id-a")
+}
+
+// Hosts swapping onto the same account at the same time all succeed, and the vault copy stays on
+// the account's lineage. Run under -race.
+func TestConcurrentSwapsOntoOneAccountAllSucceed(t *testing.T) {
+	f := newFixture(t)
+	_, _, id1, id2, _ := f.twoHosts()
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, id := range []string{id1, id2} {
+		wg.Add(1)
+		go func() { defer wg.Done(); _, errs[i] = swapEx(f, id, "A") }()
+	}
+	wg.Add(2)
+	go func() { defer wg.Done(); _ = f.h.AdoptHeld(context.Background(), id1) }()
+	go func() { defer wg.Done(); _ = f.h.AdoptHeld(context.Background(), id2) }()
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("host %d: %v", i, err)
+		}
+	}
+	if got := f.vaultBlock("A"); !strings.Contains(got, `"rt-a"`) {
+		t.Fatalf("vault A lost its lineage: %s", got)
+	}
+	use := f.reg.HostsUsing("A")
+	if len(use) != 2 {
+		t.Fatalf("ownership of A: %v", use)
+	}
+	active := 0
+	for _, st := range use {
+		if st == ownership.Active {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("want exactly one Active holder, got %v", use)
 	}
 }
 
