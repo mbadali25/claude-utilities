@@ -927,8 +927,8 @@ func (h *Hub) swap(ctx context.Context, hostID, accountID string, out *SwapResul
 	}
 
 	// A rejected stored login would only sign the host out, so it is the one refusal left. The same
-	// account may be swapped onto any number of hosts (the operator accepted that a shared refresh
-	// token can rotate out from under a host); ownership keeps the latest swapper as Active. The
+	// account may be swapped onto any number of hosts (the operator uses one account on several
+	// hosts at once; any ill effect of sharing a refresh token is unproven, not observed); ownership keeps the latest swapper as Active. The
 	// check logs no token, identity or host name.
 	h.mu.Lock()
 	unauth := h.unauthorized
@@ -939,7 +939,7 @@ func (h *Hub) swap(ctx context.Context, hostID, accountID string, out *SwapResul
 	}
 
 	// Write back only what this host may speak for: the Active holder. A Shared or Stale holder
-	// has a possibly rotated-out copy, and a host that merely claims an account (identity is
+	// may hold a copy that differs from the latest, and a host that merely claims an account (identity is
 	// agent-supplied, the block carries none) must not overwrite it, even when the server owns it.
 	// A slot is never overwritten with a login of a different lineage; that is how a stale identity
 	// used to put one account's tokens into another's slot.
@@ -981,7 +981,7 @@ func (h *Hub) swap(ctx context.Context, hostID, accountID string, out *SwapResul
 		return "", fmt.Errorf("hub: agent refused swap: %s", logx.Redact(res.Reason))
 	}
 	// No SwapAway on the old account: it would promote the previous holder to Active with a
-	// possibly rotated-out copy. The vault already holds this host's fresh block, so the host stays
+	// copy that may differ from the latest. The vault already holds this host's fresh block, so the host stays
 	// the recorded owner until another host swaps in or the host is lost.
 	h.reg.SwapIn(accountID, hostID)
 	h.noteSwap(accountID)
