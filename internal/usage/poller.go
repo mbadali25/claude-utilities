@@ -25,7 +25,9 @@ var logger = logx.New(os.Stderr).With("component", "usage")
 func init() {
 	// "field" carries a response field path (five_hour.resets_at) and never a value.
 	// "tier" is one of active, idle, backoff.
-	logx.Allow("field", "tier")
+	// "body_class" is a fixed class of a 401/403 body (token_expired, ...), never body text.
+	// "status_class" is a fixed class of the token call's HTTP status (bad_request, ..., network).
+	logx.Allow("field", "tier", "body_class", "status_class")
 }
 
 // Tier says how often an account is polled.
@@ -489,6 +491,9 @@ func (p *Poller) fetchAccount(ctx context.Context, a vault.Account) (Usage, erro
 	}
 	nb, rerr := r.Refresh(ctx, a.Block)
 	if rerr != nil {
+		// Only the class chosen from the token call's status is logged, never the refresher's text.
+		logger.Warn("token refresh failed", "action", "refresh", "result", "failed", "account", a.ID,
+			"status_class", RefreshStatusClass(rerr))
 		return Usage{}, ErrUnauthorized // do not surface refresher text
 	}
 	if cb != nil {
@@ -548,7 +553,7 @@ func (p *Poller) record(id string, u Usage, err error, epoch uint64) Usage {
 	u.Err = category(err)
 	u.RetryAt = p.nextAt[id]
 	logger.Warn("poll failed", "action", "poll", "result", "failed", "account", id, "tier", string(TierBackoff),
-		"reason", u.Err, "status", HTTPStatus(err), "field", SchemaField(err), "durationms", wait.Milliseconds())
+		"reason", u.Err, "status", HTTPStatus(err), "field", SchemaField(err), "body_class", BodyClass(err), "durationms", wait.Milliseconds())
 	p.last[id] = u
 	return u
 }

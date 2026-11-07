@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"claude-utilities/internal/adminpw"
+	"claude-utilities/internal/logx"
 	"claude-utilities/internal/usage"
 	"claude-utilities/internal/vault"
 )
@@ -43,7 +44,7 @@ func refreshPoller(t *testing.T, id string, enabled bool, serverOwned bool) (hit
 	p.SetAccounts(func() []vault.Account { return []vault.Account{{ID: id, Block: blk}} })
 	r := usage.NewOAuthRefresher()
 	r.URL = tok.URL
-	wired = wireRefresher(p, enabled, r, func(string) bool { return serverOwned }, func(_ string, b json.RawMessage) error {
+	wired = wireRefresher(p, enabled, r, logx.New(io.Discard), func(string) bool { return serverOwned }, func(_ string, b json.RawMessage) error {
 		saved = append([]byte(nil), b...)
 		return nil
 	})
@@ -71,6 +72,59 @@ func TestRefreshFlagOnNeverRefreshesHeldAccount(t *testing.T) {
 	res := p.RefreshNow(context.Background(), []string{"a"})
 	if *hits != 0 || *saved != nil || res[0].Usage.Err != "unauthorized" {
 		t.Fatalf("hits=%d saved=%q res=%+v", *hits, *saved, res[0])
+	}
+}
+
+// logRefresh runs one refresh through wireRefresher with a captured log; persist sees the log as it
+// stands when the vault write happens.
+func logRefresh(t *testing.T, persist func(id string, b json.RawMessage, logSoFar string) error) string {
+	t.Helper()
+	var buf bytes.Buffer
+	tok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"access_token":"new-a","expires_in":60}`)
+	}))
+	t.Cleanup(tok.Close)
+	api := doerFunc(func(r *http.Request) (*http.Response, error) {
+		code := 401
+		if r.Header.Get("Authorization") == "Bearer new-a" {
+			code = 200
+		}
+		return &http.Response{StatusCode: code, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})
+	p := usage.NewPoller(api, usage.Config{})
+	blk := json.RawMessage(`{"accessToken":"old-a","refreshToken":"old-r"}`)
+	p.SetAccounts(func() []vault.Account { return []vault.Account{{ID: "acct-1", Block: blk}} })
+	r := usage.NewOAuthRefresher()
+	r.URL = tok.URL
+	wireRefresher(p, true, r, logx.New(&buf), func(string) bool { return true },
+		func(id string, b json.RawMessage) error { return persist(id, b, buf.String()) })
+	p.RefreshNow(context.Background(), []string{"acct-1"})
+	return buf.String()
+}
+
+func TestRefreshSuccessLogsOkOnlyAfterPersist(t *testing.T) {
+	var before string
+	out := logRefresh(t, func(_ string, _ json.RawMessage, soFar string) error { before = soFar; return nil })
+	if strings.Contains(before, `"result":"ok"`) {
+		t.Fatalf("ok logged before the vault write: %s", before)
+	}
+	for _, w := range []string{`"action":"refresh"`, `"result":"ok"`, `"account":"acct-1"`} {
+		if !strings.Contains(out, w) {
+			t.Fatalf("log lacks %s: %s", w, out)
+		}
+	}
+	for _, bad := range []string{"new-a", "old-a", "old-r", "[dropped]"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("log contains %q: %s", bad, out)
+		}
+	}
+}
+
+func TestRefreshPersistFailureLogsErrorAndNotOk(t *testing.T) {
+	out := logRefresh(t, func(string, json.RawMessage, string) error { return os.ErrPermission })
+	if strings.Contains(out, `"result":"ok"`) || !strings.Contains(out, `"level":"ERROR"`) ||
+		!strings.Contains(out, `"result":"failed"`) || !strings.Contains(out, `"account":"acct-1"`) {
+		t.Fatalf("log: %s", out)
 	}
 }
 

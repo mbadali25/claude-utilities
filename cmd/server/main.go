@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -198,7 +199,7 @@ const maxStdinPassword = 4 << 10
 // refreshes only accounts for which serverOwned is true: a refresh may rotate the refresh token, so
 // the server leaves a login a host holds to that host (conservative; sign-out is not observed). A failed refresh is not retried here;
 // the poller's unauthorized backoff applies. A persist failure is logged by account only.
-func wireRefresher(p *usage.Poller, enabled bool, r usage.Refresher, serverOwned func(string) bool,
+func wireRefresher(p *usage.Poller, enabled bool, r usage.Refresher, log *slog.Logger, serverOwned func(string) bool,
 	persist func(id string, block json.RawMessage) error) bool {
 	if !enabled {
 		return false
@@ -206,8 +207,11 @@ func wireRefresher(p *usage.Poller, enabled bool, r usage.Refresher, serverOwned
 	p.SetRefreshAllowed(serverOwned)
 	p.SetRefresher(r, func(id string, b json.RawMessage) {
 		if err := persist(id, b); err != nil {
-			logx.New(os.Stderr).Error("persist refreshed login failed", "action", "refresh", "result", "failed", "account", id)
+			log.Error("persist refreshed login failed", "action", "refresh", "result", "failed", "account", id)
+			return
 		}
+		// Logged only once the vault holds the new login; the failing token call is logged by the poller.
+		log.Info("token refreshed", "action", "refresh", "result", "ok", "account", id)
 	})
 	return true
 }
@@ -226,7 +230,7 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 	h := hub.New(v, reg, filepath.Join(dataDir, "hosts.json"), log)
 	// Without --refresh-tokens an expired token shows as "unauthorized" in the UI.
 	poller := usage.NewPoller(&http.Client{Timeout: 20 * time.Second}, usage.DefaultConfig())
-	if wireRefresher(poller, refreshTokens, usage.NewOAuthRefresher(),
+	if wireRefresher(poller, refreshTokens, usage.NewOAuthRefresher(), log,
 		func(id string) bool { return reg.OwnerOf(id).Server },
 		func(id string, b json.RawMessage) error { return v.ReplaceBlock(id, b, time.Now()) }) {
 		log.Warn("token refresh enabled", "action", "refresh", "result", "enabled")
