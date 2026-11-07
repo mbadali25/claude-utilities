@@ -377,14 +377,11 @@
   .swap .why, .swap .swapmsg { flex:1 1 100%; font-size:var(--fs1); }
   .swap .why { color:var(--mut); }
   .swap .why:empty { display:none; }
-  /* The caution inside the open confirm: a stored login that is old enough to have expired. */
-  .confirm .cwarn { flex:1 1 100%; font-size:var(--fs1); color:var(--warn); background:var(--warn-bg);
-                    border-radius:var(--r); padding:var(--s3) var(--s4); }
   .swapmsg { display:flex; gap:var(--s3); align-items:baseline; color:var(--mut); }
   .swapmsg:empty { display:none; }
   .swapmsg.ok { color:var(--ok); }
   .swapmsg.bad { color:var(--bad); }
-  /* Swapped, with something the operator should know about (an old copy, an offline holder). */
+  /* Swapped, with something the operator should know about (the agent wrote to the live home). */
   .swapmsg.warn { color:var(--warn); }
   /* A no-op is neither good nor bad news, so it stays neutral rather than borrowing the ok green. */
   .swapmsg.info { color:var(--mut); }
@@ -2502,10 +2499,6 @@
       confirming = h.hostId; sw.textContent = '';
       var box = el('div', undefined, 'confirm');
       box.appendChild(el('div', 'Swap ' + h.name + ' to ' + label + '?', 'q'));
-      var sel = accountsCache.filter(function (x) { return x.id === pick.value; })[0];
-      if (sel && sel.stale && sel.copyAgeHours != null) {
-        box.appendChild(el('div', 'Stored login is ' + sel.copyAgeHours + ' h old. Its access token has probably expired; the swap signs the host in only if the refresh token is still valid.', 'cwarn'));
-      }
       var yes = el('button', 'Confirm swap', 'btn primary'); yes.type = 'button';
       var no = el('button', 'Cancel', 'btn'); no.type = 'button';
       no.addEventListener('click', function () { idle(); go.focus(); });
@@ -2550,15 +2543,9 @@
     return sw;
   }
 
-  // swapNotes turns a swap answer's warnings and home code into one sentence each. Host names come
-  // from agents and go in as text only. home is a fixed code, never a path.
+  // swapNotes turns a swap answer's home code into a sentence. home is a fixed code, never a path.
   function swapNotes(j) {
     var parts = [], warn = false;
-    ((j && j.warnings) || []).forEach(function (w) {
-      warn = true;
-      if (w.code === 'stale_copy') parts.push('Stored login was ' + w.ageHours + ' h old: sign in again if the host comes up signed out.');
-      else if (w.code === 'holder_offline') parts.push(w.host + ' is offline and may still hold this login.');
-    });
     if (j && j.home === 'home_moved') { warn = true; parts.push('Wrote to the live home (the recorded path differs).'); }
     else if (j && j.home === 'live_home') parts.push('Wrote to the live home.');
     return { text: parts.join(' '), warn: warn };

@@ -5,7 +5,7 @@
 ## What it does
 - On a 401 from the usage endpoint, POSTs JSON `{grant_type, refresh_token, client_id, scope}` to `https://platform.claude.com/v1/oauth/token` (30 s timeout, `Content-Type: application/json`, no other headers).
 - Merges the answer into the stored `claudeAiOauth` block: new `accessToken`, new `refreshToken` if returned (else the old one stays), `expiresAt`, `refreshTokenExpiresAt` when given. `mcpOAuth`, `subscriptionType`, `rateLimitTier` and unknown fields are kept. The block is saved with `vault.ReplaceBlock` (a backup is kept).
-- Refreshes only accounts no host holds (`ownership.OwnerOf(id).Server`). A held account is never refreshed by the server: a refresh rotates the refresh token and would sign the holding host out.
+- Refreshes only accounts no host holds (`ownership.OwnerOf(id).Server`). A held account is never refreshed by the server, as a conservative choice: a refresh may rotate the refresh token. That this signs a holding host out is unproven, not observed.
 - One attempt per poll. A failure (non-200, transport error, bad reply) shows `unauthorized`, keeps the last numbers and waits out the normal 1 h unauthorized backoff. No retry loop. Response bodies and tokens are never logged.
 
 ## Provisional client id

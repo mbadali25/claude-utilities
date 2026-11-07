@@ -22,16 +22,14 @@ func swapBody(t *testing.T, r *rig, s *session) (int, map[string]any) {
 	return w.Code, m
 }
 
-func TestSwapHeldElsewhereIs409WithCodeAndHolder(t *testing.T) {
+// A swap onto an account another host holds is an ordinary success: the endpoint has no
+// held_elsewhere refusal and the hub's result passes straight through.
+func TestSwapOntoAHeldAccountIsA200(t *testing.T) {
 	r := newRig(t)
 	s := r.login()
-	r.fh.swapErr = &hub.HeldError{Host: "one"}
 	code, m := swapBody(t, r, s)
-	if code != http.StatusConflict || m["code"] != "held_elsewhere" || m["holder"] != "one" {
+	if code != http.StatusOK || m["ok"] != true || m["code"] != nil || m["holder"] != nil {
 		t.Fatalf("got %d %v", code, m)
-	}
-	if want := "Held by one: swap that host to another account first, or sign in again"; m["error"] != want {
-		t.Fatalf("error %q, want %q", m["error"], want)
 	}
 }
 
@@ -48,33 +46,23 @@ func TestSwapUnauthorizedIs409SignInAgain(t *testing.T) {
 	}
 }
 
-func TestSwapSuccessCarriesWarningsAndHome(t *testing.T) {
+func TestSwapSuccessCarriesHome(t *testing.T) {
 	r := newRig(t)
 	s := r.login()
-	r.fh.swapRes = &hub.SwapResult{Outcome: hub.SwapDone, Home: proto.HomeMoved, Warnings: []hub.SwapWarning{
-		{Code: hub.WarnStaleCopy, AgeHours: 9}, {Code: hub.WarnHolderOffline, Host: "one"}}}
+	r.fh.swapRes = &hub.SwapResult{Outcome: hub.SwapDone, Home: proto.HomeMoved}
 	code, m := swapBody(t, r, s)
 	if code != http.StatusOK || m["ok"] != true || m["outcome"] != "swapped" || m["home"] != proto.HomeMoved {
 		t.Fatalf("got %d %v", code, m)
 	}
-	ws, _ := m["warnings"].([]any)
-	if len(ws) != 2 {
-		t.Fatalf("warnings %v", m["warnings"])
-	}
-	w0, _ := ws[0].(map[string]any)
-	w1, _ := ws[1].(map[string]any)
-	if w0["code"] != "stale_copy" || w0["ageHours"] != float64(9) || w1["code"] != "holder_offline" || w1["host"] != "one" {
-		t.Fatalf("warnings %v", ws)
+	if _, has := m["warnings"]; has {
+		t.Fatalf("a warnings list is still sent: %v", m)
 	}
 }
 
-func TestSwapSuccessWithoutWarningsHasEmptyList(t *testing.T) {
+func TestSwapSuccessWithoutHomeOmitsIt(t *testing.T) {
 	r := newRig(t)
 	s := r.login()
 	_, m := swapBody(t, r, s)
-	if ws, ok := m["warnings"].([]any); !ok || len(ws) != 0 {
-		t.Fatalf("warnings %v", m["warnings"])
-	}
 	if _, has := m["home"]; has {
 		t.Fatalf("home present with nothing reported: %v", m)
 	}
@@ -82,11 +70,16 @@ func TestSwapSuccessWithoutWarningsHasEmptyList(t *testing.T) {
 
 // The page cannot run script in a Go test, so this pins the pieces the screenshots then show:
 // the amber note on the card, the option suffixes, the disabled-with-reason for a refused login,
-// the confirm caution, and the result line's cautions. The behaviour itself is covered by the
-// browser run (docs/runbooks/claude-swap-e2e.md).
+// and the result line's home note. The behaviour itself is covered by the browser run
+// (docs/runbooks/claude-swap-e2e.md). The held-elsewhere and swap-time stale caution copy is gone.
 func TestPageCarriesTheStaleAndRefusalCopy(t *testing.T) {
 	r := newRig(t)
 	p := page(r, r.login())
+	for _, gone := range []string{`held_elsewhere`, `holder_offline`, `stale_copy`, `w.ageHours`, `'cwarn'`} {
+		if strings.Contains(p, gone) {
+			t.Fatalf("page still carries %q", gone)
+		}
+	}
 	for _, want := range []string{
 		`'Stored login is ' + a.copyAgeHours + ' h old.`,
 		`acct-note warn stale-copy`,
@@ -94,7 +87,6 @@ func TestPageCarriesTheStaleAndRefusalCopy(t *testing.T) {
 		`' (' + a.copyAgeHours + ' h old)'`,
 		`'Sign in again first: Anthropic refused the stored login for '`,
 		`go.disabled = !!w`,
-		`'cwarn'`,
 		`function swapNotes(j)`,
 		`home_moved`,
 		`.swapmsg.warn`,

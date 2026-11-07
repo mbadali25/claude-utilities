@@ -44,8 +44,8 @@ A claude-swap swap replaces the `claudeAiOauth` block but does not revoke the ol
 the session stays "valid" and keeps the old login until it restarts.
 
 **Rejected option:** we could force adoption by invalidating the old token to provoke a 401.
-claude-swap must not. The old token's lineage is shared with the host that now owns that
-account, so breaking it breaks the other host.
+claude-swap does not. The old token's lineage may be shared with another host using that
+account; whether revoking it would affect that host is unproven, not observed, so we do not try.
 
 ## No external trigger of any kind
 

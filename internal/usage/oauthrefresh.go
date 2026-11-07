@@ -2,7 +2,7 @@ package usage
 
 // OAuthRefresher renews a stored claudeAiOauth block through the OAuth token endpoint. It is only
 // wired when the operator passes --refresh-tokens, and only ever for accounts no host holds: a
-// refresh rotates the refresh token, so refreshing a login a host is using would sign that host out.
+// refresh may rotate the refresh token, so the server stays conservative and leaves a login a host is using to that host (a sign-out from this is unproven, not observed).
 
 import (
 	"bytes"

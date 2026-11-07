@@ -10,6 +10,7 @@ import (
 	"claude-utilities/internal/logx"
 	"claude-utilities/internal/ownership"
 	"claude-utilities/internal/proto"
+	"claude-utilities/internal/vault"
 )
 
 // adoptEvery is how often Run asks each online host for its live login.
@@ -92,7 +93,8 @@ func (h *Hub) AdoptHeld(ctx context.Context, hostID string) error {
 	prevLineage := ho.lineage
 	h.mu.Unlock()
 
-	for _, acct := range h.vault.List() {
+	accts := h.vault.List()
+	for _, acct := range accts {
 		if st, holds := h.reg.HostsUsing(acct.ID)[hostID]; !holds || st != ownership.Active {
 			continue
 		}
@@ -110,6 +112,12 @@ func (h *Hub) AdoptHeld(ctx context.Context, hostID string) error {
 			}
 			return h.adopt(hostID, ho, acct.ID, block, newLineage)
 		}
+		if otherStoredLineage(accts, acct.ID, block) {
+			// The login is demonstrably another stored account's, not a rotation of this one.
+			h.log.Warn("adopt skipped", "action", "adopt", "host_id", hostID, "account", acct.ID,
+				"result", "skipped", "reason", "other_account_lineage")
+			continue
+		}
 		if prevLineage != storedLineage || newLineage == "" {
 			h.log.Warn("adopt skipped", "action", "adopt", "host_id", hostID, "account", acct.ID,
 				"result", "skipped", "reason", "lineage_unproven")
@@ -118,6 +126,17 @@ func (h *Hub) AdoptHeld(ctx context.Context, hostID string) error {
 		return h.adopt(hostID, ho, acct.ID, block, newLineage)
 	}
 	return nil
+}
+
+// otherStoredLineage reports whether block's refresh token is the stored login of an account other
+// than self, which proves the host holds that account and not a rotation of self.
+func otherStoredLineage(accts []vault.Account, self string, block json.RawMessage) bool {
+	for _, a := range accts {
+		if a.ID != self && sameLineage(block, a.Block) {
+			return true
+		}
+	}
+	return false
 }
 
 // adopt writes the rotated block through the vault's backed-up replace, moves the host's lineage

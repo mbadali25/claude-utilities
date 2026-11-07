@@ -195,8 +195,8 @@ func readNewPassword(in io.Reader, errOut io.Writer) (string, error) {
 const maxStdinPassword = 4 << 10
 
 // wireRefresher turns on server-side token refresh when enabled, and reports whether it did. It
-// refreshes only accounts for which serverOwned is true: a refresh rotates the refresh token, so
-// doing it for a login a host holds would sign that host out. A failed refresh is not retried here;
+// refreshes only accounts for which serverOwned is true: a refresh may rotate the refresh token, so
+// the server leaves a login a host holds to that host (conservative; sign-out is not observed). A failed refresh is not retried here;
 // the poller's unauthorized backoff applies. A persist failure is logged by account only.
 func wireRefresher(p *usage.Poller, enabled bool, r usage.Refresher, serverOwned func(string) bool,
 	persist func(id string, block json.RawMessage) error) bool {
