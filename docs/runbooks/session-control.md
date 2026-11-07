@@ -663,8 +663,15 @@ What it touches, and what it does not:
   Remote Control's own `remoteControlAtStartup` must be at user scope too, so this is the right
   file for both.
 - It adds one entry under `SessionStart` and one under `UserPromptSubmit`, each running
-  `"<agent path>" hook --tag claude-swap-session-control`. That tag inside the command string is
-  the only marker; `uninstall` removes exactly the entries carrying it.
+  `"<agent path>" hook --tag claude-swap-session-control --state-dir "<dir>"`. That tag inside the
+  command string is the only marker; `uninstall` removes exactly the entries carrying it.
+- **State dir.** Claude runs hooks without the agent unit's environment, so the dir is baked into
+  the command. `install` resolves it like the agent does (`CLAUDESWAP_STATE_DIR`, else the
+  default). Install from the same environment as the unit, e.g.
+  `CLAUDESWAP_STATE_DIR=<dir> agent hooks install`, and re-run it after upgrading: re-running
+  replaces our entry in place. An entry installed by an older build has no `--state-dir`; the hook
+  then falls back to the environment or default, which misses the queue when the unit uses a
+  custom dir (the hook silently answers `{}`).
 - Everything else in the file — other hooks, other events, `model`, `permissions`, keys this
   program has never heard of — is decoded, re-encoded and left alone.
 - It is idempotent: running `install` three times leaves one entry per event.

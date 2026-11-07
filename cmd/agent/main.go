@@ -26,7 +26,7 @@ const usage = `usage: agent <command>
   install                                start the agent at login
   hooks   install | uninstall            opt in to (or out of) the session-control hook;
                                          edits only this program's block in settings.json
-  hook    --tag TAG                      the hook itself: reads the hook payload on stdin`
+  hook    --tag TAG [--state-dir DIR]    the hook itself: reads the hook payload on stdin`
 
 // codeEnv names the environment variable holding the pre-approved enrolment code.
 const codeEnv = "CLAUDESWAP_ENROL_CODE"
@@ -54,7 +54,7 @@ func dispatch(ctx context.Context, args []string, out, errOut io.Writer) int {
 	case "hooks":
 		return hooksCmd(args[1:], out, errOut)
 	case "hook":
-		return hookCmd(os.Stdin, out)
+		return hookCmd(args[1:], os.Stdin, out)
 	}
 	_, _ = fmt.Fprintln(errOut, usage)
 	return 1
@@ -74,7 +74,13 @@ func hooksCmd(args []string, out, errOut io.Writer) int {
 			_, _ = fmt.Fprintln(errOut, "hooks install:", logx.Redact(err.Error()))
 			return 1
 		}
-		path, err := agent.InstallHooks(exe)
+		// The hook runs without the unit's environment, so bake in the dir this install resolves.
+		stateDir, err := agent.DefaultStateDir()
+		if err != nil {
+			_, _ = fmt.Fprintln(errOut, "hooks install:", logx.Redact(err.Error()))
+			return 1
+		}
+		path, err := agent.InstallHooks(exe, stateDir)
 		if err != nil {
 			_, _ = fmt.Fprintln(errOut, "hooks install:", logx.Redact(err.Error()))
 			return 1
@@ -97,11 +103,24 @@ func hooksCmd(args []string, out, errOut io.Writer) int {
 // hookCmd is the hook itself. It always writes valid JSON and always exits 0: a hook that fails
 // interrupts the user's session, and nothing it carries is worth that. The --tag flag exists so
 // the installed command string carries a marker the installer can recognise; its value is unused.
-func hookCmd(in io.Reader, out io.Writer) int {
-	dir, err := agent.DefaultStateDir()
-	if err != nil {
+// --state-dir wins over the environment; without it (an entry installed by an older build) the
+// default state dir applies.
+func hookCmd(args []string, in io.Reader, out io.Writer) int {
+	fs := flag.NewFlagSet("hook", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	_ = fs.String("tag", "", "marker for the installer; unused")
+	stateDir := fs.String("state-dir", "", "agent state dir")
+	if err := fs.Parse(args); err != nil {
 		_, _ = fmt.Fprintln(out, "{}")
 		return 0
+	}
+	dir := *stateDir
+	if dir == "" {
+		var err error
+		if dir, err = agent.DefaultStateDir(); err != nil {
+			_, _ = fmt.Fprintln(out, "{}")
+			return 0
+		}
 	}
 	if err := agent.RunHook(in, out, dir, time.Now); err != nil {
 		_, _ = fmt.Fprintln(out, "{}")

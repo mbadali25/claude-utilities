@@ -57,7 +57,7 @@ func TestHooksInstalledTracksInstallAndUninstall(t *testing.T) {
 	if got := HooksInstalled(); got == nil || *got {
 		t.Fatalf("no settings file: got %v, want false", got)
 	}
-	if _, err := InstallHooks("/opt/claude-swap/agent"); err != nil {
+	if _, err := InstallHooks("/opt/claude-swap/agent", "/s"); err != nil {
 		t.Fatal(err)
 	}
 	if got := HooksInstalled(); got == nil || !*got {
@@ -73,7 +73,7 @@ func TestHooksInstalledTracksInstallAndUninstall(t *testing.T) {
 	if got := HooksInstalled(); got == nil || *got {
 		t.Fatalf("one event only: got %v, want false", got)
 	}
-	if _, err := InstallHooks("/opt/claude-swap/agent"); err != nil {
+	if _, err := InstallHooks("/opt/claude-swap/agent", "/s"); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := UninstallHooks(); err != nil {
@@ -108,7 +108,7 @@ func TestReportCarriesTheHookState(t *testing.T) {
 	if rep.HookInstalled == nil || *rep.HookInstalled {
 		t.Fatalf("not installed: got %v, want false", rep.HookInstalled)
 	}
-	if _, err := InstallHooks("/opt/claude-swap/agent"); err != nil {
+	if _, err := InstallHooks("/opt/claude-swap/agent", "/s"); err != nil {
 		t.Fatal(err)
 	}
 	rep = r.a.report(context.Background())
@@ -125,7 +125,7 @@ func TestReportCarriesTheHookState(t *testing.T) {
 func TestInstallHooksIsIdempotent(t *testing.T) {
 	path := sandboxSettings(t)
 	for i := 0; i < 3; i++ {
-		got, err := InstallHooks("/opt/claude-swap/agent")
+		got, err := InstallHooks("/opt/claude-swap/agent", "/s")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -154,7 +154,7 @@ func TestInstallHooksLeavesEverythingElseAlone(t *testing.T) {
 	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InstallHooks("/opt/agent"); err != nil {
+	if _, err := InstallHooks("/opt/agent", "/s"); err != nil {
 		t.Fatal(err)
 	}
 	m := readRaw(t, path)
@@ -196,7 +196,7 @@ func TestInstallHooksLeavesEverythingElseAlone(t *testing.T) {
 
 func TestUninstallPrunesWhatItEmpties(t *testing.T) {
 	path := sandboxSettings(t)
-	if _, err := InstallHooks("/opt/agent"); err != nil {
+	if _, err := InstallHooks("/opt/agent", "/s"); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := UninstallHooks(); err != nil {
@@ -236,7 +236,7 @@ func TestInstallKeepsABackup(t *testing.T) {
 	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InstallHooks("/opt/agent"); err != nil {
+	if _, err := InstallHooks("/opt/agent", "/s"); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path + backupSuffix)
@@ -253,7 +253,7 @@ func TestInstallRefusesUnparseableSettings(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InstallHooks("/opt/agent"); err == nil {
+	if _, err := InstallHooks("/opt/agent", "/s"); err == nil {
 		t.Fatal("a settings file this cannot parse must not be rewritten")
 	}
 	data, err := os.ReadFile(path)
@@ -267,7 +267,7 @@ func TestInstallOnAMissingFileCreatesOne(t *testing.T) {
 	if _, err := os.Stat(path); err == nil {
 		t.Fatal("the sandbox should start empty")
 	}
-	if _, err := InstallHooks("/opt/agent"); err != nil {
+	if _, err := InstallHooks("/opt/agent", "/s"); err != nil {
 		t.Fatal(err)
 	}
 	m := readRaw(t, path)
@@ -277,7 +277,7 @@ func TestInstallOnAMissingFileCreatesOne(t *testing.T) {
 }
 
 func TestHookCommandQuotesAPathWithSpaces(t *testing.T) {
-	got := HookCommand(`C:\Program Files\claude-swap\agent.exe`)
+	got := HookCommand(`C:\Program Files\claude-swap\agent.exe`, "/s")
 	if !strings.HasPrefix(got, `"C:/Program Files/claude-swap/agent.exe"`) {
 		t.Fatalf("not quoted: %s", got)
 	}
@@ -338,9 +338,9 @@ func TestHookCommandIsBashSafe(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := HookCommand(c.exe)
+			got := HookCommand(c.exe, "/s")
 			words := shellWords(got)
-			want := []string{c.want, "hook", "--tag", hookTag}
+			want := []string{c.want, "hook", "--tag", hookTag, "--state-dir", "/s"}
 			if len(words) != len(want) {
 				t.Fatalf("words = %q from %s", words, got)
 			}
@@ -370,7 +370,7 @@ func TestInstallReplacesOldBackslashEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := InstallHooks(`C:\Users\user\.claude-swap\claude-swap-agent.exe`); err != nil {
+		if _, err := InstallHooks(`C:\Users\user\.claude-swap\claude-swap-agent.exe`, "/s"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -465,5 +465,61 @@ func TestInstructionTextIsHonestAboutWhatItCanDo(t *testing.T) {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("claims too much (%q): %s", unwanted, got)
 		}
+	}
+}
+
+func TestHookCommandStateDir(t *testing.T) {
+	cases := []struct {
+		name, dir string
+		want      []string
+	}{
+		{"posix", "/home/dadeush/.config/claude-swap-agent", []string{"--state-dir", "/home/dadeush/.config/claude-swap-agent"}},
+		{"posix space and dollar", "/s p/$x", []string{"--state-dir", "/s p/$x"}},
+		{"windows", `C:\Users\x\AppData\Roaming\claude-swap-agent`, []string{"--state-dir", "C:/Users/x/AppData/Roaming/claude-swap-agent"}},
+		{"empty omits the flag", "", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := HookCommand("/opt/agent", c.dir)
+			want := append([]string{"/opt/agent", "hook", "--tag", hookTag}, c.want...)
+			words := shellWords(got)
+			if strings.Join(words, "\x00") != strings.Join(want, "\x00") {
+				t.Fatalf("words = %q, want %q (command %s)", words, want, got)
+			}
+		})
+	}
+}
+
+func TestInstallTwiceWithDifferentDirsLatestWins(t *testing.T) {
+	path := sandboxSettings(t)
+	old := "/old/agent hook --tag " + hookTag // entry from before --state-dir existed
+	seed := map[string]any{"hooks": map[string]any{
+		"SessionStart": []any{
+			map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "echo mine"}}},
+			map[string]any{"hooks": []any{map[string]any{"type": "command", "command": old}}},
+		},
+	}}
+	data, _ := json.Marshal(seed)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"/state/one", "/state/two"} {
+		if _, err := InstallHooks("/opt/agent", d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := readRaw(t, path)
+	for _, ev := range hookEvents {
+		if n := ourEntries(t, m, ev); n != 1 {
+			t.Fatalf("%s has %d entries of ours", ev, n)
+		}
+	}
+	raw, _ := os.ReadFile(path)
+	s := string(raw)
+	if !strings.Contains(s, "/state/two") || strings.Contains(s, "/state/one") || strings.Contains(s, "/old/agent") {
+		t.Fatalf("latest install did not win: %s", s)
+	}
+	if !strings.Contains(s, "echo mine") {
+		t.Fatalf("foreign hook lost: %s", s)
 	}
 }

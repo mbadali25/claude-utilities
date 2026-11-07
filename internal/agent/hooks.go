@@ -63,9 +63,15 @@ func SettingsPath() (string, error) {
 	return filepath.Join(home, ".claude", settingsName), nil
 }
 
-// HookCommand is the command string an installed entry runs.
-func HookCommand(exe string) string {
-	return quoteExe(exe) + " hook --tag " + hookTag
+// HookCommand is the command string an installed entry runs. Claude Code runs hooks without the
+// agent unit's environment, so the state dir travels in the command; an empty stateDir omits the
+// flag and the hook falls back to the default state dir.
+func HookCommand(exe, stateDir string) string {
+	cmd := quoteShellArg(exe) + " hook --tag " + hookTag
+	if stateDir != "" {
+		cmd += " --state-dir " + quoteShellArg(stateDir)
+	}
+	return cmd
 }
 
 // isWindowsPath reports a drive-letter or UNC path.
@@ -77,11 +83,11 @@ func isWindowsPath(p string) bool {
 		(p[0] >= 'a' && p[0] <= 'z' || p[0] >= 'A' && p[0] <= 'Z')
 }
 
-// quoteExe quotes an executable path for the shell the hook runs in. Claude Code runs hook
+// quoteShellArg quotes a path for the shell the hook runs in. Claude Code runs hook
 // commands through bash, which eats backslashes, so a Windows path is written with forward slashes
 // (Git Bash and Windows both accept them) inside double quotes. A path with a double quote in it
 // cannot be quoted safely either way, so it is left bare.
-func quoteExe(exe string) string {
+func quoteShellArg(exe string) string {
 	if exe == "" || strings.ContainsRune(exe, '"') {
 		return exe
 	}
@@ -188,11 +194,11 @@ func stripOurs(list []any) ([]any, int) {
 	return keep, removed
 }
 
-func ourGroup(exe string) map[string]any {
+func ourGroup(exe, stateDir string) map[string]any {
 	return map[string]any{
 		"hooks": []any{map[string]any{
 			"type":    "command",
-			"command": HookCommand(exe),
+			"command": HookCommand(exe, stateDir),
 			"timeout": hookTimeoutSeconds,
 		}},
 	}
@@ -218,7 +224,7 @@ func hooksMap(m map[string]any, create bool) (map[string]any, error) {
 // InstallHooks adds one entry per hook event to settings.json, replacing any entry this program
 // wrote before, and leaves everything else untouched. It is idempotent: running it twice leaves
 // exactly one entry per event. It returns the path it edited.
-func InstallHooks(exe string) (string, error) {
+func InstallHooks(exe, stateDir string) (string, error) {
 	path, err := SettingsPath()
 	if err != nil {
 		return "", err
@@ -237,7 +243,7 @@ func InstallHooks(exe string) (string, error) {
 			return "", fmt.Errorf("agent: settings.json hooks.%s is not a list", ev)
 		}
 		list, _ = stripOurs(list)
-		hooks[ev] = append(list, ourGroup(exe))
+		hooks[ev] = append(list, ourGroup(exe, stateDir))
 	}
 	if err := writeSettings(path, m); err != nil {
 		return "", err
