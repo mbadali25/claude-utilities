@@ -154,6 +154,100 @@ func TestRestartCommandWithConfirmCarriesTheSessionsOwnName(t *testing.T) {
 	f.waitStatus(v.ID, func(x CommandView) bool { return x.Counts.Unsupported == 1 })
 }
 
+func idleSess(id, name string, pid int, status string) proto.Session {
+	s := sess(id, name, pid)
+	s.Status = status
+	return s
+}
+
+// relaunch_remote kills a process, so the hub gates it hard: one session, confirmed, idle.
+func TestRelaunchRemoteIsRefusedUnlessSessionScopedConfirmedAndIdle(t *testing.T) {
+	f := newFixture(t)
+	a, _, hostID := f.enrol("box")
+	f.report(a, hostID, proto.Report{Sessions: []proto.Session{
+		idleSess("s-idle", "alpha", 11, "idle"), idleSess("s-busy", "beta", 12, "busy"),
+		idleSess("s-none", "gamma", 13, "")}})
+	ask := func(scope CommandScope, session string, confirm bool) error {
+		_, err := f.h.Command(context.Background(), CommandRequest{Command: proto.CmdRelaunchRemote,
+			Scope: scope, HostID: hostID, SessionID: session, Confirm: confirm})
+		return err
+	}
+	for _, scope := range []CommandScope{ScopeHost, ScopeAll} {
+		if err := ask(scope, "", true); err != ErrRelaunchScope {
+			t.Fatalf("scope %s: err = %v, want ErrRelaunchScope", scope, err)
+		}
+	}
+	if err := ask(ScopeSession, "s-idle", false); err != ErrConfirmRequired {
+		t.Fatalf("no confirm: err = %v", err)
+	}
+	for _, id := range []string{"s-busy", "s-none"} {
+		if err := ask(ScopeSession, id, true); err != ErrSessionNotIdle {
+			t.Fatalf("%s: err = %v, want ErrSessionNotIdle", id, err)
+		}
+	}
+	if err := ask(ScopeSession, "s-unknown", true); err != ErrNoSuchSession {
+		t.Fatalf("unknown session: err = %v, want ErrNoSuchSession", err)
+	}
+	// Nothing went out for any refusal.
+	if _, err := a.recvWithin(150 * time.Millisecond); err == nil {
+		t.Fatal("a command_req went out for a refused relaunch")
+	}
+}
+
+func TestRelaunchRemoteDispatchesOneTargetWithPidIDAndName(t *testing.T) {
+	f := newFixture(t)
+	a, _, hostID := f.enrol("box")
+	f.report(a, hostID, proto.Report{Sessions: []proto.Session{
+		idleSess("s-idle", "альфа 日本", 11, "idle"), idleSess("s-other", "beta", 12, "idle")}})
+	v, err := f.h.Command(context.Background(), CommandRequest{Command: proto.CmdRelaunchRemote,
+		Scope: ScopeSession, HostID: hostID, SessionID: "s-idle", Confirm: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Counts.Total != 1 {
+		t.Fatalf("counts = %+v", v.Counts)
+	}
+	reqs := a.answerCommands(1, proto.CommandRes{Status: proto.StatusDone, Code: proto.CodeRelaunched,
+		Mechanism: "relaunch-process"})
+	if reqs[0].SessionID != "s-idle" || reqs[0].PID != 11 || reqs[0].Command != proto.CmdRelaunchRemote ||
+		reqs[0].Name != "альфа 日本" {
+		t.Fatalf("req = %+v", reqs[0])
+	}
+	f.waitStatus(v.ID, func(x CommandView) bool { return x.Counts.Done == 1 })
+}
+
+func TestRelaunchRemoteIsNeverPartOfRepair(t *testing.T) {
+	for _, step := range repairSteps {
+		if step == proto.CmdRelaunchRemote {
+			t.Fatal("repair must never expand to a process kill")
+		}
+	}
+}
+
+func TestHostViewCarriesTheHookStateAsTriState(t *testing.T) {
+	f := newFixture(t)
+	a, _, hostID := f.enrol("box")
+	hook := func() *bool {
+		for _, hv := range f.h.Hosts() {
+			if hv.HostID == hostID {
+				return hv.HookInstalled
+			}
+		}
+		t.Fatal("host missing")
+		return nil
+	}
+	f.report(a, hostID, proto.Report{})
+	if hook() != nil {
+		t.Fatal("an agent that sends nothing must read as unknown")
+	}
+	yes := true
+	f.report(a, hostID, proto.Report{HookInstalled: &yes})
+	eventually(t, func() bool { g := hook(); return g != nil && *g })
+	no := false
+	f.report(a, hostID, proto.Report{HookInstalled: &no})
+	eventually(t, func() bool { g := hook(); return g != nil && !*g })
+}
+
 // The composite stays what it was: a restart is never folded into repair, so "Apply to all
 // needs-reload sessions" cannot restart anything.
 func TestRepairNeverExpandsToARestart(t *testing.T) {

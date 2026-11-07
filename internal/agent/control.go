@@ -506,6 +506,10 @@ func newControlWith(stateDir string, now func() time.Time, inboxEnabled bool, in
 	// imply a kill path that does not and must not exist.
 	// docs/runbooks/session-control.md records the decision.
 	ex.register(proto.CmdRestartSessions, relaunchMechanism{})
+	// relaunch_remote: the ONE command that stops a process. Its mechanism is registered for it
+	// alone (never the inbox, never another command), is session-scoped and idle-only at the hub
+	// and re-checked in the agent. See relaunch.go.
+	ex.register(proto.CmdRelaunchRemote, newRelaunchProcMechanism())
 	return &control{q: q, ex: ex}
 }
 

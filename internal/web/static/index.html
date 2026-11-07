@@ -1748,13 +1748,14 @@
   // running session that has a bridge bound, but whether the title on claude.ai followed is not
   // observable from the host - so a rename stops at "delivered" and must never read as done.
   var CMD_LABEL = {
-    reload_plugins: 'Reload plugins', remote_control_enable: 'Enable remote',
-    rename_remote: 'Fix name', repair: 'Repair', restart_sessions: 'Restart sessions'
+    reload_plugins: 'Nudge', remote_control_enable: 'Enable remote',
+    rename_remote: 'Fix name', repair: 'Repair', restart_sessions: 'Restart sessions',
+    relaunch_remote: 'Relaunch'
   };
   var ST = {
     queued: { word: 'Queued', count: 'queued', kind: '', g: 'info',
       say: 'Queued: nothing has reached the session yet.' },
-    delivered: { word: 'Delivered', count: 'delivered', kind: 'ok', g: 'ok',
+    delivered: { word: 'Delivered (asked, unverified)', count: 'delivered', kind: 'ok', g: 'ok',
       // True of both mechanisms that reach "delivered", and of neither more than it should be: a
       // hook puts the instruction in front of the model at the next prompt, and a rename reaches
       // the session at once but its effect on claude.ai cannot be seen from here.
@@ -1781,13 +1782,35 @@
     'unsupported-inbox-no-change': { word: 'Unsupported', kind: 'warn', g: 'warn',
       say: 'Unsupported: the ask was sent and the session did not take the name. Nothing is claimed.' },
     'inbox-send-failed': { word: 'Failed', kind: 'bad', g: 'bad',
-      say: 'Failed: the session would not take the ask. Nothing reached it.' }
+      say: 'Failed: the session would not take the ask. Nothing reached it.' },
+    // relaunch_remote. Only "relaunched" is a success, and only because a read-back saw the new
+    // bridge. The refusals below all happened BEFORE anything was stopped.
+    'relaunched': { word: 'Relaunched', kind: 'ok', g: 'ok',
+      say: 'Relaunched: the session was stopped and resumed, and a new remote-control bridge was seen.' },
+    'not-idle': { word: 'Failed', kind: 'bad', g: 'bad',
+      say: 'Failed: the session is not idle, so nothing was stopped.' },
+    'session-gone': { word: 'Failed', kind: 'bad', g: 'bad',
+      say: 'Failed: the session is gone or is not the one asked for, so nothing was stopped.' },
+    'bad-cwd': { word: 'Failed', kind: 'bad', g: 'bad',
+      say: 'Failed: the session’s folder is missing or unusable, so nothing was stopped.' },
+    'no-claude': { word: 'Failed', kind: 'bad', g: 'bad',
+      say: 'Failed: claude was not found on that host, so nothing was stopped.' },
+    'kill-failed': { word: 'Failed', kind: 'bad', g: 'bad',
+      say: 'Failed: the session could not be stopped, so nothing was started.' },
+    'start-failed': { word: 'Failed', kind: 'bad', g: 'bad',
+      say: 'Failed: the old session was stopped and the new one did not start.' }
   };
+  // The one place "Restart required" is not about a session that is still running: a relaunch
+  // that started but showed no new bridge. The process WAS stopped, so the generic sentence
+  // ("Nothing was stopped") would be false here.
+  var ST_RELAUNCH_UNSEEN = { word: 'Restart required', kind: 'warn', g: 'warn',
+    say: 'Restart required: the session was relaunched but no new remote-control bridge was seen. Check its terminal.' };
   // A status word is agent-reported, so an unknown one reads as itself rather than as nothing.
   // The count word stays per-status: the summary line tallies by status, not by code.
-  function stOf(k, code) {
+  function stOf(k, code, cmd) {
     var base = ST[k] || { word: String(k || 'unknown').slice(0, STATUS_CAP), count: 'in an unknown state', kind: '', g: 'info', say: '' };
     var over = code && ST_CODE[code];
+    if (cmd === 'relaunch_remote' && code === 'unsupported-requires-restart') over = ST_RELAUNCH_UNSEEN;
     if (!over) return base;
     return { word: over.word, count: base.count, kind: over.kind, g: over.g, say: over.say };
   }
@@ -2030,11 +2053,15 @@
   function commandList(cmds) {
     var box = el('div', undefined, 'cmds');
     cmds.forEach(function (c) {
-      var st = stOf(c.status, c.code), label = CMD_LABEL[c.command] || c.command;
+      var st = stOf(c.status, c.code, c.command), label = CMD_LABEL[c.command] || c.command;
       var row = el('div', undefined, 'cmd');
       row.appendChild(chip(label + ': ' + st.word, st.kind, st.g));
       if (st.say) row.appendChild(el('span', st.say, 'say'));
       box.appendChild(row);
+      // A nudge only asks the model; the line that does it for certain is shown beside the verdict.
+      if (c.command === 'reload_plugins') {
+        box.appendChild(el('div', 'To reload for certain, type /reload-plugins in that session yourself.', 'say'));
+      }
       if (c.hint) {
         box.appendChild(/^claude /.test(c.hint)
           ? copyLine('Relaunch with', c.hint, 'Copy the relaunch command for ' + label)
@@ -2055,7 +2082,7 @@
       b.addEventListener('click', go);
       btns.push(b); box.appendChild(b);
     }
-    mk('Reload plugins', 'Reload plugins in session ' + who, function () {
+    mk('Nudge: ask session to reload plugins', 'Nudge session ' + who + ' to reload plugins (it only asks; unverified)', function () {
       ask({ command: 'reload_plugins', scope: 'session', host: h.hostId, session: s.id },
         base + 'reload_plugins', msg, btns).catch(function () {});
     });
@@ -2064,6 +2091,25 @@
         base + 'remote_control_enable', msg, btns).catch(function () {});
     });
     mk('Fix name', 'Fix the remote name of session ' + who, function () { openNameDialog(h, s); });
+    // Relaunch is the one ask that kills a process, so it is offered for an idle session only
+    // (the hub and the agent both refuse anything else) and always behind a confirm that names
+    // the cost. Whether resume turns remote control on is unproven; the verdict says what was seen.
+    var idle = s.status === 'idle';
+    if (idle) {
+      mk('Relaunch with remote control', 'Relaunch session ' + who + ' with remote control', function () {
+        askConfirm('Relaunch ' + who + ' with remote control',
+          'Stop this session and start it again with remote control?',
+          'The process is killed and started again with --resume --remote-control in the same folder. ' +
+          'Any running turn and its tools are lost, and the new process needs a terminal. ' +
+          'Remote control is only reported as on once a new bridge is seen.',
+          function (dmsg, dbtns) {
+            return ask({ command: 'relaunch_remote', scope: 'session', host: h.hostId, session: s.id, confirm: true },
+              base + 'relaunch_remote', dmsg, dbtns);
+          });
+      });
+    }
+    box.appendChild(el('span', 'A nudge only asks the model. To reload for certain, type /reload-plugins in that session.', 'why'));
+    if (!idle) box.appendChild(el('span', 'Relaunch is offered only when the session is idle.', 'why'));
     if (!h.online) {
       btns.forEach(function (b) { b.disabled = true; });
       box.appendChild(el('span', 'The host is offline, so nothing can be asked of it.', 'why'));
@@ -2092,7 +2138,7 @@
       });
       btns.push(b); box.appendChild(b);
     }
-    mk('Reload all', 'Reload plugins',
+    mk('Nudge all sessions on this host to reload plugins', 'Nudge to reload plugins',
       'Ask every session on ' + h.name + ' to reload its plugins?',
       'Each runs it at its next prompt, if it runs it at all.', 'reload_plugins');
     mk('Enable remote on all', 'Enable remote control',
@@ -2321,6 +2367,17 @@
     c.appendChild(line);
     // A dash on its own is not an answer: when the host names no account, say why and what fixes it.
     if (!h.activeAccount && h.identityReason) c.appendChild(identityNote(h));
+
+    // Is the hook that reads queued nudges installed on this host? Three answers, because an
+    // older agent or an unreadable settings file is "unknown", which is not "not installed".
+    var hk = el('div', undefined, 'row wrap');
+    hk.appendChild(el('span', 'Session hook', 'mut'));
+    if (h.hookInstalled === true) hk.appendChild(chip('Hook installed', 'ok', 'ok'));
+    else if (h.hookInstalled === false) {
+      hk.appendChild(chip('Hook not installed', 'warn', 'warn'));
+      hk.appendChild(el('span', 'Nudges are queued but nothing reads them until agent hooks install is run there.', 'mut'));
+    } else hk.appendChild(chip('Hook state unknown', undefined, 'info'));
+    c.appendChild(hk);
 
     // Sessions collapse, but a restart command must never start out hidden: a host with a stale
     // session opens by default, and the closed summary still says how many need one. With no

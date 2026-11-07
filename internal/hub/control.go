@@ -77,6 +77,12 @@ var (
 	ErrNoCommandTargets = errors.New("hub: the command matched no session")
 	// ErrTooManyCommandTargets means the request matched more sessions than one request may carry.
 	ErrTooManyCommandTargets = errors.New("hub: the command matched too many sessions")
+	// ErrRelaunchScope means relaunch_remote was asked at host or all scope. It stops a process,
+	// so it takes exactly one named session.
+	ErrRelaunchScope = errors.New("hub: relaunch_remote takes exactly one session")
+	// ErrSessionNotIdle means the session is not reported idle, so a relaunch would throw away a
+	// running turn. Nothing was sent.
+	ErrSessionNotIdle = errors.New("hub: the session is not idle; a relaunch would lose its running work")
 	// ErrNoCommand means no such command request is on record.
 	ErrNoCommand = errors.New("hub: no such session command")
 )
@@ -265,6 +271,9 @@ func validateCommandRequest(req *CommandRequest) error {
 	if req.Command != proto.CmdRenameRemote {
 		req.Name = "" // only a rename carries a name
 	}
+	if req.Command == proto.CmdRelaunchRemote && req.Scope != ScopeSession {
+		return ErrRelaunchScope
+	}
 	if req.Scope == ScopeSession && (req.HostID == "" || req.SessionID == "") {
 		return fmt.Errorf("%w: a session-scoped command needs a host and a session", ErrNoSuchSession)
 	}
@@ -283,8 +292,8 @@ func validateCommandRequest(req *CommandRequest) error {
 
 // sessionTarget is one matched session before it becomes targets.
 type sessionTarget struct {
-	hostID, sessionID, name string
-	pid                     int
+	hostID, sessionID, name, status string
+	pid                             int
 }
 
 // matchSessionsLocked returns the sessions a request names, ordered by host then session, and the
@@ -316,7 +325,7 @@ func (h *Hub) matchSessionsLocked(req CommandRequest) ([]sessionTarget, map[stri
 			// the stale remote title the operator is trying to replace, so naming a session
 			// after it would be a no-op by construction the day Claude Code starts writing it.
 			out = append(out, sessionTarget{hostID: id, sessionID: s.ID, pid: s.PID,
-				name: proto.CleanRemoteName(s.Name)})
+				name: proto.CleanRemoteName(s.Name), status: s.Status})
 			conns[id] = ho.c
 		}
 	}
@@ -366,6 +375,16 @@ func (h *Hub) Command(ctx context.Context, req CommandRequest) (CommandView, err
 	if err != nil {
 		h.mu.Unlock()
 		return CommandView{}, err
+	}
+	if req.Command == proto.CmdRelaunchRemote {
+		// Session scope matched one session. Only a session the host reports idle may be killed;
+		// the agent re-checks this from the session's own file.
+		for _, m := range matched {
+			if m.status != "idle" {
+				h.mu.Unlock()
+				return CommandView{}, ErrSessionNotIdle
+			}
+		}
 	}
 	steps := []string{req.Command}
 	if req.Command == proto.CmdRepair {

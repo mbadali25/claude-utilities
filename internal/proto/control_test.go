@@ -80,7 +80,7 @@ func TestReportCommandsAreAdditive(t *testing.T) {
 
 func TestValidCommand(t *testing.T) {
 	for _, c := range []string{CmdReloadPlugins, CmdRemoteControlEnable, CmdRenameRemote, CmdRepair,
-		CmdRestartSessions} {
+		CmdRestartSessions, CmdRelaunchRemote} {
 		if !ValidCommand(c) {
 			t.Errorf("%s should be valid", c)
 		}
@@ -97,13 +97,49 @@ func TestValidCommand(t *testing.T) {
 // demanding a confirm nobody asks for, and one that wrongly reads as ordinary would skip the
 // confirm that names the sessions.
 func TestIsRestartCommand(t *testing.T) {
-	if !IsRestartCommand(CmdRestartSessions) {
-		t.Errorf("%s should be restart-type", CmdRestartSessions)
+	for _, c := range []string{CmdRestartSessions, CmdRelaunchRemote} {
+		if !IsRestartCommand(c) {
+			t.Errorf("%s should be restart-type", c)
+		}
 	}
 	for _, c := range []string{CmdReloadPlugins, CmdRemoteControlEnable, CmdRenameRemote, CmdRepair, "", "restart"} {
 		if IsRestartCommand(c) {
 			t.Errorf("%q should not be restart-type", c)
 		}
+	}
+}
+
+// The relaunch outcome codes are wire strings the UI keys on: a rename changes them silently.
+func TestRelaunchReasonCodesAreStable(t *testing.T) {
+	want := map[string]string{
+		CodeRelaunched: "relaunched", CodeNotIdle: "not-idle", CodeSessionGone: "session-gone",
+		CodeBadCwd: "bad-cwd", CodeKillFailed: "kill-failed", CodeStartFailed: "start-failed",
+		CodeNoClaude: "no-claude",
+	}
+	for got, w := range want {
+		if got != w {
+			t.Errorf("code %q, want %q", got, w)
+		}
+	}
+}
+
+// hookInstalled is tri-state: an older agent sends nothing, which must not read as "not installed".
+func TestReportHookInstalledIsTriState(t *testing.T) {
+	raw, err := json.Marshal(Report{HostID: "h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "hookInstalled") {
+		t.Fatalf("unknown hook state should be omitted: %s", raw)
+	}
+	no := false
+	raw, _ = json.Marshal(Report{HostID: "h", HookInstalled: &no})
+	if !strings.Contains(string(raw), `"hookInstalled":false`) {
+		t.Fatalf("false must be sent, not omitted: %s", raw)
+	}
+	var back Report
+	if err := json.Unmarshal(raw, &back); err != nil || back.HookInstalled == nil || *back.HookInstalled {
+		t.Fatalf("round trip = %+v, %v", back.HookInstalled, err)
 	}
 }
 

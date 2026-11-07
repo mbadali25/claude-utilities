@@ -40,6 +40,11 @@ const (
 	// command for the operator to run. It exists so that answer, and the confirm that names the
 	// sessions, are first-class instead of buried in a hint. See IsRestartCommand.
 	CmdRestartSessions = "restart_sessions"
+	// CmdRelaunchRemote kills ONE idle session's process and starts `claude --resume <id>
+	// --remote-control` in the same cwd and config dir. It is the only command that stops a
+	// process, so it is session-scoped, idle-only and confirmed (IsRestartCommand). The running
+	// turn and tools are lost and the new process needs a terminal.
+	CmdRelaunchRemote = "relaunch_remote"
 )
 
 // IsRestartCommand reports whether c is a restart-type command: one whose whole subject is a
@@ -47,7 +52,7 @@ const (
 // confirm step is where the operator is shown which sessions are named. Keep this a predicate
 // rather than a comparison at each call site, so a second restart-type command cannot be added
 // without every confirm gate picking it up.
-func IsRestartCommand(c string) bool { return c == CmdRestartSessions }
+func IsRestartCommand(c string) bool { return c == CmdRestartSessions || c == CmdRelaunchRemote }
 
 // Per-target statuses. queued is the hub's own starting state; the other four come from an agent.
 const (
@@ -98,6 +103,21 @@ const (
 	CodeTimeout = "timeout"
 	// CodeBadReply means the agent's reply could not be read.
 	CodeBadReply = "bad-reply"
+	// CodeRelaunched means a relaunch was started AND a read-back saw the resumed session publish
+	// a new bridgeSessionId. It is the only code that rides StatusDone.
+	CodeRelaunched = "relaunched"
+	// CodeNotIdle means the session is not idle, so nothing was killed.
+	CodeNotIdle = "not-idle"
+	// CodeSessionGone means the session's process or session file is no longer there.
+	CodeSessionGone = "session-gone"
+	// CodeBadCwd means the session's cwd is missing, relative or not a directory.
+	CodeBadCwd = "bad-cwd"
+	// CodeKillFailed means the old process could not be stopped, so no new one was started.
+	CodeKillFailed = "kill-failed"
+	// CodeStartFailed means the old process is gone and the new one could not be started.
+	CodeStartFailed = "start-failed"
+	// CodeNoClaude means no claude executable was found, checked before anything was killed.
+	CodeNoClaude = "no-claude"
 )
 
 // MaxRemoteName is the longest remote title accepted, in runes. Claude Code normalises a name to
@@ -116,7 +136,8 @@ const MaxCommandsPerReport = 32
 // ValidCommand reports whether c is a command this protocol version defines.
 func ValidCommand(c string) bool {
 	switch c {
-	case CmdReloadPlugins, CmdRemoteControlEnable, CmdRenameRemote, CmdRepair, CmdRestartSessions:
+	case CmdReloadPlugins, CmdRemoteControlEnable, CmdRenameRemote, CmdRepair, CmdRestartSessions,
+		CmdRelaunchRemote:
 		return true
 	}
 	return false

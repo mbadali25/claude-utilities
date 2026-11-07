@@ -126,9 +126,10 @@ func (s *server) overCommandLimit(ip string) bool {
 func commandError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, hub.ErrUnknownCommand), errors.Is(err, hub.ErrBadScope),
-		errors.Is(err, hub.ErrNameRequired), errors.Is(err, hub.ErrNameNotAllowed):
+		errors.Is(err, hub.ErrNameRequired), errors.Is(err, hub.ErrNameNotAllowed),
+		errors.Is(err, hub.ErrRelaunchScope):
 		writeErr(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, hub.ErrConfirmRequired):
+	case errors.Is(err, hub.ErrConfirmRequired), errors.Is(err, hub.ErrSessionNotIdle):
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, hub.ErrNoSuchSession):
 		writeErr(w, http.StatusNotFound, err.Error())

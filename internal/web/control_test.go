@@ -116,6 +116,8 @@ func TestSessionCommandMapsHubErrorsToStatuses(t *testing.T) {
 		{hub.ErrTooManyCommandTargets, http.StatusConflict},
 		{hub.ErrUnknownHost, http.StatusNotFound},
 		{hub.ErrAgentOffline, http.StatusConflict},
+		{hub.ErrRelaunchScope, http.StatusBadRequest},
+		{hub.ErrSessionNotIdle, http.StatusConflict},
 	}
 	for _, c := range cases {
 		r := newRig(t)
@@ -239,8 +241,8 @@ func TestPageCarriesSessionControlSurface(t *testing.T) {
 		// Status comes off the existing poll, under commands[].
 		"s.commands", "commandList",
 		// The per-session asks, the host-wide pair and the estate-wide repair.
-		"'Reload plugins'", "'Enable remote'", "'Fix name'",
-		"'Reload all'", "'Enable remote on all'", "Apply to all needs-reload sessions",
+		"'Nudge: ask session to reload plugins'", "'Enable remote'", "'Fix name'",
+		"'Enable remote on all'", "Apply to all needs-reload sessions",
 		// The regions they live in.
 		`id="ctl-repair"`, `id="ctl-repair-go"`, `id="ctl-repair-sub"`, `id="ctl-summary"`,
 		`id="st-attn-go"`, "selectTab($('#tab-hosts'), false)",
@@ -293,6 +295,93 @@ func TestPageCarriesSessionControlSurface(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("index.html lacks %q, so a button cannot be disabled in flight", want)
 		}
+	}
+}
+
+// A nudge is an ask, not an action: the buttons and chips must say so, and the operator must be
+// shown the manual line that does the thing for certain.
+func TestPageNudgeWordingIsHonest(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+	for _, want := range []string{
+		"'Nudge: ask session to reload plugins'",
+		// The per-host button nudges every session on the host, so its label must say so.
+		"'Nudge all sessions on this host to reload plugins'",
+		"Delivered (asked, unverified)",
+		"/reload-plugins",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+	for _, gone := range []string{"'Reload plugins'", "'Reload all'"} {
+		if strings.Contains(p, gone) {
+			t.Errorf("index.html still labels a control %s", gone)
+		}
+	}
+	// The protocol value is unchanged.
+	if !strings.Contains(p, "command: 'reload_plugins'") {
+		t.Error("the nudge no longer sends reload_plugins")
+	}
+}
+
+// Relaunch kills a process, so the page offers it only for an idle session, behind a confirm that
+// names the cost, and always with confirm:true on the wire.
+func TestPageRelaunchIsIdleOnlyAndNamesTheCost(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+	for _, want := range []string{
+		"'Relaunch with remote control'",
+		"command: 'relaunch_remote'",
+		"s.status === 'idle'",
+		// the cost, in the confirm body
+		"process is killed", "running turn", "tools", "needs a terminal",
+		// the honest outcome words
+		"relaunched", "no new remote-control bridge",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+	i := strings.Index(p, "command: 'relaunch_remote'")
+	if i < 0 {
+		t.Fatal("never asks for relaunch_remote")
+	}
+	if j := strings.Index(p[i:], "}"); j < 0 || !strings.Contains(p[i:i+j], "confirm: true") ||
+		!strings.Contains(p[i:i+j], "scope: 'session'") {
+		t.Error("a relaunch must carry confirm:true at session scope")
+	}
+}
+
+func TestPageShowsTheHookInstalledIndicator(t *testing.T) {
+	r := newRig(t)
+	p := page(r, r.login())
+	for _, want := range []string{"h.hookInstalled", "Hook installed", "Hook not installed", "Hook state unknown"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+}
+
+func TestHostsJSONCarriesTheHookStateAsTriState(t *testing.T) {
+	yes, no := true, false
+	r := newRig(t)
+	r.fh.hosts = []hub.HostView{
+		{HostID: "h1", Name: "a", Online: true, HookInstalled: &yes},
+		{HostID: "h2", Name: "b", Online: true, HookInstalled: &no},
+		{HostID: "h3", Name: "c", Online: true},
+	}
+	s := r.login()
+	var hosts []map[string]any
+	w := r.do(http.MethodGet, "/api/hosts", "", s, "")
+	if err := json.Unmarshal(w.Body.Bytes(), &hosts); err != nil || len(hosts) != 3 {
+		t.Fatalf("%v %s", err, w.Body)
+	}
+	if hosts[0]["hookInstalled"] != true || hosts[1]["hookInstalled"] != false {
+		t.Fatalf("hosts = %v", hosts)
+	}
+	if _, present := hosts[2]["hookInstalled"]; present {
+		t.Fatalf("an unknown state must be omitted, not false: %v", hosts[2])
 	}
 }
 
@@ -417,7 +506,7 @@ func TestStatusLabelsSeparateRestartRequiredFromUnsupported(t *testing.T) {
 			t.Errorf("index.html never reads the %q code, so it cannot label that decline", code)
 		}
 	}
-	if !strings.Contains(p, "stOf(c.status, c.code)") {
+	if !strings.Contains(p, "stOf(c.status, c.code, c.command)") {
 		t.Error("the chip is not built from the status AND the code")
 	}
 }

@@ -245,6 +245,39 @@ func InstallHooks(exe string) (string, error) {
 	return path, nil
 }
 
+// HooksInstalled reports whether this program's hook entries exist under EVERY hook event. It
+// returns nil - unknown - when settings.json cannot be located or parsed, so an unreadable file
+// never reads as "not installed". It reads the file and writes nothing.
+func HooksInstalled() *bool {
+	path, err := SettingsPath()
+	if err != nil {
+		return nil
+	}
+	m, err := readSettings(path)
+	if err != nil {
+		return nil
+	}
+	all := true
+	if hooks, herr := hooksMap(m, false); herr != nil {
+		return nil
+	} else if hooks == nil {
+		all = false
+	} else {
+		for _, ev := range hookEvents {
+			list, _ := hooks[ev].([]any)
+			found := false
+			for _, g := range list {
+				if isOurs(g) {
+					found = true
+					break
+				}
+			}
+			all = all && found
+		}
+	}
+	return &all
+}
+
 // UninstallHooks removes every entry this program wrote and prunes what it emptied. Removing
 // hooks that are not there is not an error. It returns the path and how many entries went.
 func UninstallHooks() (string, int, error) {
