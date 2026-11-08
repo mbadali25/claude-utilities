@@ -52,5 +52,6 @@ func syncDir(dir string) {
 // renameTransient is always false: a Unix rename replaces a file other processes hold open.
 func renameTransient(error) bool { return false }
 
-// restrictACL is a no-op: Unix modes (0600/0700) are set directly.
+// restrictACL is a no-op: Unix modes (0600/0700) are set directly, and the SIDs SetACLPolicy
+// carries are a Windows concept with no equivalent here.
 func restrictACL(string, bool) error { return nil }
