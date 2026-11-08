@@ -102,8 +102,9 @@ type DEKInfo struct {
 //
 // It carries no copy of the bytes it was decoded from. Retention is Header.Slots' job: marshalHeader
 // re-emits every slot the caller did not name from that element's original json.RawMessage, so an
-// untouched slot is byte identical whether or not this binary understands its type. A second copy
-// on the decoded slot would be one more thing that could disagree with the first.
+// untouched slot keeps every member it arrived with, in the order it arrived in, with its values
+// byte for byte - whether or not this binary understands its type. A second copy on the decoded
+// slot would be one more thing that could disagree with the first.
 type Slot struct {
 	ID       string        `json:"id"`
 	Type     string        `json:"type"`
@@ -465,10 +466,21 @@ func tryOrder(slots []Slot) []Slot {
 }
 
 // marshalHeader writes the header's bytes: compact, no trailing newline, HTML left alone, members
-// in the format's order. changed maps a slot id to its new form; every slot not named there is
-// emitted from the bytes it arrived as, so an untouched slot - known type or not - is byte
-// identical before and after. A slot in changed whose id is not already present is appended, in id
-// order, so adding two slots in one call is deterministic.
+// in the format's order. changed maps a slot id to its new form, and the map key must equal that
+// Slot's own `id` - a disagreeing pair is errSlotIDMismatch, in both loops below, because the key
+// decides which slot is touched while the `id` is what gets encoded.
+//
+// Every slot not named in changed is emitted from the bytes it arrived as, so an untouched slot -
+// known type or not - keeps all of its members, their order and their values exactly. The encoder
+// does normalise insignificant whitespace between tokens, because json.Marshal compacts a
+// json.RawMessage; that is deliberate and costs nothing. The output has to be canonical for two
+// headers written in different runs to be byte-comparable, and nothing depends on a slot's
+// whitespace: a slot's AAD is magic || dek.id || slot.id || slot.type (slotAAD), never its raw
+// bytes, and the payload's AAD is read back as a slice of the file rather than re-marshalled
+// (rawHeaderOf). So a newer server's pretty-printed slot still unwraps after a round trip here.
+//
+// A slot in changed whose id is not already present is appended, in id order, so adding two slots
+// in one call is deterministic.
 //
 // The result is the new rawHeader and therefore the new payload AAD. The caller re-seals under it;
 // nothing re-marshals a header to produce AAD for a payload it did not just write.
@@ -484,6 +496,11 @@ func marshalHeader(h Header, changed map[string]Slot) ([]byte, error) {
 		}
 		seen[probe.ID] = true
 		if s, ok := changed[probe.ID]; ok {
+			// The key chose this slot; the Slot's own `id` is what would be encoded. A pair that
+			// disagrees would rewrite the slot's id silently, and the id is in every wrap's AAD.
+			if s.ID != probe.ID {
+				return nil, errSlotIDMismatch
+			}
 			enc, err := encodeSlot(s)
 			if err != nil {
 				return nil, err
@@ -501,7 +518,13 @@ func marshalHeader(h Header, changed map[string]Slot) ([]byte, error) {
 	}
 	sort.Strings(added)
 	for _, id := range added {
-		enc, err := encodeSlot(changed[id])
+		s := changed[id]
+		// Same check on the append path: the key fixes the order, the Slot's `id` is what is written,
+		// and a disagreeing pair would append a slot under an id the caller never named.
+		if s.ID != id {
+			return nil, errSlotIDMismatch
+		}
+		enc, err := encodeSlot(s)
 		if err != nil {
 			return nil, err
 		}

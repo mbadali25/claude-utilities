@@ -57,6 +57,19 @@ var (
 
 	errCorrupt = errors.New("vault: malformed vault file")
 
+	// errSlotIDMismatch means a `changed` entry's map key and that Slot's own `id` disagree.
+	// marshalHeader decides retention and placement by the map key but encodes the Slot's `id`, so an
+	// unchecked mismatch silently rewrites a slot's id - and the id is length-prefixed into every
+	// wrap's AAD (slotAAD), so every wrap bound to the old id stops opening while the file still
+	// parses as valid. A caller's mistake rather than a damaged file, so it is its own sentinel and
+	// not errCorrupt, which an operator reads as "corrupt disk or wrong passphrase". Unexported:
+	// marshalHeader is internal and no caller outside this package can produce the condition.
+	//
+	// It names neither id. An id is attacker-chosen text out of a header nothing has authenticated
+	// yet, and this string goes to stderr and into whatever an operator pastes into a ticket, where
+	// it has no escaping around it - the same reasoning slotTypeList is built on.
+	errSlotIDMismatch = errors.New("vault: a changed slot's id does not match the id it is keyed by")
+
 	// renameFn is replaced in tests to inject write failures.
 	renameFn = os.Rename
 )

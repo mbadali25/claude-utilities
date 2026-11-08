@@ -1180,11 +1180,119 @@ func TestUnknownSlotWarningCannotBeSplicedByAHostileSlot(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("got %d log lines, want one: %q", len(lines), buf.String())
 	}
-	if got := len(lines[0]["slottype"].(string)); got > 256 {
-		t.Fatalf("slottype is %d bytes, over logx's cap", got)
+	// The type comes back whole, and that is the assertion rather than a length bound: asciiType
+	// already caps a type at 255 bytes and logx caps a value at 256, so "is it under the cap" is a
+	// question that cannot be answered no and proves nothing. What is worth pinning is that all 255
+	// hostile bytes - the quote and the backslash among them - arrive as the value of one JSON
+	// member, neither truncated nor rewritten by the redactor on their way there.
+	got, ok := lines[0]["slottype"].(string)
+	if !ok {
+		t.Fatalf("slottype is not a string: %q", buf.String())
 	}
+	if got != hostile {
+		t.Fatalf("slottype came back as %d bytes %q, want the 255 hostile bytes unchanged", len(got), got)
+	}
+	// And neither field spliced: the whole output is one line, so the id's embedded newline and
+	// every control-looking byte in the type were escaped by the encoder.
 	if strings.Count(strings.TrimRight(buf.String(), "\n"), "\n") != 0 {
 		t.Fatalf("the id's newline reached the output unescaped: %q", buf.String())
+	}
+}
+
+// --- a `changed` entry's map key against the slot's own id ---
+
+// marshalHeader finds a slot by the `changed` map's key and then encodes that Slot's own `id`. A
+// pair whose key and `id` disagree used to be written out in silence: the slot kept its place and
+// its wrap but came back under a different id, and a slot's id is length-prefixed into its AAD
+// (slotAAD), so every wrap bound to the old id stops opening. Nothing downstream catches it -
+// another valid eight-byte base64 id is a valid id, so the file parses and the self-parse inside
+// marshalHeader passes.
+//
+// Strict string equality is the right check, not a decode-and-compare: a caller gets the id from
+// parseHeader and hands back the string it was given, and a re-spelled base64 id - one with an
+// embedded newline, which base64 ignores - is a different byte string in the AAD's length prefix
+// anyway, so treating it as the same slot would be the bug rather than the fix.
+func TestMarshalHeaderRefusesAChangedSlotWhoseIDDoesNotMatchItsKey(t *testing.T) {
+	noArgon2(t)
+	h, slots, err := parseHeader(goldenHeader(t))
+	if err != nil {
+		t.Fatalf("parseHeader: %v", err)
+	}
+	pass := slots[0]
+	if pass.Type != slotTypePassphrase {
+		t.Fatalf("the golden's first slot is no longer the passphrase slot: %+v", pass)
+	}
+	mis := pass
+	mis.ID = base64.StdEncoding.EncodeToString([]byte("IJKLMNOP"))
+	if mis.ID == pass.ID {
+		t.Fatal("the fixture's two ids are equal, so the mismatch is not being tested")
+	}
+	out, err := marshalHeader(h, map[string]Slot{pass.ID: mis})
+	if !errors.Is(err, errSlotIDMismatch) {
+		t.Fatalf("marshalHeader: want errSlotIDMismatch, got %v (out %d bytes)", err, len(out))
+	}
+	if out != nil {
+		t.Fatalf("refused and still returned %d bytes", len(out))
+	}
+	// Not errCorrupt: the header on disk was fine, the call was not. An operator told "malformed
+	// vault file" goes looking for a corrupt disk or rotates a correct passphrase.
+	if errors.Is(err, errCorrupt) {
+		t.Fatalf("a caller's mistake was reported as a malformed file: %v", err)
+	}
+	// Neither id is echoed, escaped or otherwise.
+	for _, id := range []string{pass.ID, mis.ID} {
+		if strings.Contains(err.Error(), id) {
+			t.Fatalf("the error echoes a slot id: %q", err.Error())
+		}
+	}
+	// The positive control: the same slot under its matching key writes, and keeps its id.
+	out, err = marshalHeader(h, map[string]Slot{pass.ID: pass})
+	if err != nil {
+		t.Fatalf("the matching pair was refused: %v", err)
+	}
+	if !bytes.Contains(out, []byte(pass.ID)) {
+		t.Fatalf("the slot's id is not in the output: %s", out)
+	}
+}
+
+// The same mismatch on the append path, which is a separate loop over `added`. The map key decides
+// the order two slots added in one call come out in, and the Slot's own `id` is what gets written,
+// so a disagreeing pair appended a slot under an id the caller never named.
+func TestMarshalHeaderRefusesAnAddedSlotWhoseIDDoesNotMatchItsKey(t *testing.T) {
+	noArgon2(t)
+	h, slots, err := parseHeader(goldenHeader(t))
+	if err != nil {
+		t.Fatalf("parseHeader: %v", err)
+	}
+	add := slots[0]
+	add.ID = base64.StdEncoding.EncodeToString([]byte("BODYBODY"))
+	key := base64.StdEncoding.EncodeToString([]byte("KEYKEYKE"))
+	// Both ids must be absent from the header, or this lands in the loop above instead.
+	for _, s := range slots {
+		if s.ID == key || s.ID == add.ID {
+			t.Fatalf("a fixture id collides with an existing slot: %+v", s)
+		}
+	}
+	out, err := marshalHeader(h, map[string]Slot{key: add})
+	if !errors.Is(err, errSlotIDMismatch) {
+		t.Fatalf("marshalHeader: want errSlotIDMismatch, got %v (out %d bytes)", err, len(out))
+	}
+	if out != nil {
+		t.Fatalf("refused and still returned %d bytes", len(out))
+	}
+	if strings.Contains(err.Error(), key) || strings.Contains(err.Error(), add.ID) {
+		t.Fatalf("the error echoes a slot id: %q", err.Error())
+	}
+	// The positive control: appended under its own id it is written, and under that id.
+	out, err = marshalHeader(h, map[string]Slot{add.ID: add})
+	if err != nil {
+		t.Fatalf("the matching pair was refused: %v", err)
+	}
+	if !bytes.Contains(out, []byte(add.ID)) {
+		t.Fatalf("the appended slot's id is not in the output: %s", out)
+	}
+	if bytes.Contains(out, []byte(key)) {
+		t.Fatalf("the map key leaked into the output: %s", out)
 	}
 }
 
