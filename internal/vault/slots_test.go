@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -987,4 +988,116 @@ func TestV1KeyringStillWritesCSK1AfterThisChange(t *testing.T) {
 	if got := string(data[:len(keyringMagic)]); got != keyringMagic {
 		t.Fatalf("keyring magic %q, want %q", got, keyringMagic)
 	}
+}
+
+// FuzzOpenHeader fuzzes everything after the magic: the big-endian header length, the header JSON
+// and whatever follows. Every number in there is attacker-controlled, and a passphrase slot's
+// argon2id cost is read before any key exists to authenticate it with, so the parser is the only
+// thing standing between a crafted file and an allocation sized from it.
+//
+// The properties: never a panic; every failure is errCorrupt or ErrNewerFormat and never ErrBadKey;
+// a header length over the cap is refused without the file having to be that long; and a header
+// that does parse is inside every bound the writer is held to.
+//
+// The slot unwrap half of this task (FuzzSlotUnwrap) fuzzes a slot's wrap fields, which the slot
+// openers own - PR 6. It lands with them rather than being half-written here.
+func FuzzOpenHeader(f *testing.F) {
+	golden, err := os.ReadFile(filepath.Join("testdata", "header-golden.json"))
+	if err != nil {
+		f.Fatalf("golden: %v", err)
+	}
+	golden = bytes.TrimSuffix(golden, []byte("\n"))
+
+	tail := func(header []byte) []byte { return v2File(v2VaultMagic, header)[len(v2VaultMagic):] }
+	f.Add(tail(golden))
+	// Truncations at every field boundary of the golden file: the length prefix itself, the header
+	// mid-way, the header exactly, and the payload one byte short of the tag.
+	whole := tail(golden)
+	for _, n := range []int{0, 1, 3, 4, 5, 4 + len(golden)/2, 4 + len(golden), len(whole) - 1} {
+		if n >= 0 && n <= len(whole) {
+			f.Add(whole[:n])
+		}
+	}
+	// A header length that must be refused before anything is sized from it.
+	big := make([]byte, 4)
+	binary.BigEndian.PutUint32(big, 1<<20)
+	f.Add(big)
+	// Costs and counts outside the bounds, a short salt, and a slot array over the cap.
+	salt := base64.StdEncoding.EncodeToString(make([]byte, saltLen))
+	shortSalt := base64.StdEncoding.EncodeToString(make([]byte, saltLen-1))
+	dekID := base64.StdEncoding.EncodeToString(make([]byte, dekIDLen))
+	slotID := base64.StdEncoding.EncodeToString(make([]byte, slotIDLen))
+	nonce := base64.StdEncoding.EncodeToString(make([]byte, nonceLen))
+	ct := base64.StdEncoding.EncodeToString(make([]byte, wrapCTLen))
+	pass := func(t, m, p uint64, s string) string {
+		return fmt.Sprintf(`{"id":%q,"type":"passphrase","created":"2026-11-08T00:00:00Z","argon2id":{"t":%d,"m":%d,"p":%d,"salt":%q},"wrap":{"nonce":%q,"ct":%q}}`,
+			slotID, t, m, p, s, nonce, ct)
+	}
+	header := func(slots string) []byte {
+		return []byte(fmt.Sprintf(`{"v":2,"dek":{"id":%q,"created":"2026-11-08T00:00:00Z"},"slots":[%s]}`, dekID, slots))
+	}
+	f.Add(tail(header(pass(0, 65536, 4, salt))))
+	f.Add(tail(header(pass(3, 1<<32-1, 4, salt))))
+	f.Add(tail(header(pass(3, 65536, 0, salt))))
+	f.Add(tail(header(pass(3, 65536, 4, shortSalt))))
+	many := make([]string, 17)
+	for i := range many {
+		many[i] = pass(3, 65536, 4, salt)
+	}
+	f.Add(tail(header(strings.Join(many, ","))))
+	f.Add(tail([]byte(`{"v":3,"dek":{},"slots":[]}`)))
+	f.Add(tail([]byte(`{"v":2,"dek":{},"slots":[],"extra":1}`)))
+
+	f.Fuzz(func(t *testing.T, afterMagic []byte) {
+		data := append([]byte(v2VaultMagic), afterMagic...)
+		var declared uint32
+		if len(afterMagic) >= 4 {
+			declared = binary.BigEndian.Uint32(afterMagic[:4])
+		}
+		aad, headerJSON, err := rawHeaderOf(data)
+		if err != nil {
+			if !errors.Is(err, errCorrupt) {
+				t.Fatalf("rawHeaderOf = %v, want errCorrupt", err)
+			}
+			return
+		}
+		if declared > maxHdrLen {
+			t.Fatalf("a header length of %d was accepted, over the %d cap", declared, maxHdrLen)
+		}
+		if len(aad) != v2PrefixLen+len(headerJSON) || uint32(len(headerJSON)) != declared {
+			t.Fatalf("aad %d bytes, header %d bytes, declared %d", len(aad), len(headerJSON), declared)
+		}
+		h, slots, err := parseHeader(headerJSON)
+		switch {
+		case err == nil:
+		case errors.Is(err, errCorrupt), errors.Is(err, ErrNewerFormat):
+			return
+		default:
+			t.Fatalf("parseHeader = %v, want errCorrupt or ErrNewerFormat", err)
+		}
+		if h.V != headerVersion {
+			t.Fatalf("parsed v = %d", h.V)
+		}
+		if len(slots) > maxSlots || len(slots) != len(h.Slots) {
+			t.Fatalf("%d slots parsed, %d raw, cap %d", len(slots), len(h.Slots), maxSlots)
+		}
+		passphrases := 0
+		for _, s := range slots {
+			if s.Type != slotTypePassphrase {
+				continue
+			}
+			passphrases++
+			if s.Argon2id == nil {
+				t.Fatal("a passphrase slot parsed with no argon2id")
+			}
+			p := *s.Argon2id
+			if p.T < minArgonTime || p.T > maxArgonTime || p.P < minArgonPar || p.P > maxArgonPar ||
+				p.M < minArgonMem || p.M > maxArgonMem {
+				t.Fatalf("argon2id cost out of bounds: %+v", p)
+			}
+		}
+		if passphrases > maxPassphraseSlots {
+			t.Fatalf("%d passphrase slots, cap %d", passphrases, maxPassphraseSlots)
+		}
+	})
 }
