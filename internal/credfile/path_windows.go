@@ -62,14 +62,16 @@ func restrictACL(path string, dir bool) error {
 	}
 	// Two calls, remove then grant: when the current user is itself one of the well-known accounts
 	// (SYSTEM), the grant must land after the removal.
+	// Both runs take the output, not just the exit status: icacls says which term or path it
+	// refused, and that is the only account of a failure the caller ever gets.
 	rm := append([]string{p, "/inheritance:r", "/remove:g"}, wellKnownSIDs...)
-	if err := exec.Command("icacls", rm...).Run(); err != nil { // #nosec G204 -- fixed binary, fixed SIDs; path is a file this package just created
-		return errors.New("credfile: clear ACL failed")
+	if out, err := exec.Command("icacls", rm...).CombinedOutput(); err != nil { // #nosec G204 -- fixed binary, fixed SIDs; path is a file this package just created
+		return icaclsError("clear", out, err)
 	}
 	// #nosec G204 -- fixed binary; path is a file this package just created, and the grant terms are
 	// SIDs the process itself set through SetACLPolicy, never anything a remote caller supplies.
-	if err := exec.Command("icacls", grantArgs(p, u.Uid, dir, aclPolicy())...).Run(); err != nil {
-		return errors.New("credfile: set ACL failed")
+	if out, err := exec.Command("icacls", grantArgs(p, u.Uid, dir, aclPolicy())...).CombinedOutput(); err != nil {
+		return icaclsError("set", out, err)
 	}
 	return nil
 }

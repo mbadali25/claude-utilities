@@ -40,6 +40,8 @@ The server (`cmd/server`) is one TLS listener: `/ws` for agents, everything else
 - Keep `CLAUDESWAP_STATE_DIR` and `CLAUDE_CONFIG_DIR` identical at `enrol` and `run`; the logon task passes no environment, so a state dir set only at enrol makes `run` report a missing `agent.json` (see `agent-run.log`).
 - Import dedupes by the identity string: a login already stored is refused (`ErrAlreadyStored`), and a host with no `oauthAccount` cannot import.
 - Windows Defender may flag unsigned Go test binaries; a vanished or blocked `*.test.exe` is that, not a test failure.
+- `credfile.SetACLPolicy` takes SIDs only (`S-1-5-32-544`, `*` prefix optional) and refuses an account name, because icacls would read `*NT SERVICE\X:F` as one malformed grant term. Resolve the name first (`windows.LookupSID`).
+- One test creates a throwaway Windows service, to get a real `NT SERVICE\` SID: `TestPolicyACLGrantsAdministratorsAndServiceSID` (`internal/credfile`). It is skipped unless `CLAUDESWAP_TEST_SERVICE=1`, which CI does not set — run it by hand from an elevated shell on a host where creating a service is acceptable: `CLAUDESWAP_TEST_SERVICE=1 go test -race -run TestPolicyACLGrantsAdministratorsAndServiceSID ./internal/credfile`.
 - Session discovery reads `~/.claude/sessions/<pid>.json` on Windows and Linux. Linux liveness comes from `/proc/<pid>/stat` plus a claude marker in `comm` or `cmdline`; the Linux `procStart` format is unverified, so a value that is not a decimal clock-tick count is ignored rather than treated as dead. Other platforms return `ErrNotImplemented`.
 
 ## Scope discipline

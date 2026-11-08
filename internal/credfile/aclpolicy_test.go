@@ -1,10 +1,8 @@
 package credfile
 
 import (
-	"os"
-	"path/filepath"
+	"errors"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -23,8 +21,10 @@ const (
 // policy left set would fail a later test instead of this one.
 func usePolicy(t *testing.T, sids ...string) {
 	t.Helper()
-	SetACLPolicy(sids...)
-	t.Cleanup(func() { SetACLPolicy() })
+	if err := SetACLPolicy(sids...); err != nil {
+		t.Fatalf("SetACLPolicy(%q): %v", sids, err)
+	}
+	t.Cleanup(func() { _ = SetACLPolicy() })
 }
 
 func TestDefaultPolicyIsOwnerOnly(t *testing.T) {
@@ -49,13 +49,86 @@ func TestSetACLPolicyIsIdempotentAndCopies(t *testing.T) {
 	if got := aclPolicy(); len(got) != 1 || got[0] != testAdminSID {
 		t.Fatalf("policy after mutating a returned copy: %v", got)
 	}
-	SetACLPolicy(testAdminSID)
+	if err := SetACLPolicy(testAdminSID); err != nil {
+		t.Fatalf("setting the same value twice: %v", err)
+	}
 	if got := aclPolicy(); len(got) != 1 || got[0] != testAdminSID {
 		t.Fatalf("policy after setting the same value twice: %v", got)
 	}
-	SetACLPolicy()
+	if err := SetACLPolicy(); err != nil {
+		t.Fatalf("SetACLPolicy() with no argument: %v", err)
+	}
 	if got := aclPolicy(); len(got) != 0 {
 		t.Fatalf("policy after SetACLPolicy() with no argument: want empty, got %v", got)
+	}
+}
+
+// A policy entry is a SID. icacls takes each grant term as *<SID>:<rights>, so an account name
+// such as NT SERVICE\ClaudeSwap would be handed over as "*NT SERVICE\ClaudeSwap:F" and the whole
+// grant would fail, leaving the file with the ACL the removal left behind.
+func TestSetACLPolicyRejectsEntriesThatAreNotSIDs(t *testing.T) {
+	usePolicy(t, testAdminSID)
+	for _, bad := range []string{
+		`NT SERVICE\ClaudeSwap`, // the account name, not its SID
+		`*NT SERVICE\ClaudeSwap`,
+		`BUILTIN\Administrators`,
+		"Administrators",
+		"S-1-", // a prefix with no sub-authority
+		"S-1",
+		"S-1-5-32-544:F",        // a whole icacls term, rights included
+		"S-1-5-32-544 S-1-5-18", // two entries in one string
+		"S-1-5-32-x",
+		"1-5-32-544",
+		"../S-1-5-32-544",
+	} {
+		if err := SetACLPolicy(bad); err == nil {
+			t.Fatalf("SetACLPolicy(%q): want an error, got nil (policy now %v)", bad, aclPolicy())
+		} else if !strings.Contains(err.Error(), bad) {
+			t.Errorf("SetACLPolicy(%q): error does not name the entry: %v", bad, err)
+		}
+		if got := aclPolicy(); len(got) != 1 || got[0] != testAdminSID {
+			t.Fatalf("SetACLPolicy(%q) changed the policy: %v", bad, got)
+		}
+	}
+}
+
+func TestSetACLPolicyAcceptsSIDsWithStarsAndSpaces(t *testing.T) {
+	t.Cleanup(func() { _ = SetACLPolicy() })
+	for _, in := range []string{
+		testSvcSID,
+		"*" + testSvcSID,
+		"**" + testSvcSID,
+		" " + testSvcSID + " ",
+		strings.ToLower(testSvcSID),
+	} {
+		if err := SetACLPolicy(testAdminSID, in); err != nil {
+			t.Fatalf("SetACLPolicy(%q): %v", in, err)
+		}
+		want := []string{testAdminSID, strings.TrimLeft(strings.TrimSpace(in), "*")}
+		if got := aclPolicy(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("policy for entry %q:\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// Review item 1: a failed icacls run must carry the tool's own output, or a grant that icacls
+// refused leaves nothing to diagnose but "set ACL failed".
+func TestICACLSErrorNamesTheStepAndTheToolOutput(t *testing.T) {
+	run := errors.New("exit status 2")
+	err := icaclsError("set", []byte("  vault.bin: The system cannot find the file specified.  \r\n"), run)
+	if !errors.Is(err, run) {
+		t.Fatalf("want the run error wrapped, got %v", err)
+	}
+	for _, want := range []string{"credfile: set ACL failed", "exit status 2", "The system cannot find the file specified."} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err, want)
+		}
+	}
+	if s := err.Error(); s != strings.TrimSpace(s) {
+		t.Fatalf("icacls output was not trimmed: %q", s)
+	}
+	if got, want := icaclsError("clear", nil, run).Error(), "credfile: clear ACL failed: exit status 2"; got != want {
+		t.Fatalf("empty icacls output:\n got %q\nwant %q", got, want)
 	}
 }
 
@@ -129,7 +202,7 @@ func TestGrantArgsAlwaysKeepInheritanceR(t *testing.T) {
 
 func TestGrantArgsIncludeAWellFormedServiceSID(t *testing.T) {
 	want := "*" + testSvcSID + ":(OI)(CI)F"
-	for _, entry := range []string{testSvcSID, "*" + testSvcSID, " " + testSvcSID + " "} {
+	for _, entry := range []string{testSvcSID, "*" + testSvcSID, "**" + testSvcSID, " " + testSvcSID + " "} {
 		args := grantArgs(`C:\d`, testOwnerSID, true, []string{testAdminSID, entry})
 		found := false
 		for _, a := range args {
@@ -143,34 +216,5 @@ func TestGrantArgsIncludeAWellFormedServiceSID(t *testing.T) {
 		if !found {
 			t.Fatalf("policy entry %q: want a %q term, got %q", entry, want, args)
 		}
-	}
-}
-
-// Review Focus 2: icacls takes the path as an argument and a long one has to be handed over
-// in extended-length form, so a path over MAX_PATH or with non-ASCII segments must either be
-// restricted or report an error — never be left unrestricted with a nil error.
-func TestRestrictFileAcceptsNonASCIIAndLongPath(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("ACLs are a Windows concept; Unix modes are set directly")
-	}
-	dir := t.TempDir()
-	for len(dir) < 280 {
-		dir = filepath.Join(dir, "ü日-segment")
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("mkdir %d chars: %v", len(dir), err)
-	}
-	if err := RestrictDir(dir); err != nil {
-		t.Fatalf("RestrictDir on a %d-char path: %v", len(dir), err)
-	}
-	p := filepath.Join(dir, "ü日.json")
-	if err := os.WriteFile(p, []byte(`{"x":1}`), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := RestrictFile(p); err != nil {
-		t.Fatalf("RestrictFile on a %d-char path: %v", len(p), err)
-	}
-	if b, err := os.ReadFile(p); err != nil || string(b) != `{"x":1}` {
-		t.Fatalf("file no longer opens after RestrictFile: %q, %v", b, err)
 	}
 }

@@ -17,11 +17,16 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-// checkOwnerOnly fails unless the ACL grants access to the current user only.
+// checkOwnerOnly fails unless the ACL grants access to the current user only. It hands the path
+// to icacls in the same form restrictACL does, so a path past MAX_PATH can be read back too.
 func checkOwnerOnly(path string) error {
-	out, err := exec.Command("icacls", path).CombinedOutput()
+	p, err := icaclsPath(path)
 	if err != nil {
-		return fmt.Errorf("icacls: %w", err)
+		return err
+	}
+	out, err := exec.Command("icacls", p).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("icacls: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	u, err := user.Current()
 	if err != nil {
@@ -57,17 +62,74 @@ func TestOwnerOnlyACL(t *testing.T) {
 	}
 }
 
-// TestPolicyACLGrantsAdministratorsAndServiceSID proves the one part of Decision 11 that a pure
-// argument-list test cannot: that icacls accepts a real NT SERVICE\ SID and that a file restricted
-// under the policy is reachable by Administrators and by the service as well as the owner.
+// Review item 1: a failed icacls run has to hand the caller the tool's own output. icacls echoes
+// the path it refused, so the error naming it proves the output came through — and unlike the
+// message text, the path does not change with the host's language.
+func TestRestrictFileErrorCarriesICACLSOutput(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "never-created.json")
+	err := RestrictFile(p)
+	if err == nil {
+		t.Fatal("RestrictFile on a path that does not exist: want an error, got nil")
+	}
+	for _, want := range []string{"credfile: clear ACL failed", filepath.Base(p)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err, want)
+		}
+	}
+}
+
+// Review Focus 2: icacls takes the path as an argument and a long one has to be handed over in
+// extended-length form, so a path over MAX_PATH or with non-ASCII segments must come out restricted
+// — never left unrestricted with a nil error, and never readable by anyone but the owner.
+func TestRestrictFileAcceptsNonASCIIAndLongPath(t *testing.T) {
+	dir := t.TempDir()
+	for len(dir) < 280 {
+		dir = filepath.Join(dir, "ü日-segment")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir %d chars: %v", len(dir), err)
+	}
+	if err := RestrictDir(dir); err != nil {
+		t.Fatalf("RestrictDir on a %d-char path: %v", len(dir), err)
+	}
+	if err := checkOwnerOnly(dir); err != nil {
+		t.Fatalf("ACL of the %d-char dir: %v", len(dir), err)
+	}
+	p := filepath.Join(dir, "ü日.json")
+	if err := os.WriteFile(p, []byte(`{"x":1}`), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := RestrictFile(p); err != nil {
+		t.Fatalf("RestrictFile on a %d-char path: %v", len(p), err)
+	}
+	if err := checkOwnerOnly(p); err != nil {
+		t.Fatalf("ACL of the %d-char file: %v", len(p), err)
+	}
+	if b, err := os.ReadFile(p); err != nil || string(b) != `{"x":1}` {
+		t.Fatalf("file no longer opens after RestrictFile: %q, %v", b, err)
+	}
+}
+
+// serviceTestEnv opts in to the one test that creates a Windows service. Review item 2: gating on
+// CI plus an elevated token made it create and delete a real service on every elevated CI run,
+// which is not something a test suite should do without being asked.
+const serviceTestEnv = "CLAUDESWAP_TEST_SERVICE"
+
+// TestPolicyACLGrantsAdministratorsAndServiceSID proves the one part of the data-dir-ACL decision
+// that a pure argument-list test cannot: that icacls accepts a real NT SERVICE\ SID and that a file
+// restricted under the policy is reachable by Administrators and by the service as well as the owner.
 //
-// It is CI-only and needs an elevated token, because obtaining a real service SID means creating a
-// service. The throwaway service is named uniquely per run so it can never collide with a real
-// service or with a previous crashed run, its delete is registered before any assertion so a failing
-// assert still removes it, its binary path is a placeholder and it is never started.
+// It creates and deletes a throwaway Windows service, so it runs only on explicit opt-in:
+//
+//	CLAUDESWAP_TEST_SERVICE=1 go test -race -run TestPolicyACLGrantsAdministratorsAndServiceSID ./internal/credfile
+//
+// from an elevated shell on a host where creating a service is acceptable. It is not set in CI. The
+// service is named uniquely per run so it can never collide with a real service or with a previous
+// crashed run, its delete is registered before any assertion so a failing assert still removes it,
+// its binary path is a placeholder and it is never started.
 func TestPolicyACLGrantsAdministratorsAndServiceSID(t *testing.T) {
-	if os.Getenv("CI") == "" {
-		t.Skip("CI-only: this test creates and deletes a throwaway Windows service to obtain a real NT SERVICE\\ SID")
+	if os.Getenv(serviceTestEnv) != "1" {
+		t.Skipf("set %s=1 to opt in: this test creates and deletes a throwaway Windows service to obtain a real NT SERVICE\\ SID", serviceTestEnv)
 	}
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("not elevated: creating a service needs an elevated token")
