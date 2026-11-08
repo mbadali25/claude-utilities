@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,13 @@ const (
 	// maxVaultOpFiles bounds the file list. An operation spans the vault and the keyring; four
 	// leaves room without letting a journal name a directory's worth of deletions.
 	maxVaultOpFiles = 4
+
+	// maxVaultOpBytes bounds the journal read. The file lives in the data dir, so anyone who can
+	// write there can make it as large as the disk allows, and ReadVaultOp runs before every
+	// mutator and on every `server run` - an unbounded read is an unbounded allocation driven by
+	// whoever got there first. A real journal is a couple of hundred bytes; 64 KiB is room for a
+	// file list this package will never write and still a bound.
+	maxVaultOpBytes = 64 << 10
 )
 
 // ErrVaultOpUnreadable marks a journal that is present but is not one this binary wrote: torn by a
@@ -73,6 +81,15 @@ const (
 // a journal says which files to delete a .bak from, so believing a crafted one is how a data dir
 // loses files it should not.
 var ErrVaultOpUnreadable = errors.New("vault: the vaultop journal is unreadable; run `server vault verify --all-slots`")
+
+// ErrVaultOpMixedPair marks a settle that found the files the operation spans disagreeing about
+// their format version. The journal carries one Stage for up to maxVaultOpFiles files, so it cannot
+// say that the rename of the first landed and the rename of the second did not; the pair on disk
+// can. When it does, neither branch of the settle is safe - "completed" would delete a .bak that is
+// the only copy of the half that never landed, and "reverted" would clear the journal and call the
+// data dir settled - so the settle refuses and leaves everything where it is, which is the state
+// the spec hands to `server vault verify --all-slots` for a human to look at.
+var ErrVaultOpMixedPair = errors.New("vault: the files this operation spans disagree about their format version")
 
 // resealBak re-seals one file's .bak under the current generation, or deletes it when it cannot be
 // opened. It is a seam: the re-seal needs the slot openers and the v2 write path, which are Task
@@ -127,12 +144,24 @@ func WriteVaultOp(dataDir string, op VaultOp) error {
 // normal case; a journal that is present but not readable as one of ours is ErrVaultOpUnreadable,
 // never a zero VaultOp a caller might act on.
 func ReadVaultOp(dataDir string) (VaultOp, bool, error) {
-	data, err := os.ReadFile(filepath.Clean(VaultOpPath(dataDir)))
+	f, err := os.Open(filepath.Clean(VaultOpPath(dataDir)))
 	if errors.Is(err, os.ErrNotExist) {
 		return VaultOp{}, false, nil
 	}
 	if err != nil {
 		return VaultOp{}, false, fmt.Errorf("vault: read journal: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	// One byte past the bound, so a file at the bound is still told apart from one over it. A
+	// LimitReader set to the bound itself would hand Unmarshal a truncated object and report a
+	// parse error for a file whose only problem is its size, which sends an operator looking for
+	// the wrong thing.
+	data, err := io.ReadAll(io.LimitReader(f, maxVaultOpBytes+1))
+	if err != nil {
+		return VaultOp{}, false, fmt.Errorf("vault: read journal: %w", err)
+	}
+	if len(data) > maxVaultOpBytes {
+		return VaultOp{}, false, fmt.Errorf("%w: it is over %d bytes", ErrVaultOpUnreadable, maxVaultOpBytes)
 	}
 	var op VaultOp
 	if err := json.Unmarshal(data, &op); err != nil {
@@ -167,6 +196,16 @@ func ClearVaultOp(dataDir string) error {
 func SettleVaultOp(dataDir string, op VaultOp, ks KeySource) (string, error) {
 	if err := op.validate(); err != nil {
 		return "", err
+	}
+	// Before either branch, because neither is safe on a mixed pair and the journal cannot tell
+	// them apart: one Stage describes up to maxVaultOpFiles files, so a crash between the rename of
+	// file 1 and the rename of file 2 reads as whichever stage was written last. At StageRenamed
+	// the "completed" branch would delete the .bak of the half that never landed, which is the only
+	// copy of it; at StageStarted or StageBak the "reverted" branch would clear the journal and
+	// report the data dir settled. Refuse, leave everything alone, and name the verify the spec
+	// hands a mixed pair to.
+	if line, mixed := MixedPair(dataDir); mixed {
+		return "", fmt.Errorf("%w: %s", ErrVaultOpMixedPair, line)
 	}
 	if op.Stage != StageRenamed {
 		// (i) or (ii): the new generation never became visible, so the old file is intact and
@@ -276,8 +315,13 @@ func formatVersion(path, v1Magic, v2Magic string) (string, bool) {
 		return "", false
 	}
 	defer func() { _ = f.Close() }()
+	// io.ReadFull, not f.Read: a single Read may return fewer bytes than the buffer holds without
+	// an error, and a magic compared against a partly filled buffer is a format decision made on
+	// bytes that were never read. Here the buffer is exactly the magic's length, so
+	// io.ErrUnexpectedEOF means "shorter than a magic" and is one of the cases this reports as not
+	// a format it knows.
 	buf := make([]byte, len(v1Magic))
-	if _, err := f.Read(buf); err != nil {
+	if _, err := io.ReadFull(f, buf); err != nil {
 		return "", false
 	}
 	switch string(buf) {

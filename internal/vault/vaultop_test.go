@@ -2,6 +2,7 @@ package vault
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -168,7 +169,7 @@ func TestSettleRemovesABakItCannotReseal(t *testing.T) {
 func TestSettleRevertsWhenItCannotComplete(t *testing.T) {
 	for _, stage := range []string{StageStarted, StageBak} {
 		dir := t.TempDir()
-		writeFiles(t, dir, vaultFileName)
+		writeFiles(t, dir, vaultFileName, vaultFileName+bakSuffix)
 		op := rotateOp(stage)
 		if err := WriteVaultOp(dir, op); err != nil {
 			t.Fatal(err)
@@ -183,12 +184,100 @@ func TestSettleRevertsWhenItCannotComplete(t *testing.T) {
 		if !exists(t, filepath.Join(dir, vaultFileName)) {
 			t.Errorf("stage %s: the old file is gone", stage)
 		}
-		if exists(t, filepath.Join(dir, vaultFileName+bakSuffix)) {
-			t.Errorf("stage %s: a .bak appeared", stage)
+		// A settle that reverts touches no file. Deleting a .bak is step (ii)'s job inside the
+		// operation, not a settle's: at StageStarted the operation had not reached it, so the .bak
+		// beside the generation on disk is still that generation's recovery copy. The assertion
+		// this replaces - "a .bak appeared" - could not fail, because nothing in the setup made one.
+		bak := filepath.Join(dir, vaultFileName+bakSuffix)
+		got, rerr := os.ReadFile(bak)
+		if rerr != nil {
+			t.Errorf("stage %s: the .bak did not survive the revert: %v", stage, rerr)
+		} else if string(got) != "contents of "+vaultFileName+bakSuffix {
+			t.Errorf("stage %s: the .bak's bytes changed: %q", stage, got)
 		}
 		if _, ok, _ := ReadVaultOp(dir); ok {
 			t.Errorf("stage %s: the journal was not cleared", stage)
 		}
+	}
+}
+
+// One Stage for up to maxVaultOpFiles files cannot say that the rename of file 1 of 2 landed and
+// the rename of file 2 did not. The pair on disk can, and a settle that read that pair as settled
+// would either delete the .bak of the half that never landed - the only copy of it - or clear the
+// journal and call the data dir clean. Both stage values refuse instead.
+func TestSettleRefusesAMixedPair(t *testing.T) {
+	for _, stage := range []string{StageStarted, StageBak, StageRenamed} {
+		dir := t.TempDir()
+		// A crash between file 1 and file 2 of 2: the vault is the new generation, the keyring is
+		// still the old one.
+		if err := os.WriteFile(filepath.Join(dir, vaultFileName), []byte(v2VaultMagic+"....."), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, KeyringFileName), []byte(keyringMagic+"....."), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeFiles(t, dir, vaultFileName+bakSuffix, KeyringFileName+bakSuffix)
+		op := rotateOp(stage)
+		if err := WriteVaultOp(dir, op); err != nil {
+			t.Fatal(err)
+		}
+
+		result, err := SettleVaultOp(dir, op, EnvKey(keyEnv))
+		if err == nil {
+			t.Fatalf("stage %s: SettleVaultOp reported a mixed pair as %q", stage, result)
+		}
+		if !errors.Is(err, ErrVaultOpMixedPair) {
+			t.Errorf("stage %s: err = %v, want ErrVaultOpMixedPair", stage, err)
+		}
+		for _, want := range []string{vaultFileName, KeyringFileName, "server vault verify --all-slots"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("stage %s: message %q does not name %q", stage, err.Error(), want)
+			}
+		}
+		// Nothing deleted and nothing cleared: a refused settle leaves the data dir exactly as it
+		// found it, so the human the message names still has everything to look at.
+		for _, n := range []string{
+			vaultFileName, KeyringFileName,
+			vaultFileName + bakSuffix, KeyringFileName + bakSuffix,
+		} {
+			if !exists(t, filepath.Join(dir, n)) {
+				t.Errorf("stage %s: a refused settle deleted %s", stage, n)
+			}
+		}
+		if _, ok, _ := ReadVaultOp(dir); !ok {
+			t.Errorf("stage %s: a refused settle cleared the journal", stage)
+		}
+	}
+}
+
+// The journal is a file in the data dir, so anyone who can write there decides how large it is, and
+// every mutator reads it before it does anything. The read is bounded, and the bound refuses on
+// size rather than letting a truncated read fail as a parse error - which would report the wrong
+// problem for a file whose only problem is its size.
+func TestAnOversizedJournalIsRefused(t *testing.T) {
+	head := `{"op":"rotate","files":["` + vaultFileName + `"],"newDekId":"` + fakeDEKID + `","stage":"renamed"`
+	// Whitespace before the closing brace is valid JSON, so the only difference between these two
+	// is the byte count.
+	atBound := head + strings.Repeat(" ", maxVaultOpBytes-len(head)-1) + "}"
+	overBound := head + strings.Repeat(" ", maxVaultOpBytes-len(head)) + "}"
+
+	dir := t.TempDir()
+	if err := os.WriteFile(VaultOpPath(dir), []byte(atBound), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := ReadVaultOp(dir); !ok || err != nil {
+		t.Fatalf("a %d-byte journal (the bound) = ok %v err %v, want it read", len(atBound), ok, err)
+	}
+
+	if err := os.WriteFile(VaultOpPath(dir), []byte(overBound), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	op, ok, err := ReadVaultOp(dir)
+	if ok || err == nil {
+		t.Fatalf("a %d-byte journal = op %+v ok %v err %v, want a refusal", len(overBound), op, ok, err)
+	}
+	if !errors.Is(err, ErrVaultOpUnreadable) {
+		t.Fatalf("err = %v, want ErrVaultOpUnreadable", err)
 	}
 }
 
@@ -332,27 +421,52 @@ func TestMixedPairIsDetectedAndReported(t *testing.T) {
 	if line, mixed := MixedPair(dir); mixed {
 		t.Errorf("MixedPair = true with no keyring at all: %q", line)
 	}
+
+	// A file shorter than a magic is not a format this binary knows, so it is not half of a mixed
+	// pair either: the opener reports the damage, with the message it already has. formatVersion
+	// reads the magic with io.ReadFull for this reason - a short read that came back without an
+	// error would compare a part-filled buffer and could name a version off bytes it never read.
+	for _, short := range []string{"", "CS", keyringMagic[:len(keyringMagic)-1]} {
+		if err := os.WriteFile(filepath.Join(dir, KeyringFileName), []byte(short), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if line, mixed := MixedPair(dir); mixed {
+			t.Errorf("MixedPair = true for a %d-byte keyring: %q", len(short), line)
+		}
+	}
 }
 
 // The journal is a plain file beside the vault, so what it may hold is as important as what it
-// does. No key, no wrap, no passphrase: the dek.id is an identifier and is not secret.
-func TestVaultOpJournalCarriesNoKeyMaterial(t *testing.T) {
+// does: an operation name, file names, the base64 dek.id and a stage, and nothing else. The dek.id
+// is the HKDF salt and part of every slot's AAD, so it is public by construction.
+//
+// The assertion is on the field set, because that is the thing that can change. The version this
+// replaces looked for a DEK and a passphrase that were never handed to WriteVaultOp in the first
+// place - two string constants compared against a file they could not reach - so it would have
+// passed whatever the writer did. A field added to VaultOp that carried a wrap or a DEK would land
+// in this file, and this is what sees it.
+func TestVaultOpJournalCarriesOnlyItsFourPublicFields(t *testing.T) {
 	dir := t.TempDir()
-	const fakeDEK = "ffffffffffffffffffffffffffffffff"
-	const fakePassphrase = "correct-horse-battery-staple"
-	t.Setenv(keyEnv, fakePassphrase)
-
-	op := rotateOp(StageBak)
-	if err := WriteVaultOp(dir, op); err != nil {
+	if err := WriteVaultOp(dir, rotateOp(StageBak)); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(VaultOpPath(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, leak := range []string{fakeDEK, fakePassphrase} {
-		if strings.Contains(string(data), leak) {
-			t.Fatalf("the journal carries %q: %s", leak, data)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"op": true, "files": true, "newDekId": true, "stage": true}
+	for k := range fields {
+		if !want[k] {
+			t.Errorf("the journal carries a field this test has not vetted, %q: %s", k, data)
+		}
+	}
+	for k := range want {
+		if _, ok := fields[k]; !ok {
+			t.Errorf("the journal is missing %q: %s", k, data)
 		}
 	}
 	if !strings.Contains(string(data), fakeDEKID) {
@@ -365,5 +479,43 @@ func TestVaultOpJournalCarriesNoKeyMaterial(t *testing.T) {
 	}
 	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
 		t.Fatalf("journal mode = %v, want 0600", st.Mode().Perm())
+	}
+}
+
+// A KeySource is the one way a passphrase reaches this file's code: SettleVaultOp is handed one for
+// the re-seal. It must not reach the disk, and the file a failed settle leaves behind is where it
+// would show up, so the whole data dir is read back and checked.
+func TestSettleWritesNoPassphraseIntoTheDataDir(t *testing.T) {
+	const fakePassphrase = "correct-horse-battery-staple"
+	t.Setenv(keyEnv, fakePassphrase)
+
+	dir := t.TempDir()
+	writeFiles(t, dir, vaultFileName, vaultFileName+bakSuffix)
+	op := VaultOp{Op: "rotate", Files: []string{vaultFileName}, NewDEKID: fakeDEKID, Stage: StageRenamed}
+	if err := WriteVaultOp(dir, op); err != nil {
+		t.Fatal(err)
+	}
+	restore := resealBak
+	resealBak = func(string, VaultOp, KeySource) (string, error) { return "", errors.New("disk full") }
+	t.Cleanup(func() { resealBak = restore })
+
+	if _, err := SettleVaultOp(dir, op, EnvKey(keyEnv)); err == nil {
+		t.Fatal("SettleVaultOp reported success after the re-seal failed")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("the data dir is empty: there is nothing for this test to check")
+	}
+	for _, e := range entries {
+		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), fakePassphrase) {
+			t.Errorf("%s carries the passphrase", e.Name())
+		}
 	}
 }
