@@ -150,11 +150,23 @@ func TestHeaderBase64IsStdEncodingWithPadding(t *testing.T) {
 	if got, err := base64.StdEncoding.DecodeString(slots[0].Argon2id.Salt); err != nil || len(got) != saltLen {
 		t.Fatalf("salt decode: %v len=%d", err, len(got))
 	}
-	// The same 16 bytes in RawStdEncoding must not be accepted: one decoder, one alphabet.
-	raw := base64.RawStdEncoding.EncodeToString(make([]byte, dekIDLen))
+	// The golden's own dek.id bytes, re-encoded without padding, must not be accepted: one decoder,
+	// one alphabet. The same *value*, deliberately - encoding zeros instead would also change the
+	// bytes, and the test would then pass whether the padding or the value was what was refused.
+	id, err := base64.StdEncoding.DecodeString(h.DEK.ID)
+	if err != nil {
+		t.Fatalf("dek.id decode: %v", err)
+	}
+	raw := base64.RawStdEncoding.EncodeToString(id)
+	if raw == h.DEK.ID {
+		t.Fatalf("RawStdEncoding of dek.id is identical to StdEncoding: %q", raw)
+	}
+	if base64.StdEncoding.EncodeToString(id) != h.DEK.ID {
+		t.Fatalf("the golden's dek.id is not StdEncoding of its own bytes")
+	}
 	hdr := bytes.Replace(golden, []byte(h.DEK.ID), []byte(raw), 1)
 	if _, _, err := parseHeader(hdr); !errors.Is(err, errCorrupt) {
-		t.Fatalf("RawStdEncoding dek.id accepted: want errCorrupt, got %v", err)
+		t.Fatalf("unpadded dek.id of the right value accepted: want errCorrupt, got %v", err)
 	}
 }
 
@@ -236,21 +248,38 @@ func TestRawHeaderIsTheFirstEightPlusHdrLenBytesOfTheFile(t *testing.T) {
 
 func TestHeaderParamBoundsRejectedBeforeAllocation(t *testing.T) {
 	golden := string(goldenHeader(t))
-	// The passphrase slot's text, lifted from the golden so the repeated-slot cases encode exactly
-	// what the single-slot case does.
-	const oneSlot = `{"id":"EBESExQVFhc=","type":"passphrase","created":"2026-11-07T12:00:00Z",` +
+	// The passphrase and dpapi slot texts, lifted from the golden so the two cap cases encode
+	// exactly what the single-slot case does.
+	const passSlot = `{"id":"EBESExQVFhc=","type":"passphrase","created":"2026-11-07T12:00:00Z",` +
 		`"argon2id":{"t":3,"m":65536,"p":4,"salt":"QEFCQ0RFRkdISUpLTE1OTw=="},` +
 		`"wrap":{"nonce":"UFFSU1RVVldYWVpb","ct":"YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6P"}}`
-	if !strings.Contains(golden, oneSlot) {
-		t.Fatalf("the golden no longer contains the slot this table repeats")
+	const dpapiSlot = `{"id":"ICEiIyQlJic=","type":"dpapi","scope":"machine",` +
+		`"created":"2026-11-07T12:00:00Z","wrap":{"blob":"oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr/AwcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3w=="}}`
+	for _, s := range []string{passSlot, dpapiSlot} {
+		if !strings.Contains(golden, s) {
+			t.Fatalf("the golden no longer contains the slot this table repeats: %s", s)
+		}
 	}
-	repeat := func(n int) string {
+	// withSlots replaces the whole slots array rather than prepending to it, so each cap case
+	// carries exactly the slots it names. Keeping the golden's other two slots on the end would
+	// make "nine passphrase slots" an eleven-slot header, and the slot cap and the passphrase cap
+	// would then be indistinguishable: whichever fired first would pass the case.
+	head := `"slots":[`
+	prefix := golden[:strings.Index(golden, head)+len(head)]
+	withSlots := func(parts ...string) string {
+		return prefix + strings.Join(parts, ",") + "]}"
+	}
+	repeatSlot := func(s string, n int) []string {
 		parts := make([]string, n)
 		for i := range parts {
-			parts[i] = oneSlot
+			parts[i] = s
 		}
-		return strings.Replace(golden, `"slots":[`+oneSlot, `"slots":[`+strings.Join(parts, ","), 1)
+		return parts
 	}
+	// Seventeen slots with one passphrase among them: only the slot cap can refuse this.
+	overSlotCap := withSlots(append([]string{passSlot}, repeatSlot(dpapiSlot, maxSlots)...)...)
+	// Nine slots, all passphrase: under the slot cap, so only the passphrase cap can refuse it.
+	overPassCap := withSlots(repeatSlot(passSlot, maxPassphraseSlots+1)...)
 	for _, tc := range []struct {
 		name   string
 		header string
@@ -262,8 +291,8 @@ func TestHeaderParamBoundsRejectedBeforeAllocation(t *testing.T) {
 		{"m below the floor", strings.Replace(golden, `"m":65536`, `"m":7`, 1)},
 		{"m above the ceiling", strings.Replace(golden, `"m":65536`, `"m":1048577`, 1)},
 		{"m claiming four terabytes", strings.Replace(golden, `"m":65536`, `"m":4294967295`, 1)},
-		{"seventeen slots", repeat(17)},
-		{"nine passphrase slots", repeat(9)},
+		{"seventeen slots, one of them a passphrase", overSlotCap},
+		{"nine slots, every one a passphrase", overPassCap},
 		{"salt of fifteen bytes", strings.Replace(golden,
 			`"salt":"QEFCQ0RFRkdISUpLTE1OTw=="`,
 			`"salt":"`+base64.StdEncoding.EncodeToString(make([]byte, 15))+`"`, 1)},
@@ -293,6 +322,28 @@ func TestHeaderParamBoundsRejectedBeforeAllocation(t *testing.T) {
 			}
 		})
 	}
+	// The positive controls for the two caps. Without them the cases above would pass just as well
+	// against a parser that refused every slot array, and the caps could sit one short.
+	t.Run("sixteen slots is accepted", func(t *testing.T) {
+		h := withSlots(append([]string{passSlot}, repeatSlot(dpapiSlot, maxSlots-1)...)...)
+		_, slots, err := parseHeader([]byte(h))
+		if err != nil {
+			t.Fatalf("a header at the slot cap was refused: %v", err)
+		}
+		if len(slots) != maxSlots {
+			t.Fatalf("got %d slots, want %d", len(slots), maxSlots)
+		}
+	})
+	t.Run("eight passphrase slots is accepted", func(t *testing.T) {
+		h := withSlots(repeatSlot(passSlot, maxPassphraseSlots)...)
+		_, slots, err := parseHeader([]byte(h))
+		if err != nil {
+			t.Fatalf("a header at the passphrase cap was refused: %v", err)
+		}
+		if len(slots) != maxPassphraseSlots {
+			t.Fatalf("got %d slots, want %d", len(slots), maxPassphraseSlots)
+		}
+	})
 }
 
 func TestHdrLenOver64KiBIsErrCorruptWithNoAllocation(t *testing.T) {
@@ -327,8 +378,28 @@ func TestFileShorterThanMinimumIsErrCorrupt(t *testing.T) {
 		t.Fatalf("one byte short: want errCorrupt, got %v", err)
 	}
 	p2 := writeFixture(t, t.TempDir(), "vault.bin", full)
-	if _, err := open(t, p2, "pw"); errors.Is(err, errCorrupt) {
+	_, err := open(t, p2, "pw")
+	if errors.Is(err, errCorrupt) {
 		t.Fatalf("a well-formed v2 header reports as malformed: %v", err)
+	}
+	// A header this binary can parse has no slot it can unwrap yet, so the answer is ErrBadKey -
+	// naming the slot kinds it would have tried, in try order, and nothing else. An id, a salt, a
+	// nonce or a wrapped key in that string would be a value in an error message.
+	if !errors.Is(err, ErrBadKey) {
+		t.Fatalf("want ErrBadKey for a parseable v2 header, got %v", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "dpapi, kek-file, passphrase") {
+		t.Fatalf("the error does not name the slot kinds in try order: %q", msg)
+	}
+	for _, leak := range []string{
+		"EBESExQVFhc=", "ICEiIyQlJic=", "MDEyMzQ1Njc=", // slot ids
+		"QEFCQ0RFRkdISUpLTE1OTw==", "UFFSU1RVVldYWVpb", // salt, nonce
+		"AAECAwQFBgcICQoLDA0ODw==", "vault-kek", "pw", // dek id, credential name, passphrase
+	} {
+		if strings.Contains(msg, leak) {
+			t.Fatalf("the error carries %q: %q", leak, msg)
+		}
 	}
 }
 
