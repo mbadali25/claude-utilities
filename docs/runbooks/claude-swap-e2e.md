@@ -80,7 +80,7 @@ D:\temp\claude-swap-e2e\server.exe --listen <LAN_IP>:<PORT> --data-dir D:\temp\c
 ```
 - `--listen` is required and has no default. `--data-dir` holds `vault.bin`, `hosts.json`, `tls/`.
 - Expect the `listening on https://...` line with the certificate sha256. Keep this window open; logs go to stderr.
-- Exit 2 means a missing flag or env var; exit 1 is a runtime failure.
+- Exit 2 means a missing flag or env var; exit 1 is a runtime failure; exit 5 means the server refused the TLS pair in `<data-dir>\tls` — one file of two, unreadable, unparseable, key and certificate mismatched, or expired. It never regenerates the pair, because that would change the sha256 every enrolled agent pins: fix the permissions, or run `server cert renew` and re-enrol the agents on the new pin.
 - Open `https://<LAN_IP>:<PORT>/` and log in with the admin password.
 - `CLAUDESWAP_ADMIN_PASSWORD` is only the bootstrap password: it works while no `admin-password.json` exists in the data dir. Once a password is set, the stored argon2id hash wins and the variable is ignored (the server also starts without it).
 - Change the password offline: `go run ./cmd/server set-password [--data-dir DIR]` (or `server.exe set-password`). It prompts twice with echo off on a terminal, or reads one line from stdin when piped; minimum 12 characters; never an argument. A running server reads the hash at startup, so restart it for the new password to apply.

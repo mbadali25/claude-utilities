@@ -14,7 +14,8 @@ Design: `docs/superpowers/specs/2026-11-04-claude-swap-design.md`. Plan: `docs/s
 | test  | `go test -race -count=1 ./...` (CI sets `CGO_ENABLED=1`); one test: `go test -race -run TestName ./internal/hub` |
 | lint  | `go vet ./...`, `gofmt -l .` (must print nothing), `golangci-lint run` (v2.15.0 in CI; config `.golangci.yml`, gosec on) |
 | verify | `bash _verify/smoke.sh`, `bash _verify/run-all.sh`, `bash _verify/cases/go-checks.sh` (exit 77 = skipped, not passed) |
-| server | set `CLAUDESWAP_KEY` (vault passphrase) and `CLAUDESWAP_ADMIN_PASSWORD`, then `go run ./cmd/server --listen host:port [--data-dir DIR]`. `--listen` has no default. Prints the TLS cert sha256 for `--pin`. |
+| server | set `CLAUDESWAP_KEY` (vault passphrase) and `CLAUDESWAP_ADMIN_PASSWORD`, then `go run ./cmd/server --listen host:port [--data-dir DIR]`. `--listen` has no default. Prints the TLS cert sha256 for `--pin`. Exits: 2 = bad flag or missing env var, 1 = runtime failure, 5 = refused TLS pair (it is never regenerated; see `cert renew`). |
+| cert renew | `go run ./cmd/server cert renew [--data-dir DIR]` — the ONLY command that writes a new TLS pair; the word `renew` is typed at the prompt, never a flag. It changes the sha256 every agent pins, so: stop the server (it serves the old pair until restarted), renew, restart, then re-enrol every agent. Refuses a pair it cannot read (exit 5) — there the fault is a permission or ACL problem, not the certificate. |
 | set-password | `go run ./cmd/server set-password [--data-dir DIR]` — prompt (no echo at a TTY) or one line of stdin, never a flag. Writes an argon2id hash to `<data-dir>/admin-password.json`, which then wins over `CLAUDESWAP_ADMIN_PASSWORD`. |
 | agent | `go run ./cmd/agent enrol --server https://host:port --pin SHA256HEX` (one-time code via `CLAUDESWAP_ENROL_CODE`, never a flag), then `agent run`; `agent install` registers start-at-login |
 | promote | `/crew:promote <development\|qa\|production>` |

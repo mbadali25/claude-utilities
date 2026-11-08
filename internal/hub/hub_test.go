@@ -673,11 +673,25 @@ func TestEnsureCertStableFingerprintAcrossRestarts(t *testing.T) {
 	if err != nil || fp3 == fp1 {
 		t.Fatalf("separate dirs must differ: %v", err)
 	}
-	// A corrupt pair is replaced rather than trusted.
+	// A corrupt pair is REFUSED, not replaced: regenerating would change the fingerprint every
+	// enrolled agent pins. Inverted from "corrupt key not regenerated" by the EnsureCert case
+	// table (spec "Admin password and TLS certificate", row 4); the per-row tests are in
+	// tls_test.go.
+	certBefore, err := os.ReadFile(c1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(k1, []byte("junk"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, fp4, err := EnsureCert(dir); err != nil || fp4 == fp1 {
-		t.Fatalf("corrupt key not regenerated: %v", err)
+	if _, _, fp4, err := EnsureCert(dir); !errors.Is(err, ErrCertCorrupt) || fp4 != "" {
+		t.Fatalf("corrupt key not refused: fp %q err %v", fp4, err)
+	}
+	certAfter, err := os.ReadFile(c1)
+	if err != nil || !bytes.Equal(certBefore, certAfter) {
+		t.Fatalf("the certificate was rewritten on a refusal: %v", err)
+	}
+	if keyAfter, kerr := os.ReadFile(k1); kerr != nil || string(keyAfter) != "junk" {
+		t.Fatalf("the key was rewritten on a refusal: %v", kerr)
 	}
 }
