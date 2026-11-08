@@ -359,7 +359,7 @@ func (h Header) unknownSlots() []Slot {
 // `slottype`. Bounded by maxSlots, so a crafted header buys at most sixteen lines.
 //
 // The type is named here and deliberately not in the error string an open failure returns
-// (slotTypeList, sealed.go). Not a contradiction - two sinks with different exposure. This line is
+// (triedSummary, sealed.go). Not a contradiction - two sinks with different exposure. This line is
 // one JSON object written by logx: the value is escaped by the encoder, redacted, and capped at
 // logx's limit, so it cannot splice a line of its own or run away with the log. The error string
 // goes to stderr and into whatever an operator pastes into a ticket, where a 255-byte

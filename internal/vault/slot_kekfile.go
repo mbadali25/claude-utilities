@@ -1,7 +1,6 @@
 package vault
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -375,13 +374,11 @@ func (o *kekFileSlotOpener) Unwrap(slot Slot, aad []byte) ([]byte, error) {
 	if slot.Type != slotTypeKEKFile {
 		return nil, fmt.Errorf("%w: the kek-file opener was handed a slot of another type", errCorrupt)
 	}
-	nonce, err := base64.StdEncoding.DecodeString(slot.Wrap.Nonce)
-	if err != nil || len(nonce) != nonceLen {
-		return nil, fmt.Errorf("%w: kek-file slot nonce is not base64 of %d bytes", errCorrupt, nonceLen)
-	}
-	ct, err := base64.StdEncoding.DecodeString(slot.Wrap.CT)
-	if err != nil || len(ct) != wrapCTLen {
-		return nil, fmt.Errorf("%w: kek-file slot ct is not base64 of %d bytes", errCorrupt, wrapCTLen)
+	// The same decode as the passphrase slot's: one definition of what a symmetric wrap's two fields
+	// must be, so the two slot types cannot disagree about a nonce of the wrong length.
+	nonce, ct, err := symmetricWrapBytes(slot)
+	if err != nil {
+		return nil, err
 	}
 	return openSlot(o.kek, nonce, ct, aad)
 }

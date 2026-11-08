@@ -67,7 +67,7 @@ var (
 	//
 	// It names neither id. An id is attacker-chosen text out of a header nothing has authenticated
 	// yet, and this string goes to stderr and into whatever an operator pastes into a ticket, where
-	// it has no escaping around it - the same reasoning slotTypeList is built on.
+	// it has no escaping around it - the same reasoning triedSummary is built on.
 	errSlotIDMismatch = errors.New("vault: a changed slot's id does not match the id it is keyed by")
 
 	// renameFn is replaced in tests to inject write failures.

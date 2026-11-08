@@ -418,7 +418,13 @@ func TestHdrLenOver64KiBIsErrCorruptWithNoAllocation(t *testing.T) {
 }
 
 func TestFileShorterThanMinimumIsErrCorrupt(t *testing.T) {
-	noArgon2(t)
+	// The counting seam rather than noArgon2, because the second half of this test opens a header
+	// that PARSES, and the open flow now reaches its passphrase slot and derives a key from it -
+	// which is the correct behaviour since the slot walk landed. The stub keeps the real derivation
+	// out of the test's runtime; the "never entered" assertion belongs to the malformed-header
+	// cases, which TestHeaderParamBoundsRejectedBeforeAllocation and
+	// TestHdrLenOver64KiBIsErrCorruptWithNoAllocation own.
+	argon2Seam(t)
 	golden := goldenHeader(t)
 	full := v2File(v2VaultMagic, golden)
 	if want := 8 + len(golden) + nonceLen + gcmTagLen; len(full) != want {
@@ -435,15 +441,19 @@ func TestFileShorterThanMinimumIsErrCorrupt(t *testing.T) {
 	if errors.Is(err, errCorrupt) {
 		t.Fatalf("a well-formed v2 header reports as malformed: %v", err)
 	}
-	// A header this binary can parse has no slot it can unwrap yet, so the answer is ErrBadKey -
-	// naming the slot kinds it would have tried, in try order, and nothing else. An id, a salt, a
-	// nonce or a wrapped key in that string would be a value in an error message.
+	// The passphrase here is wrong and the key source is EnvKey, whose Machine is nil, so the one
+	// slot anything could be handed a key for is the passphrase one: ErrBadKey, naming that kind and
+	// counting the two machine slots this host held no key for. An id, a salt, a nonce or a wrapped
+	// key in that string would be a value in an error message.
 	if !errors.Is(err, ErrBadKey) {
 		t.Fatalf("want ErrBadKey for a parseable v2 header, got %v", err)
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "dpapi, kek-file, passphrase") {
-		t.Fatalf("the error does not name the slot kinds in try order: %q", msg)
+	if !strings.Contains(msg, "slot types tried: passphrase; 2 this host held no key for") {
+		t.Fatalf("the error does not name what was tried and count what was not: %q", msg)
+	}
+	if strings.Contains(msg, slotTypeDPAPI) || strings.Contains(msg, slotTypeKEKFile) {
+		t.Fatalf("the error names a machine kind EnvKey offers no opener for: %q", msg)
 	}
 	for _, leak := range []string{
 		"EBESExQVFhc=", "ICEiIyQlJic=", "MDEyMzQ1Njc=", // slot ids
@@ -587,8 +597,10 @@ func TestUnknownSlotTypeRoundTripsByteIdentical(t *testing.T) {
 // counts the rest. A slot type is attacker-controlled text up to 255 printable bytes, and the error
 // goes to stderr and into the operator's paste buffer: echoing it back verbatim hands a crafted
 // header a line of output, which is how a terminal escape or a forged instruction gets there.
-func TestSlotTypeListNamesKnownTypesAndCountsTheRest(t *testing.T) {
-	noArgon2(t)
+func TestTriedSummaryNamesTriedKindsAndCountsTheRest(t *testing.T) {
+	// A parseable header, so the walk reaches its passphrase slot and derives: the counting seam,
+	// not noArgon2. See TestFileShorterThanMinimumIsErrCorrupt.
+	argon2Seam(t)
 	// 255 bytes of printable ASCII, the quote and the backslash among them, so the fixture also
 	// proves the type is carried as JSON and not spliced into the header as text.
 	var sb strings.Builder
@@ -621,11 +633,13 @@ func TestSlotTypeListNamesKnownTypesAndCountsTheRest(t *testing.T) {
 	if strings.Contains(msg, hostile[:32]) {
 		t.Fatalf("the error carries a prefix of the slot's type: %q", msg)
 	}
-	if !strings.Contains(msg, "unknown") {
+	if !strings.Contains(msg, "1 unknown") {
 		t.Fatalf("the error does not account for the unknown slot: %q", msg)
 	}
-	if !strings.Contains(msg, "dpapi, kek-file, passphrase") {
-		t.Fatalf("the error no longer names the known kinds in try order: %q", msg)
+	// Counted apart from the two machine slots, which are a kind this binary knows and this host has
+	// no key for: the first says "wrong binary for this file", the second "wrong host".
+	if !strings.Contains(msg, "slot types tried: passphrase; 2 this host held no key for") {
+		t.Fatalf("the error does not name what was tried and count what was not: %q", msg)
 	}
 }
 
@@ -1110,7 +1124,9 @@ func TestUnknownSlotBytesSurviveAHeaderChangingSave(t *testing.T) {
 // openSealedV2): the warning is what this test is about, and it is emitted on the way to that
 // answer either way.
 func TestUnknownSlotIsSkippedOnOpenWithAWarning(t *testing.T) {
-	noArgon2(t)
+	// A parseable header: the walk skips the unknown slot, reaches the golden's passphrase slot and
+	// derives from it, so this is the counting seam rather than noArgon2.
+	argon2Seam(t)
 	buf := captureLog(t)
 	hdr := withExtraSlot(t, unknownSlot)
 	p := writeV2(t, t.TempDir(), "vault.bin", v2VaultMagic, hdr)
@@ -1152,10 +1168,11 @@ func TestUnknownSlotIsSkippedOnOpenWithAWarning(t *testing.T) {
 // this line is written where an operator reads it. The property that makes that safe is structural:
 // one JSON object per line, so neither field can splice a line of its own, and logx caps every
 // value. (The stderr side is the other half of the rule and is asserted separately, by
-// TestSlotTypeListNamesKnownTypesAndCountsTheRest: an error string that is pasted into a ticket
-// names the kinds this binary knows and counts the rest, rather than echoing the type.)
+// TestTriedSummaryNamesTriedKindsAndCountsTheRest: an error string that is pasted into a ticket
+// names the kinds that were tried and counts the rest, rather than echoing the type.)
 func TestUnknownSlotWarningCannotBeSplicedByAHostileSlot(t *testing.T) {
-	noArgon2(t)
+	// A parseable header, so the walk derives from the golden's passphrase slot: the counting seam.
+	argon2Seam(t)
 	// 255 bytes of printable ASCII, the quote and the backslash among them, and an id spelled with
 	// an embedded newline - which base64 ignores, so it decodes to the same eight bytes and reaches
 	// the log line as given.
@@ -1473,8 +1490,7 @@ func TestKeyringCreateOnOpenStillWritesCSK1(t *testing.T) {
 // a header length over the cap is refused without the file having to be that long; and a header
 // that does parse is inside every bound the writer is held to.
 //
-// The slot unwrap half of this task (FuzzSlotUnwrap) fuzzes a slot's wrap fields, which the slot
-// openers own - PR 6. It lands with them rather than being half-written here.
+// The slot unwrap half of this task is FuzzSlotUnwrap, below.
 func FuzzOpenHeader(f *testing.F) {
 	golden, err := os.ReadFile(filepath.Join("testdata", "header-golden.json"))
 	if err != nil {
@@ -1574,4 +1590,75 @@ func FuzzOpenHeader(f *testing.F) {
 			t.Fatalf("%d passphrase slots, cap %d", passphrases, maxPassphraseSlots)
 		}
 	})
+}
+
+// FuzzSlotUnwrap fuzzes one slot's wrap: its nonce, its ciphertext and the additional data it is
+// bound to. openSlot is the one function every symmetric slot type goes through - the passphrase
+// slot and the kek-file slot both end there - and it is reached with no parse in front of it here,
+// which is exactly why dekIDFromAAD checks the AAD's shape itself.
+//
+// The properties: never a panic; every failure wraps ErrBadKey or errCorrupt and nothing else; and a
+// success returns a key of exactly keyLen bytes, never the short or long plaintext an authenticated
+// wrap written by something that is not this format could carry.
+func FuzzSlotUnwrap(f *testing.F) {
+	kek := bytes.Repeat([]byte{0x2b}, keyLen)
+	dek := bytes.Repeat([]byte{0x3c}, keyLen)
+	aad := slotAAD(v2VaultMagic, make([]byte, dekIDLen), make([]byte, slotIDLen), slotTypePassphrase)
+	nonce, ct, err := sealSlot(kek, dek, aad)
+	if err != nil {
+		f.Fatalf("seed seal: %v", err)
+	}
+	f.Add(nonce, ct, aad)
+	// One byte short and one byte long on each field, and the empty cases. A wrap of the wrong
+	// length must be refused on its length rather than handed to the AEAD.
+	f.Add(nonce, ct[:len(ct)-1], aad)
+	f.Add(nonce, append(append([]byte(nil), ct...), 0), aad)
+	f.Add(nonce[:nonceLen-1], ct, aad)
+	f.Add(append(append([]byte(nil), nonce...), 0), ct, aad)
+	f.Add([]byte(nil), []byte(nil), aad)
+	f.Add(nonce, ct, []byte(nil))
+	f.Add(nonce, ct, aad[:len(aad)-1])
+	// An AAD whose length prefixes disagree with its fields: the shape check, not the AEAD, owns it.
+	bad := append([]byte(nil), aad...)
+	bad[4] = 0xff
+	f.Add(nonce, ct, bad)
+	// A wrap that authenticates and carries something other than a key. sealWith exists for exactly
+	// this: sealSlot refuses to build it and openSlot must still refuse to believe it.
+	short, serr := sealWithFixedKey(kek, aad, bytes.Repeat([]byte{0x4d}, keyLen-1))
+	if serr != nil {
+		f.Fatalf("seed short wrap: %v", serr)
+	}
+	f.Add(short.nonce, short.ct, aad)
+
+	f.Fuzz(func(t *testing.T, nonce, ct, aad []byte) {
+		got, err := openSlot(kek, nonce, ct, aad)
+		if err != nil {
+			if !errors.Is(err, ErrBadKey) && !errors.Is(err, errCorrupt) {
+				t.Fatalf("openSlot = %v, want ErrBadKey or errCorrupt", err)
+			}
+			if got != nil {
+				t.Fatalf("openSlot returned %d bytes alongside an error", len(got))
+			}
+			return
+		}
+		if len(got) != keyLen {
+			t.Fatalf("openSlot returned a %d-byte key", len(got))
+		}
+	})
+}
+
+// sealWithFixedKey seals plain for one slot the way sealSlot does, but without sealSlot's refusal to
+// wrap anything other than a key - so the corpus can carry a wrap that authenticates and holds the
+// wrong number of bytes.
+func sealWithFixedKey(kek, aad, plain []byte) (sealedWrap, error) {
+	dekID, err := dekIDFromAAD(aad)
+	if err != nil {
+		return sealedWrap{}, err
+	}
+	wk, err := wrapKey(kek, dekID, aad)
+	if err != nil {
+		return sealedWrap{}, err
+	}
+	defer zero(wk)
+	return sealWith(wk, plain, aad)
 }
