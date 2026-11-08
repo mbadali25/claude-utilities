@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"claude-utilities/internal/logx"
 )
 
 // Tests for the v2 header: its byte-exact encoding, and the bounds that are checked on every
@@ -987,6 +989,478 @@ func TestV1KeyringStillWritesCSK1AfterThisChange(t *testing.T) {
 	}
 	if got := string(data[:len(keyringMagic)]); got != keyringMagic {
 		t.Fatalf("keyring magic %q, want %q", got, keyringMagic)
+	}
+}
+
+// --- unknown-slot retention across a header-changing save, and the warning ---
+
+// captureLog swaps this package's log sink for a buffer, the way internal/usage and internal/web
+// swap theirs. It is a logx logger, so the test reads exactly what an operator would: an
+// allowlisted key is written, anything else is "[dropped]", and every value is redacted and capped.
+// A test that calls this must not call t.Parallel: the sink is package state.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := logger
+	logger = logx.New(&buf)
+	t.Cleanup(func() { logger = prev })
+	return &buf
+}
+
+// logLines decodes the captured lines. Each must be one JSON object on one line: that is the
+// property that makes a hostile slot type harmless, so the decode is part of the assertion.
+func logLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, raw := range bytes.Split(bytes.TrimRight(buf.Bytes(), "\n"), []byte("\n")) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("a log line is not one JSON object: %q: %v", raw, err)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// headerWithoutPassphraseSlots is the golden header with its one passphrase slot dropped: a header
+// this binary must still read and must refuse to write. It is built with encodeCompact rather than
+// marshalHeader because marshalHeader refusing it is the thing under test.
+func headerWithoutPassphraseSlots(t *testing.T) ([]byte, Header) {
+	t.Helper()
+	h, _, err := parseHeader(goldenHeader(t))
+	if err != nil {
+		t.Fatalf("parseHeader: %v", err)
+	}
+	kept := make([]json.RawMessage, 0, len(h.Slots))
+	for _, elem := range h.Slots {
+		if slotTypeOf(elem) == slotTypePassphrase {
+			continue
+		}
+		kept = append(kept, elem)
+	}
+	if len(kept) == len(h.Slots) {
+		t.Fatal("the golden header no longer has a passphrase slot to drop")
+	}
+	h.Slots = kept
+	b, err := encodeCompact(h)
+	if err != nil {
+		t.Fatalf("encodeCompact: %v", err)
+	}
+	return b, h
+}
+
+// The header-changing half of the retention rule. TestUnknownSlotTypeRoundTripsByteIdentical above
+// proves a save that changes nothing keeps the bytes; this one changes another slot - a fresh
+// argon2id salt on the passphrase slot, which is what change-passphrase does - and the unknown
+// slot's bytes still have to come through untouched.
+func TestUnknownSlotBytesSurviveAHeaderChangingSave(t *testing.T) {
+	noArgon2(t)
+	hdr := withExtraSlot(t, unknownSlot)
+	h, slots, err := parseHeader(hdr)
+	if err != nil {
+		t.Fatalf("parseHeader: %v", err)
+	}
+	pass := slots[1]
+	if pass.Type != slotTypePassphrase || pass.Argon2id == nil {
+		t.Fatalf("the golden's first slot is no longer a passphrase slot: %+v", pass)
+	}
+	p := *pass.Argon2id
+	p.Salt = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x7f}, saltLen))
+	pass.Argon2id = &p
+	out, err := marshalHeader(h, map[string]Slot{pass.ID: pass})
+	if err != nil {
+		t.Fatalf("marshalHeader: %v", err)
+	}
+	if bytes.Equal(hdr, out) {
+		t.Fatal("the save changed nothing, so it is not a header-changing save")
+	}
+	if !bytes.Contains(out, []byte(unknownSlot)) {
+		t.Fatalf("the unknown slot's bytes did not survive the save: %s", out)
+	}
+	// The mutation check, and the concrete reason retention reads from the raw bytes: route the
+	// unknown slot through `changed` and encodeSlot re-encodes it from the typed Slot, which has no
+	// field for this slot's `handle` or `sealed` wrap members. They are silently dropped - a newer
+	// server's slot turned into one this binary invented. That is what the test above forbids.
+	t.Run("re-encoding the unknown slot loses its wrap members", func(t *testing.T) {
+		noArgon2(t)
+		unknown := slots[0]
+		if unknown.Type != "tpm-v3" {
+			t.Fatalf("the fixture's unknown slot moved: %+v", unknown)
+		}
+		out, err := marshalHeader(h, map[string]Slot{unknown.ID: unknown})
+		if err != nil {
+			t.Fatalf("marshalHeader: %v", err)
+		}
+		if bytes.Contains(out, []byte(unknownSlot)) {
+			t.Fatal("the fixture was retained even though it was named in `changed`")
+		}
+		for _, lost := range []string{`"handle"`, `"sealed"`} {
+			if bytes.Contains(out, []byte(lost)) {
+				t.Fatalf("%s survived the re-encode, so this test proves nothing: %s", lost, out)
+			}
+		}
+	})
+}
+
+// Skipped on open, with one warning per skipped slot naming the slot and its type - and nothing
+// else. The open still fails here, because no slot opener is wired to the v2 read path yet (see
+// openSealedV2): the warning is what this test is about, and it is emitted on the way to that
+// answer either way.
+func TestUnknownSlotIsSkippedOnOpenWithAWarning(t *testing.T) {
+	noArgon2(t)
+	buf := captureLog(t)
+	hdr := withExtraSlot(t, unknownSlot)
+	p := writeV2(t, t.TempDir(), "vault.bin", v2VaultMagic, hdr)
+	if _, err := open(t, p, "pw"); !errors.Is(err, ErrBadKey) {
+		t.Fatalf("Open: want ErrBadKey, got %v", err)
+	}
+	lines := logLines(t, buf)
+	if len(lines) != 1 {
+		t.Fatalf("got %d log lines, want exactly one (one per unknown slot, none for a known one): %q",
+			len(lines), buf.String())
+	}
+	line := lines[0]
+	if got := line["slot"]; got != "QUJDREVGR0g=" {
+		t.Fatalf("slot = %v, want the unknown slot's id", got)
+	}
+	if got := line["slottype"]; got != "tpm-v3" {
+		t.Fatalf("slottype = %v, want tpm-v3", got)
+	}
+	if got := line["level"]; got != "WARN" {
+		t.Fatalf("level = %v, want WARN", got)
+	}
+	// Nothing from the slot but its id and its type: not the wrap, not the argon2id members this
+	// binary has no business reading, and no key the allowlist would have dropped anyway.
+	for k := range line {
+		switch k {
+		case "time", "level", "msg", "component", "slot", "slottype":
+		default:
+			t.Fatalf("the warning carries an unexpected key %q: %q", k, buf.String())
+		}
+	}
+	for _, forbidden := range []string{"AAEC", "not base64 at all", "argon2id", "salt", "[dropped]"} {
+		if strings.Contains(buf.String(), forbidden) {
+			t.Fatalf("the warning carries %q: %q", forbidden, buf.String())
+		}
+	}
+}
+
+// A slot's type and id are attacker-chosen text from a header nothing has authenticated yet, and
+// this line is written where an operator reads it. The property that makes that safe is structural:
+// one JSON object per line, so neither field can splice a line of its own, and logx caps every
+// value. (The stderr side is the other half of the rule and is asserted separately, by
+// TestSlotTypeListNamesKnownTypesAndCountsTheRest: an error string that is pasted into a ticket
+// names the kinds this binary knows and counts the rest, rather than echoing the type.)
+func TestUnknownSlotWarningCannotBeSplicedByAHostileSlot(t *testing.T) {
+	noArgon2(t)
+	// 255 bytes of printable ASCII, the quote and the backslash among them, and an id spelled with
+	// an embedded newline - which base64 ignores, so it decodes to the same eight bytes and reaches
+	// the log line as given.
+	var sb strings.Builder
+	for i := 0; sb.Len() < 255; i++ {
+		sb.WriteByte(byte(0x20 + i%95))
+	}
+	hostile := sb.String()[:255]
+	quoted, err := json.Marshal(hostile)
+	if err != nil {
+		t.Fatalf("marshal the hostile type: %v", err)
+	}
+	buf := captureLog(t)
+	slot := `{"id":"QUJD\nREVGR0g=","type":` + string(quoted) +
+		`,"created":"2026-11-07T12:00:00Z","wrap":{"x":"AAEC"}}`
+	p := writeV2(t, t.TempDir(), "vault.bin", v2VaultMagic, withExtraSlot(t, slot))
+	if _, err := open(t, p, "pw"); !errors.Is(err, ErrBadKey) {
+		t.Fatalf("Open: want ErrBadKey, got %v", err)
+	}
+	// One object on one line: logLines fails the test if either field broke out of its string.
+	lines := logLines(t, buf)
+	if len(lines) != 1 {
+		t.Fatalf("got %d log lines, want one: %q", len(lines), buf.String())
+	}
+	// The type comes back whole, and that is the assertion rather than a length bound: asciiType
+	// already caps a type at 255 bytes and logx caps a value at 256, so "is it under the cap" is a
+	// question that cannot be answered no and proves nothing. What is worth pinning is that all 255
+	// hostile bytes - the quote and the backslash among them - arrive as the value of one JSON
+	// member, neither truncated nor rewritten by the redactor on their way there.
+	got, ok := lines[0]["slottype"].(string)
+	if !ok {
+		t.Fatalf("slottype is not a string: %q", buf.String())
+	}
+	if got != hostile {
+		t.Fatalf("slottype came back as %d bytes %q, want the 255 hostile bytes unchanged", len(got), got)
+	}
+	// And neither field spliced: the whole output is one line, so the id's embedded newline and
+	// every control-looking byte in the type were escaped by the encoder.
+	if strings.Count(strings.TrimRight(buf.String(), "\n"), "\n") != 0 {
+		t.Fatalf("the id's newline reached the output unescaped: %q", buf.String())
+	}
+}
+
+// --- a `changed` entry's map key against the slot's own id ---
+
+// marshalHeader finds a slot by the `changed` map's key and then encodes that Slot's own `id`. A
+// pair whose key and `id` disagree used to be written out in silence: the slot kept its place and
+// its wrap but came back under a different id, and a slot's id is length-prefixed into its AAD
+// (slotAAD), so every wrap bound to the old id stops opening. Nothing downstream catches it -
+// another valid eight-byte base64 id is a valid id, so the file parses and the self-parse inside
+// marshalHeader passes.
+//
+// Strict string equality is the right check, not a decode-and-compare: a caller gets the id from
+// parseHeader and hands back the string it was given, and a re-spelled base64 id - one with an
+// embedded newline, which base64 ignores - is a different byte string in the AAD's length prefix
+// anyway, so treating it as the same slot would be the bug rather than the fix.
+func TestMarshalHeaderRefusesAChangedSlotWhoseIDDoesNotMatchItsKey(t *testing.T) {
+	noArgon2(t)
+	h, slots, err := parseHeader(goldenHeader(t))
+	if err != nil {
+		t.Fatalf("parseHeader: %v", err)
+	}
+	pass := slots[0]
+	if pass.Type != slotTypePassphrase {
+		t.Fatalf("the golden's first slot is no longer the passphrase slot: %+v", pass)
+	}
+	mis := pass
+	mis.ID = base64.StdEncoding.EncodeToString([]byte("IJKLMNOP"))
+	if mis.ID == pass.ID {
+		t.Fatal("the fixture's two ids are equal, so the mismatch is not being tested")
+	}
+	out, err := marshalHeader(h, map[string]Slot{pass.ID: mis})
+	if !errors.Is(err, errSlotIDMismatch) {
+		t.Fatalf("marshalHeader: want errSlotIDMismatch, got %v (out %d bytes)", err, len(out))
+	}
+	if out != nil {
+		t.Fatalf("refused and still returned %d bytes", len(out))
+	}
+	// Not errCorrupt: the header on disk was fine, the call was not. An operator told "malformed
+	// vault file" goes looking for a corrupt disk or rotates a correct passphrase.
+	if errors.Is(err, errCorrupt) {
+		t.Fatalf("a caller's mistake was reported as a malformed file: %v", err)
+	}
+	// Neither id is echoed, escaped or otherwise.
+	for _, id := range []string{pass.ID, mis.ID} {
+		if strings.Contains(err.Error(), id) {
+			t.Fatalf("the error echoes a slot id: %q", err.Error())
+		}
+	}
+	// The positive control: the same slot under its matching key writes, and keeps its id.
+	out, err = marshalHeader(h, map[string]Slot{pass.ID: pass})
+	if err != nil {
+		t.Fatalf("the matching pair was refused: %v", err)
+	}
+	if !bytes.Contains(out, []byte(pass.ID)) {
+		t.Fatalf("the slot's id is not in the output: %s", out)
+	}
+}
+
+// The same mismatch on the append path, which is a separate loop over `added`. The map key decides
+// the order two slots added in one call come out in, and the Slot's own `id` is what gets written,
+// so a disagreeing pair appended a slot under an id the caller never named.
+func TestMarshalHeaderRefusesAnAddedSlotWhoseIDDoesNotMatchItsKey(t *testing.T) {
+	noArgon2(t)
+	h, slots, err := parseHeader(goldenHeader(t))
+	if err != nil {
+		t.Fatalf("parseHeader: %v", err)
+	}
+	add := slots[0]
+	add.ID = base64.StdEncoding.EncodeToString([]byte("BODYBODY"))
+	key := base64.StdEncoding.EncodeToString([]byte("KEYKEYKE"))
+	// Both ids must be absent from the header, or this lands in the loop above instead.
+	for _, s := range slots {
+		if s.ID == key || s.ID == add.ID {
+			t.Fatalf("a fixture id collides with an existing slot: %+v", s)
+		}
+	}
+	out, err := marshalHeader(h, map[string]Slot{key: add})
+	if !errors.Is(err, errSlotIDMismatch) {
+		t.Fatalf("marshalHeader: want errSlotIDMismatch, got %v (out %d bytes)", err, len(out))
+	}
+	if out != nil {
+		t.Fatalf("refused and still returned %d bytes", len(out))
+	}
+	if strings.Contains(err.Error(), key) || strings.Contains(err.Error(), add.ID) {
+		t.Fatalf("the error echoes a slot id: %q", err.Error())
+	}
+	// The positive control: appended under its own id it is written, and under that id.
+	out, err = marshalHeader(h, map[string]Slot{add.ID: add})
+	if err != nil {
+		t.Fatalf("the matching pair was refused: %v", err)
+	}
+	if !bytes.Contains(out, []byte(add.ID)) {
+		t.Fatalf("the appended slot's id is not in the output: %s", out)
+	}
+	if bytes.Contains(out, []byte(key)) {
+		t.Fatalf("the map key leaked into the output: %s", out)
+	}
+}
+
+// --- zero passphrase slots: refused on write, readable on open ---
+
+// Spec: "A file with zero `passphrase` slots is refused on write (ErrNoRecoverySlot)." marshalHeader
+// is the only writer of a v2 header, so that is where the refusal lives - there is no second path a
+// caller could reach past it.
+func TestSaveWithZeroPassphraseSlotsIsRefused(t *testing.T) {
+	noArgon2(t)
+	hdr, h := headerWithoutPassphraseSlots(t)
+	if _, _, err := parseHeader(hdr); err != nil {
+		t.Fatalf("the fixture must parse, or the refusal under test is not the one that fired: %v", err)
+	}
+	out, err := marshalHeader(h, nil)
+	if !errors.Is(err, ErrNoRecoverySlot) {
+		t.Fatalf("marshalHeader: want ErrNoRecoverySlot, got %v", err)
+	}
+	if out != nil {
+		t.Fatalf("refused and still returned %d bytes", len(out))
+	}
+	// The count is of what would be written, not of what was read: a change that retypes the last
+	// passphrase slot into something else is the same refusal, and it is the shape remove-slot and
+	// change-passphrase will hit (Task 3b.2).
+	t.Run("retyping the last passphrase slot is the same refusal", func(t *testing.T) {
+		noArgon2(t)
+		full, slots, err := parseHeader(goldenHeader(t))
+		if err != nil {
+			t.Fatalf("parseHeader: %v", err)
+		}
+		if full.passphraseSlotCount() != 1 {
+			t.Fatalf("the golden has %d passphrase slots, want one", full.passphraseSlotCount())
+		}
+		retyped := Slot{ID: slots[0].ID, Type: slotTypeDPAPI, Scope: "machine", Created: slots[0].Created,
+			Wrap: WrapInfo{Blob: base64.StdEncoding.EncodeToString(make([]byte, 64))}}
+		if _, err := marshalHeader(full, map[string]Slot{retyped.ID: retyped}); !errors.Is(err, ErrNoRecoverySlot) {
+			t.Fatalf("want ErrNoRecoverySlot, got %v", err)
+		}
+	})
+	// The positive control: the same writer, with the passphrase slot present, writes.
+	t.Run("the golden header still writes", func(t *testing.T) {
+		noArgon2(t)
+		full, _, err := parseHeader(goldenHeader(t))
+		if err != nil {
+			t.Fatalf("parseHeader: %v", err)
+		}
+		if _, err := marshalHeader(full, nil); err != nil {
+			t.Fatalf("a header with a passphrase slot was refused: %v", err)
+		}
+	})
+}
+
+// The other half of the same rule: such a file still opens, so a hand-damaged header can be read
+// and repaired. The answer here is ErrBadKey because no opener is wired yet - what matters is that
+// it is neither errCorrupt nor the write-side refusal.
+func TestOpenWithZeroPassphraseSlotsStillSucceeds(t *testing.T) {
+	noArgon2(t)
+	hdr, h := headerWithoutPassphraseSlots(t)
+	if h.passphraseSlotCount() != 0 {
+		t.Fatalf("the fixture has %d passphrase slots, want none", h.passphraseSlotCount())
+	}
+	p := writeV2(t, t.TempDir(), "vault.bin", v2VaultMagic, hdr)
+	_, err := open(t, p, "pw")
+	if !errors.Is(err, ErrBadKey) {
+		t.Fatalf("Open: want ErrBadKey, got %v", err)
+	}
+	if errors.Is(err, errCorrupt) || errors.Is(err, ErrNoRecoverySlot) {
+		t.Fatalf("a readable header was reported as unreadable or unwritable: %v", err)
+	}
+}
+
+// The two counters the slot operations will ask. They read the retained raw elements, so they agree
+// with what marshalHeader would write rather than with a decoded copy that might have drifted.
+func TestPassphraseSlotCountAndUnknownSlots(t *testing.T) {
+	noArgon2(t)
+	full, _, err := parseHeader(goldenHeader(t))
+	if err != nil {
+		t.Fatalf("parseHeader: %v", err)
+	}
+	if got := full.passphraseSlotCount(); got != 1 {
+		t.Fatalf("golden passphraseSlotCount = %d, want 1", got)
+	}
+	if got := full.unknownSlots(); len(got) != 0 {
+		t.Fatalf("golden unknownSlots = %+v, want none", got)
+	}
+	withUnknown, _, err := parseHeader(withExtraSlot(t, unknownSlot))
+	if err != nil {
+		t.Fatalf("parseHeader: %v", err)
+	}
+	if got := withUnknown.passphraseSlotCount(); got != 1 {
+		t.Fatalf("passphraseSlotCount = %d, want 1: an unknown slot is not a passphrase slot", got)
+	}
+	unknown := withUnknown.unknownSlots()
+	if len(unknown) != 1 || unknown[0].Type != "tpm-v3" || unknown[0].ID != "QUJDREVGR0g=" {
+		t.Fatalf("unknownSlots = %+v, want the one tpm-v3 slot", unknown)
+	}
+	_, none := headerWithoutPassphraseSlots(t)
+	if got := none.passphraseSlotCount(); got != 0 {
+		t.Fatalf("passphraseSlotCount = %d on a header with none", got)
+	}
+}
+
+// ErrUnknownSlotPresent is the sentinel `rotate` and `remove-slot` of another slot refuse with
+// (Task 3b.2). Nothing in this binary returns it yet - there are no slot operations - so what is
+// asserted here is the contract a caller will match on: a wrapped error is still errors.Is it.
+func TestErrUnknownSlotPresentIsMatchableWhenWrapped(t *testing.T) {
+	err := fmt.Errorf("%w: slot %s", ErrUnknownSlotPresent, "QUJDREVGR0g=")
+	if !errors.Is(err, ErrUnknownSlotPresent) {
+		t.Fatalf("a wrapped ErrUnknownSlotPresent is not matchable: %v", err)
+	}
+	if errors.Is(err, ErrNoRecoverySlot) || errors.Is(err, errCorrupt) {
+		t.Fatalf("ErrUnknownSlotPresent collides with another sentinel: %v", err)
+	}
+}
+
+// --- create-on-open stays v1 ---
+
+// A data dir with no vault, opened with a passphrase, still produces a CSV1 file. `server vault
+// init` is the only thing that will ever create a v2 vault (Task 3b.3, plan revision 8 item 2), and
+// nothing reachable from a plain `server run` may start writing v2. This is a permanent assertion:
+// TestV1VaultStillWritesV1AfterEveryMutator covers the mutators on an existing file; this one
+// covers the creation, and that Open itself writes nothing at all.
+func TestCreateOnOpenStillWritesV1(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "vault.bin")
+	v, err := open(t, p, "pw")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Open wrote a file: stat err %v", err)
+	}
+	if err := v.Put(acct("a")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got := string(data[:len(magic)]); got != magic {
+		t.Fatalf("create-on-open wrote magic %q, want %q", got, magic)
+	}
+	if bytes.HasPrefix(data, []byte(v2VaultMagic)) {
+		t.Fatal("create-on-open wrote a v2 vault")
+	}
+}
+
+func TestKeyringCreateOnOpenStillWritesCSK1(t *testing.T) {
+	t.Setenv(keyEnv, "pw")
+	p := filepath.Join(t.TempDir(), KeyringFileName)
+	k, err := OpenKeyring(p, EnvKey(keyEnv))
+	if err != nil {
+		t.Fatalf("OpenKeyring: %v", err)
+	}
+	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("OpenKeyring wrote a file: stat err %v", err)
+	}
+	if _, err := k.Generate("h1"); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got := string(data[:len(keyringMagic)]); got != keyringMagic {
+		t.Fatalf("create-on-open wrote magic %q, want %q", got, keyringMagic)
+	}
+	if bytes.HasPrefix(data, []byte(v2KeyringMagic)) {
+		t.Fatal("create-on-open wrote a v2 keyring")
 	}
 }
 

@@ -6,14 +6,18 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"os"
 	"sort"
 	"time"
+
+	"claude-utilities/internal/logx"
 )
 
 // This file holds the v2 header: its types, the parser and the one writer. Nothing here opens a
 // slot - the slot wrap and the three openers are later tasks - and nothing here writes a file.
 // `server vault init` is the only thing that will ever create a v2 vault; every write path in this
-// binary still writes v1 (TestV1VaultStillWritesV1AfterEveryMutator pins that).
+// binary still writes v1 (TestV1VaultStillWritesV1AfterEveryMutator and
+// TestCreateOnOpenStillWritesV1 pin that).
 //
 // Every number in a header is attacker-controlled, because the header is not authenticated until
 // the payload opens, and a passphrase slot's argon2id cost is read before any key exists to
@@ -68,6 +72,12 @@ var (
 	nowFn    = time.Now
 )
 
+// logger is this package's log sink, the same shape internal/web and internal/usage use: one
+// package-level logx logger, replaced in tests. logx is an allowlist handler, so a line may only
+// carry keys it knows - `slot` and `slottype` are two of them - and every value it does write is
+// redacted and capped. A key added to a line here without being allowlisted logs as "[dropped]".
+var logger = logx.New(os.Stderr).With("component", "vault")
+
 // Header is a v2 file's top-level header. Its members are exactly these three, in this order: the
 // top level is closed, and a `v` other than 2 or any fourth member is ErrNewerFormat rather than
 // malformed. Slots stays []json.RawMessage so an untouched slot - including one of a type this
@@ -92,8 +102,9 @@ type DEKInfo struct {
 //
 // It carries no copy of the bytes it was decoded from. Retention is Header.Slots' job: marshalHeader
 // re-emits every slot the caller did not name from that element's original json.RawMessage, so an
-// untouched slot is byte identical whether or not this binary understands its type. A second copy
-// on the decoded slot would be one more thing that could disagree with the first.
+// untouched slot keeps every member it arrived with, in the order it arrived in, with its values
+// byte for byte - whether or not this binary understands its type. A second copy on the decoded
+// slot would be one more thing that could disagree with the first.
 type Slot struct {
 	ID       string        `json:"id"`
 	Type     string        `json:"type"`
@@ -296,6 +307,70 @@ func parseSlot(raw json.RawMessage) (Slot, error) {
 	return s, nil
 }
 
+// slotTypeOf decodes one slot element's `type` and nothing else. An element that will not decode at
+// all has no type to report and answers "": a header holding one is refused by parseHeader, and
+// marshalHeader refuses to emit one, so the two callers below never see it on a live path.
+func slotTypeOf(elem json.RawMessage) string {
+	var probe struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(elem, &probe); err != nil {
+		return ""
+	}
+	return probe.Type
+}
+
+// passphraseSlotCount counts the slots a passphrase can open. It reads the retained raw elements
+// rather than a decoded copy, so it answers for the bytes that would actually be written: that is
+// what makes it the right check for ErrNoRecoverySlot, which is a property of the file on disk.
+func (h Header) passphraseSlotCount() int {
+	n := 0
+	for _, elem := range h.Slots {
+		if slotTypeOf(elem) == slotTypePassphrase {
+			n++
+		}
+	}
+	return n
+}
+
+// unknownSlots returns the slots whose type this binary does not know, in header order. They are
+// skipped on open and retained on save; what they block is an operation that must re-wrap every
+// slot, which cannot be done for a slot nobody here understands (ErrUnknownSlotPresent).
+//
+// An element that will not decode is not returned: it is not a slot this binary can say anything
+// about, and a header containing one never gets past parseHeader.
+func (h Header) unknownSlots() []Slot {
+	var out []Slot
+	for _, elem := range h.Slots {
+		if knownSlotType(slotTypeOf(elem)) {
+			continue
+		}
+		s, err := parseSlot(elem)
+		if err != nil {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// warnSkippedSlots logs one line per slot this binary cannot act on: the spec's forward-compatibility
+// rule is that an unknown type is skipped on open with a logged warning carrying `slot` and
+// `slottype`. Bounded by maxSlots, so a crafted header buys at most sixteen lines.
+//
+// The type is named here and deliberately not in the error string an open failure returns
+// (slotTypeList, sealed.go). Not a contradiction - two sinks with different exposure. This line is
+// one JSON object written by logx: the value is escaped by the encoder, redacted, and capped at
+// logx's limit, so it cannot splice a line of its own or run away with the log. The error string
+// goes to stderr and into whatever an operator pastes into a ticket, where a 255-byte
+// attacker-chosen type has no such boundary around it, so there it is counted rather than echoed.
+func warnSkippedSlots(h Header) {
+	for _, s := range h.unknownSlots() {
+		logger.Warn("vault: skipping a key slot of a type this server does not know",
+			"slot", s.ID, "slottype", s.Type)
+	}
+}
+
 // knownSlotType reports whether this binary understands the type well enough to act on it. The one
 // list, so the parser's type-specific checks and the error string an operator sees cannot disagree
 // about what "unknown" means.
@@ -391,10 +466,21 @@ func tryOrder(slots []Slot) []Slot {
 }
 
 // marshalHeader writes the header's bytes: compact, no trailing newline, HTML left alone, members
-// in the format's order. changed maps a slot id to its new form; every slot not named there is
-// emitted from the bytes it arrived as, so an untouched slot - known type or not - is byte
-// identical before and after. A slot in changed whose id is not already present is appended, in id
-// order, so adding two slots in one call is deterministic.
+// in the format's order. changed maps a slot id to its new form, and the map key must equal that
+// Slot's own `id` - a disagreeing pair is errSlotIDMismatch, in both loops below, because the key
+// decides which slot is touched while the `id` is what gets encoded.
+//
+// Every slot not named in changed is emitted from the bytes it arrived as, so an untouched slot -
+// known type or not - keeps all of its members, their order and their values exactly. The encoder
+// does normalise insignificant whitespace between tokens, because json.Marshal compacts a
+// json.RawMessage; that is deliberate and costs nothing. The output has to be canonical for two
+// headers written in different runs to be byte-comparable, and nothing depends on a slot's
+// whitespace: a slot's AAD is magic || dek.id || slot.id || slot.type (slotAAD), never its raw
+// bytes, and the payload's AAD is read back as a slice of the file rather than re-marshalled
+// (rawHeaderOf). So a newer server's pretty-printed slot still unwraps after a round trip here.
+//
+// A slot in changed whose id is not already present is appended, in id order, so adding two slots
+// in one call is deterministic.
 //
 // The result is the new rawHeader and therefore the new payload AAD. The caller re-seals under it;
 // nothing re-marshals a header to produce AAD for a payload it did not just write.
@@ -410,6 +496,11 @@ func marshalHeader(h Header, changed map[string]Slot) ([]byte, error) {
 		}
 		seen[probe.ID] = true
 		if s, ok := changed[probe.ID]; ok {
+			// The key chose this slot; the Slot's own `id` is what would be encoded. A pair that
+			// disagrees would rewrite the slot's id silently, and the id is in every wrap's AAD.
+			if s.ID != probe.ID {
+				return nil, errSlotIDMismatch
+			}
 			enc, err := encodeSlot(s)
 			if err != nil {
 				return nil, err
@@ -427,7 +518,13 @@ func marshalHeader(h Header, changed map[string]Slot) ([]byte, error) {
 	}
 	sort.Strings(added)
 	for _, id := range added {
-		enc, err := encodeSlot(changed[id])
+		s := changed[id]
+		// Same check on the append path: the key fixes the order, the Slot's `id` is what is written,
+		// and a disagreeing pair would append a slot under an id the caller never named.
+		if s.ID != id {
+			return nil, errSlotIDMismatch
+		}
+		enc, err := encodeSlot(s)
 		if err != nil {
 			return nil, err
 		}
@@ -442,8 +539,17 @@ func marshalHeader(h Header, changed map[string]Slot) ([]byte, error) {
 	// exactly what a caller adding slots in a loop walks past without noticing. Parsing the result
 	// is the single source of truth for "what the parser accepts"; a second copy of the caps here
 	// could fall out of step with parseHeader, which is the failure this guards against.
-	if _, _, err := parseHeader(b); err != nil {
-		return nil, err
+	parsed, _, perr := parseHeader(b)
+	if perr != nil {
+		return nil, perr
+	}
+	// Zero passphrase slots is refused on write, and the count is taken from the parse of this
+	// header's own bytes rather than from the caller's input: a change that retypes or replaces the
+	// last passphrase slot leaves a file nobody can open after the one host holding its machine key
+	// is gone, and that has to be refused wherever it comes from. The read side deliberately does
+	// not refuse it, so a hand-damaged header can still be opened and repaired.
+	if parsed.passphraseSlotCount() == 0 {
+		return nil, ErrNoRecoverySlot
 	}
 	// hdrLen is the one bound the parse cannot cover: rawHeaderOf checks it against the file's
 	// length prefix, which does not exist yet. Over the cap and the file would be unreadable even
