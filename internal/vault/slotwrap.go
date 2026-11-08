@@ -61,17 +61,27 @@ const aadFixedLen = 4 + 1 + dekIDLen + 1 + slotIDLen + 1
 // a silent truncation of a length prefix would be a format change that still round-trips inside one
 // binary while binding something other than what the format says.
 func slotAAD(magicStr string, dekID, slotID []byte, slotType string) []byte {
-	if len(magicStr) > 255 || len(dekID) > 255 || len(slotID) > 255 || len(slotType) > 255 {
-		panic("vault: slotAAD: a field is longer than one length prefix can carry")
+	if len(magicStr) > 255 {
+		panic("vault: slotAAD: the magic is longer than one length prefix can carry")
 	}
 	out := make([]byte, 0, len(magicStr)+3+len(dekID)+len(slotID)+len(slotType))
 	out = append(out, magicStr...)
-	out = append(out, byte(len(dekID)))
+	out = append(out, lenPrefix(len(dekID)))
 	out = append(out, dekID...)
-	out = append(out, byte(len(slotID)))
+	out = append(out, lenPrefix(len(slotID)))
 	out = append(out, slotID...)
-	out = append(out, byte(len(slotType)))
+	out = append(out, lenPrefix(len(slotType)))
 	return append(out, slotType...)
+}
+
+// lenPrefix is one variable field's one-byte length prefix. The bound is checked here, immediately
+// above the conversion, so there is one place the AAD's "every field fits in a byte" invariant
+// lives. See slotAAD on why this is a panic rather than an error.
+func lenPrefix(n int) byte {
+	if n < 0 || n > 255 {
+		panic("vault: slotAAD: a field is longer than one length prefix can carry")
+	}
+	return byte(n)
 }
 
 // dekIDFromAAD returns the dek.id carried in an AAD built by slotAAD, which is the HKDF salt.

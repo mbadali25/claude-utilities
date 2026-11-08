@@ -123,7 +123,10 @@ func winCryptProtect(data, entropy []byte, flags uint32) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("descriptor: %w", err)
 	}
-	in, ent := blobOf(data), blobOf(entropy)
+	in, ent, err := inputBlobs(data, entropy)
+	if err != nil {
+		return nil, err
+	}
 	var out windows.DataBlob
 	err = windows.CryptProtectData(&in, desc, &ent, 0, nil, flags, &out)
 	// The blobs hold raw pointers into data and entropy, which the garbage collector cannot see.
@@ -136,12 +139,15 @@ func winCryptProtect(data, entropy []byte, flags uint32) ([]byte, error) {
 }
 
 func winCryptUnprotect(blob, entropy []byte, flags uint32) ([]byte, error) {
-	in, ent := blobOf(blob), blobOf(entropy)
-	var out windows.DataBlob
+	in, ent, err := inputBlobs(blob, entropy)
+	if err != nil {
+		return nil, err
+	}
 	// The descriptor comes back in a LocalAlloc'd string when asked for; nil means do not ask. It
 	// is a constant this package wrote, so there is nothing to learn from it and one less buffer to
 	// free.
-	err := windows.CryptUnprotectData(&in, nil, &ent, 0, nil, flags, &out)
+	var out windows.DataBlob
+	err = windows.CryptUnprotectData(&in, nil, &ent, 0, nil, flags, &out)
 	runtime.KeepAlive(blob)
 	runtime.KeepAlive(entropy)
 	if err != nil {
@@ -150,13 +156,45 @@ func winCryptUnprotect(blob, entropy []byte, flags uint32) ([]byte, error) {
 	return copyAndFree(&out)
 }
 
+// maxDPAPIInput bounds what is handed to DPAPI. Everything this package passes is a 32-byte key, a
+// ~41-byte AAD or the blob those produce, so the cap is three orders of magnitude of headroom; it
+// is here because DataBlob.Size is a uint32 and a length that did not fit would be truncated into a
+// shorter buffer than the pointer describes.
+const maxDPAPIInput = 1 << 20
+
+// inputBlobs describes the data and the entropy in one call, so the two syscalls cannot differ on
+// which of them is bounds-checked.
+func inputBlobs(data, entropy []byte) (in, ent windows.DataBlob, err error) {
+	if in, err = blobOf(data); err != nil {
+		return windows.DataBlob{}, windows.DataBlob{}, err
+	}
+	if ent, err = blobOf(entropy); err != nil {
+		return windows.DataBlob{}, windows.DataBlob{}, err
+	}
+	return in, ent, nil
+}
+
 // blobOf describes a Go slice to the DPAPI API. An empty slice becomes the zero blob, which is how
 // "no entropy" is expressed; a blob sealed with entropy therefore does not open with none.
-func blobOf(b []byte) windows.DataBlob {
+func blobOf(b []byte) (windows.DataBlob, error) {
 	if len(b) == 0 {
-		return windows.DataBlob{}
+		return windows.DataBlob{}, nil
 	}
-	return windows.DataBlob{Size: uint32(len(b)), Data: &b[0]}
+	size, err := blobSize(len(b))
+	if err != nil {
+		return windows.DataBlob{}, err
+	}
+	return windows.DataBlob{Size: size, Data: &b[0]}, nil
+}
+
+// blobSize narrows a Go length to the uint32 DataBlob.Size is, with the bound checked immediately
+// above the conversion. A length that did not fit would describe a shorter buffer than the pointer
+// beside it, which is a read of someone else's memory rather than a short key.
+func blobSize(n int) (uint32, error) {
+	if n < 0 || n > maxDPAPIInput {
+		return 0, fmt.Errorf("dpapi input is %d bytes, outside [0, %d]", n, maxDPAPIInput)
+	}
+	return uint32(n), nil
 }
 
 // copyAndFree copies an output blob into Go memory, wipes the buffer Windows allocated and frees
