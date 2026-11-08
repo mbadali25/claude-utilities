@@ -67,7 +67,7 @@ func TestOpenV2VaultReturnsErrNewerFormat(t *testing.T) {
 func TestOpenV2KeyringReturnsErrNewerFormat(t *testing.T) {
 	t.Setenv(keyEnv, "pw")
 	p := writeFixture(t, t.TempDir(), KeyringFileName, withMagic(t, newerKeyringMagic))
-	_, err := OpenKeyring(p, keyEnv)
+	_, err := OpenKeyring(p, EnvKey(keyEnv))
 	if !errors.Is(err, ErrNewerFormat) {
 		t.Fatalf("want ErrNewerFormat, got %v", err)
 	}
@@ -82,11 +82,11 @@ func TestCrossMagicStillErrCorrupt(t *testing.T) {
 	t.Setenv(keyEnv, "pw")
 	dir := t.TempDir()
 	kp := writeFixture(t, dir, "keyring-bytes-in-a-vault-path.bin", withMagic(t, newerKeyringMagic))
-	if _, err := Open(kp, keyEnv); !errors.Is(err, errCorrupt) {
+	if _, err := Open(kp, EnvKey(keyEnv)); !errors.Is(err, errCorrupt) {
 		t.Fatalf("CSK2 opened as a vault: want errCorrupt, got %v", err)
 	}
 	vp := writeFixture(t, dir, "vault-bytes-in-a-keyring-path.bin", v2Fixture(t))
-	if _, err := OpenKeyring(vp, keyEnv); !errors.Is(err, errCorrupt) {
+	if _, err := OpenKeyring(vp, EnvKey(keyEnv)); !errors.Is(err, errCorrupt) {
 		t.Fatalf("CSV2 opened as a keyring: want errCorrupt, got %v", err)
 	}
 }
@@ -127,7 +127,7 @@ func TestOpenV2VaultWithNoKeyStillReportsNewerFormat(t *testing.T) {
 func TestOpenV2KeyringWithNoKeyStillReportsNewerFormat(t *testing.T) {
 	t.Setenv(keyEnv, "")
 	p := writeFixture(t, t.TempDir(), KeyringFileName, withMagic(t, newerKeyringMagic))
-	_, err := OpenKeyring(p, keyEnv)
+	_, err := OpenKeyring(p, EnvKey(keyEnv))
 	if !errors.Is(err, ErrNewerFormat) {
 		t.Fatalf("want ErrNewerFormat, got %v - that answer sends the operator to set a key for "+
 			"a file no key opens", err)

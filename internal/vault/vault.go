@@ -31,7 +31,8 @@ const (
 )
 
 var (
-	// ErrNoKey means the key environment variable is unset or empty.
+	// ErrNoKey means this process has no key it can offer: the named environment variable is unset
+	// or empty, stdin held no passphrase, or the KeySource is a service's and has none by design.
 	ErrNoKey = errors.New("vault: encryption key not set")
 	// ErrBadKey means the key is wrong or the file was tampered with.
 	ErrBadKey = errors.New("vault: cannot decrypt (wrong key or tampered file)")
@@ -66,14 +67,16 @@ type Vault struct {
 }
 
 // Open loads the vault at path, creating an empty in-memory one if the file
-// does not exist or is empty. The key is the value of env var keyEnv. Open
-// never writes to disk.
+// does not exist or is empty. ks says which keys this process may use:
+// EnvKey(name) for the behaviour this used to have from an environment
+// variable name, PromptKey for an operator at a console. Open never writes to
+// disk.
 //
 // The payload is a JSON array of accounts and stays that way: a server that is rolled back must
 // still be able to read a vault a newer one has written, so tunnel keys live in their own file
 // (keyring.go) rather than in a new envelope here.
-func Open(path, keyEnv string) (*Vault, error) {
-	f, plain, err := openSealed(path, magic, keyEnv)
+func Open(path string, ks KeySource) (*Vault, error) {
+	f, plain, err := openSealed(path, magic, ks)
 	if err != nil {
 		return nil, err
 	}

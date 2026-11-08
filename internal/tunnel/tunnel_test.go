@@ -1080,7 +1080,7 @@ func TestExecRunnerReportsAMissingBinaryAsExecFailed(t *testing.T) {
 func TestVaultKeyringSatisfiesKeysAndDrivesTheSupervisor(t *testing.T) {
 	t.Setenv("CSTUNNELKEY", "a-long-test-passphrase")
 	dir := t.TempDir()
-	kr, err := vault.OpenKeyring(filepath.Join(dir, vault.KeyringFileName), "CSTUNNELKEY")
+	kr, err := vault.OpenKeyring(filepath.Join(dir, vault.KeyringFileName), vault.EnvKey("CSTUNNELKEY"))
 	if err != nil {
 		t.Fatalf("OpenKeyring: %v", err)
 	}

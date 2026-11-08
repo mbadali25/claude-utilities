@@ -71,7 +71,7 @@ type refreshRig struct {
 func newRefreshRig(t *testing.T, labels ...string) *refreshRig {
 	t.Helper()
 	t.Setenv("REFRESH_TEST_KEY", "test-passphrase")
-	v, err := vault.Open(filepath.Join(t.TempDir(), "vault.bin"), "REFRESH_TEST_KEY")
+	v, err := vault.Open(filepath.Join(t.TempDir(), "vault.bin"), vault.EnvKey("REFRESH_TEST_KEY"))
 	if err != nil {
 		t.Fatal(err)
 	}

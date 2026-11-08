@@ -251,7 +251,7 @@ type rig struct {
 func newRig(t *testing.T) *rig {
 	t.Helper()
 	t.Setenv("WEB_TEST_KEY", "test-passphrase")
-	v, err := vault.Open(filepath.Join(t.TempDir(), "vault.bin"), "WEB_TEST_KEY")
+	v, err := vault.Open(filepath.Join(t.TempDir(), "vault.bin"), vault.EnvKey("WEB_TEST_KEY"))
 	if err != nil {
 		t.Fatal(err)
 	}

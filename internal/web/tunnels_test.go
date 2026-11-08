@@ -28,11 +28,11 @@ func newTunnelRig(t *testing.T) *rig {
 	t.Setenv("WEB_TEST_KEY", "test-passphrase")
 	t.Setenv("WEB_TUNNEL_KEY", "test-passphrase")
 	dir := t.TempDir()
-	v, err := vault.Open(filepath.Join(dir, "vault.bin"), "WEB_TEST_KEY")
+	v, err := vault.Open(filepath.Join(dir, "vault.bin"), vault.EnvKey("WEB_TEST_KEY"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	kr, err := vault.OpenKeyring(filepath.Join(dir, vault.KeyringFileName), "WEB_TUNNEL_KEY")
+	kr, err := vault.OpenKeyring(filepath.Join(dir, vault.KeyringFileName), vault.EnvKey("WEB_TUNNEL_KEY"))
 	if err != nil {
 		t.Fatal(err)
 	}
