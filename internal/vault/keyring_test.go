@@ -11,7 +11,7 @@ import (
 
 func keyringAt(t *testing.T, dir string) *Keyring {
 	t.Helper()
-	k, err := OpenKeyring(filepath.Join(dir, KeyringFileName), "CSTESTKEY")
+	k, err := OpenKeyring(filepath.Join(dir, KeyringFileName), EnvKey("CSTESTKEY"))
 	if err != nil {
 		t.Fatalf("OpenKeyring: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestKeyringWrongPassphraseIsRefused(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 	t.Setenv("CSTESTKEY", "a-different-passphrase")
-	if _, err := OpenKeyring(filepath.Join(dir, KeyringFileName), "CSTESTKEY"); !errors.Is(err, ErrBadKey) {
+	if _, err := OpenKeyring(filepath.Join(dir, KeyringFileName), EnvKey("CSTESTKEY")); !errors.Is(err, ErrBadKey) {
 		t.Fatalf("want ErrBadKey, got %v", err)
 	}
 }
@@ -70,14 +70,14 @@ func TestKeyringAndVaultFilesAreNotInterchangeable(t *testing.T) {
 	t.Setenv("CSTESTKEY", "a-long-test-passphrase")
 	dir := t.TempDir()
 	vpath := filepath.Join(dir, "vault.bin")
-	v, err := Open(vpath, "CSTESTKEY")
+	v, err := Open(vpath, EnvKey("CSTESTKEY"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	if err := v.Put(Account{ID: "a1", Label: "one"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if _, err := OpenKeyring(vpath, "CSTESTKEY"); err == nil {
+	if _, err := OpenKeyring(vpath, EnvKey("CSTESTKEY")); err == nil {
 		t.Fatal("a keyring opened the account vault")
 	}
 	kpath := filepath.Join(dir, KeyringFileName)
@@ -85,7 +85,7 @@ func TestKeyringAndVaultFilesAreNotInterchangeable(t *testing.T) {
 	if _, err := k.Generate("h-1"); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if _, err := Open(kpath, "CSTESTKEY"); err == nil {
+	if _, err := Open(kpath, EnvKey("CSTESTKEY")); err == nil {
 		t.Fatal("the account vault opened a keyring")
 	}
 }

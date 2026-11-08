@@ -20,7 +20,7 @@ const secret = "sk-ant-SECRETTOKENVALUE123"
 func open(t *testing.T, path, key string) (*Vault, error) {
 	t.Helper()
 	t.Setenv(keyEnv, key)
-	return Open(path, keyEnv)
+	return Open(path, EnvKey(keyEnv))
 }
 
 func acct(id string) Account {
@@ -82,7 +82,7 @@ func TestWrongKeyReturnsErrBadKeyAndDoesNotOverwrite(t *testing.T) {
 
 func TestMissingEnvReturnsErrNoKeyWithHint(t *testing.T) {
 	t.Setenv(keyEnv, "")
-	_, err := Open(filepath.Join(t.TempDir(), "v.bin"), keyEnv)
+	_, err := Open(filepath.Join(t.TempDir(), "v.bin"), EnvKey(keyEnv))
 	if !errors.Is(err, ErrNoKey) || !strings.Contains(err.Error(), keyEnv) {
 		t.Fatalf("want ErrNoKey naming %s, got %v", keyEnv, err)
 	}

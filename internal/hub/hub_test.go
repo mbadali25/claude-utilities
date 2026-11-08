@@ -75,7 +75,7 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	t.Setenv("HUB_TEST_KEY", "test-passphrase")
 	dir := t.TempDir()
-	v, err := vault.Open(filepath.Join(dir, "vault.bin"), "HUB_TEST_KEY")
+	v, err := vault.Open(filepath.Join(dir, "vault.bin"), vault.EnvKey("HUB_TEST_KEY"))
 	if err != nil {
 		t.Fatal(err)
 	}

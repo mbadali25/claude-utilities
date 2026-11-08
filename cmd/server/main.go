@@ -355,7 +355,13 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 			log.Info(text, "reason", "cert-expiry")
 		}
 	}
-	v, err := vault.Open(filepath.Join(dataDir, "vault.bin"), keyEnv)
+	// The console entry point's keys: the passphrase from CLAUDESWAP_KEY, and no machine key slot.
+	// It is chosen here, once, and handed to both sealed files because the keyring is sealed with
+	// the same passphrase as the vault. The service entry point of slice 4 builds a different one
+	// (vault.HostKeys only, no passphrase) and that is the whole reason Open stopped taking the
+	// name of an environment variable - a name cannot express "this process has no passphrase".
+	ks := vault.EnvKey(keyEnv)
+	v, err := vault.Open(filepath.Join(dataDir, "vault.bin"), ks)
 	if err != nil {
 		return err
 	}
@@ -378,7 +384,7 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 	// listener goes away so its ssh children do not outlive the process.
 	var tm *tunnel.Manager
 	if tunnels {
-		kr, kerr := vault.OpenKeyring(filepath.Join(dataDir, vault.KeyringFileName), keyEnv)
+		kr, kerr := vault.OpenKeyring(filepath.Join(dataDir, vault.KeyringFileName), ks)
 		if kerr != nil {
 			return kerr
 		}

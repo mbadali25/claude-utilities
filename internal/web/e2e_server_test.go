@@ -255,7 +255,7 @@ func e2eTunnels(t *testing.T, r *rig) tunnelAPI {
 	t.Helper()
 	t.Setenv("CLAUDESWAP_E2E_TUNNEL_KEY", "e2e-passphrase-not-a-real-one")
 	dir := t.TempDir()
-	kr, err := vault.OpenKeyring(filepath.Join(dir, vault.KeyringFileName), "CLAUDESWAP_E2E_TUNNEL_KEY")
+	kr, err := vault.OpenKeyring(filepath.Join(dir, vault.KeyringFileName), vault.EnvKey("CLAUDESWAP_E2E_TUNNEL_KEY"))
 	if err != nil {
 		t.Fatal(err)
 	}

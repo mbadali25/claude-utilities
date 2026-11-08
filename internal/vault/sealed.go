@@ -74,7 +74,7 @@ type sealed struct {
 
 // openSealed reads path and returns the sealed file plus its plaintext. A missing or empty file
 // yields a fresh salt and nil plaintext, and nothing is written to disk. magic must be 4 bytes.
-func openSealed(path, magicStr, keyEnv string) (*sealed, []byte, error) {
+func openSealed(path, magicStr string, ks KeySource) (*sealed, []byte, error) {
 	data, readErr := os.ReadFile(filepath.Clean(path))
 	// Before the header is parsed, before anything is allocated for it, before the key is derived
 	// and - the whole point of being first - before the passphrase is even looked for: a file
@@ -92,9 +92,21 @@ func openSealed(path, magicStr, keyEnv string) (*sealed, []byte, error) {
 	// Everything below here keeps the order it had before the magic test moved above it: a file
 	// this binary might be able to read asks for the passphrase first, so a missing key still
 	// wins over errCorrupt and over an unreadable file, as it always did.
-	pass := os.Getenv(keyEnv)
+	//
+	// The passphrase comes from the KeySource and its error is returned unchanged: the source knows
+	// what it tried and names it (EnvKey names the variable, PromptKey says stdin was empty), and
+	// wrapping that again here would bury the one detail an operator acts on. Machine key slots are
+	// not consulted: a v1 header has none, so there is nothing for an opener to unwrap. Task 3a.2's
+	// v2 header is where the slots-then-passphrase order starts to mean something.
+	pass, err := ks.Passphrase()
+	if err != nil {
+		return nil, nil, err
+	}
+	// A KeySource that breaks its own contract - empty passphrase, no error - must not get a key
+	// derived from "": that key would open nothing today and would re-seal the vault under a
+	// passphrase nobody chose.
 	if pass == "" {
-		return nil, nil, fmt.Errorf("%w: set environment variable %s", ErrNoKey, keyEnv)
+		return nil, nil, fmt.Errorf("%w: the key source returned an empty passphrase", ErrNoKey)
 	}
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return nil, nil, fmt.Errorf("vault: read: %w", readErr)
@@ -102,10 +114,9 @@ func openSealed(path, magicStr, keyEnv string) (*sealed, []byte, error) {
 	s := &sealed{path: path}
 	if len(data) == 0 {
 		s.salt = make([]byte, saltLen)
-		if _, err := rand.Read(s.salt); err != nil {
-			return nil, nil, fmt.Errorf("vault: salt: %w", err)
+		if _, rerr := rand.Read(s.salt); rerr != nil {
+			return nil, nil, fmt.Errorf("vault: salt: %w", rerr)
 		}
-		var err error
 		s.aead, err = deriveAEAD(pass, s.salt)
 		return s, nil, err
 	}
@@ -114,12 +125,11 @@ func openSealed(path, magicStr, keyEnv string) (*sealed, []byte, error) {
 		return nil, nil, errCorrupt
 	}
 	s.salt = append([]byte(nil), data[len(magicStr):hdr]...)
-	var err error
 	if s.aead, err = deriveAEAD(pass, s.salt); err != nil {
 		return nil, nil, err
 	}
-	plain, err := s.aead.Open(nil, data[hdr:hdr+nonceLen], data[hdr+nonceLen:], data[:hdr])
-	if err != nil {
+	plain, oerr := s.aead.Open(nil, data[hdr:hdr+nonceLen], data[hdr+nonceLen:], data[:hdr])
+	if oerr != nil {
 		return nil, nil, ErrBadKey
 	}
 	return s, plain, nil

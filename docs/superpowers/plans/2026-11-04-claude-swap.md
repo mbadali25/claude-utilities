@@ -117,7 +117,7 @@ Commit: `git add docs/superpowers/spike-results.md && git commit -m "docs: spike
 - Create: `internal/vault/vault.go`, `internal/vault/vault_test.go`
 
 **Interfaces:**
-- Produces: `type Account struct{ ID, Label, Identity string; Block json.RawMessage; Updated time.Time }`; `func Open(path, keyEnv string) (*Vault, error)`; `func (v *Vault) Put(Account) error`; `Get(id string) (Account, bool)`; `List() []Account` (no `Block` in the copy `ListPublic()` returns for the UI); `Delete(id string) error`; `var ErrNoKey, ErrBadKey error`.
+- Produces: `type Account struct{ ID, Label, Identity string; Block json.RawMessage; Updated time.Time }`; `func Open(path string, ks KeySource) (*Vault, error)` (it took the name of an environment variable until the cert-vault plan's Task 3a.1 replaced it with a `KeySource`; `EnvKey(name)` is that behaviour); `func (v *Vault) Put(Account) error`; `Get(id string) (Account, bool)`; `List() []Account` (no `Block` in the copy `ListPublic()` returns for the UI); `Delete(id string) error`; `var ErrNoKey, ErrBadKey error`.
 
 - [ ] **Step 1: Write failing tests:** `TestPutGetRoundTripAcrossReopen`, `TestFileIsNotPlaintext` (grep file bytes for a known token substring), `TestWrongKeyReturnsErrBadKeyAndDoesNotOverwrite` (file bytes unchanged after the failed open), `TestMissingEnvReturnsErrNoKeyWithHint`, `TestTamperedFileFailsAuth`, `TestWriteIsAtomic` (inject failing rename; old file intact), `TestFileMode0600` (skip on Windows), `TestEmptyVaultListsEmpty`, `TestConcurrentPutSafe` (`-race`).
 - [ ] **Step 2: Run `go test -race ./internal/vault`; expect FAIL.**

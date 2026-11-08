@@ -76,9 +76,11 @@ func info(t TunnelKey) KeyInfo {
 }
 
 // OpenKeyring loads the keyring at path, or an empty in-memory one when the file does not exist.
-// It never writes to disk.
-func OpenKeyring(path, keyEnv string) (*Keyring, error) {
-	f, plain, err := openSealed(path, keyringMagic, keyEnv)
+// ks says which keys this process may use, exactly as it does for Open - the keyring is sealed
+// with the same passphrase as the vault, so both entry points hand the same KeySource to both.
+// It never writes to disk. As with Open, a nil ks is a programmer error and panics.
+func OpenKeyring(path string, ks KeySource) (*Keyring, error) {
+	f, plain, err := openSealed(path, keyringMagic, ks)
 	if err != nil {
 		return nil, err
 	}
