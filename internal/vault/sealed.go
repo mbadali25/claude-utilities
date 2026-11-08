@@ -24,6 +24,33 @@ import (
 // older server binary would then read it as corrupt - which deletes the rollback the tunnels
 // migration depends on at every step.
 
+// newerVaultMagic and newerKeyringMagic are the magic strings the next format version writes.
+// This binary cannot read either file; it recognises the magic only so it can say which binary
+// wrote it. They are deliberately not in vault.go's const block with `magic`: nothing here may
+// ever write one.
+const (
+	newerVaultMagic   = "CSV2"
+	newerKeyringMagic = "CSK2"
+)
+
+// ErrNewerFormat means the file was written by a server newer than this one. It is not errCorrupt:
+// "malformed vault file" sends an operator looking for a corrupt disk or a wrong passphrase, and
+// the one thing that must not happen is a correct passphrase being rotated out of confusion.
+var ErrNewerFormat = errors.New("vault: written by a newer server; downgrade with `server vault downgrade` on the newer binary")
+
+// newerMagic is the magic the next format version writes for the same kind of file, or "" for a
+// magic with no newer counterpart. One function, so there is no place a reader can accept the
+// other file's newer magic.
+func newerMagic(magicStr string) string {
+	switch magicStr {
+	case magic:
+		return newerVaultMagic
+	case keyringMagic:
+		return newerKeyringMagic
+	}
+	return ""
+}
+
 // deriveAEAD derives the file key from the passphrase and salt and returns the AEAD.
 func deriveAEAD(pass string, salt []byte) (cipher.AEAD, error) {
 	key := argon2.IDKey([]byte(pass), salt, argonTime, argonMem, argonPar, keyLen)
@@ -64,6 +91,15 @@ func openSealed(path, magicStr, keyEnv string) (*sealed, []byte, error) {
 		}
 		s.aead, err = deriveAEAD(pass, s.salt)
 		return s, nil, err
+	}
+	// Before the header is parsed, before anything is allocated for it and before the key is
+	// derived: a file written by a newer server says so, rather than looking malformed. Keyed on
+	// the magic this caller asked for, so a keyring's magic in a vault's path stays errCorrupt.
+	// HasPrefix, not a slice compare: a file shorter than the magic must not index past its end.
+	// A truncated CSV2 file is still reported as newer - the magic alone names the writer, and
+	// this binary cannot tell a truncated v2 file from a complete one either way.
+	if nm := newerMagic(magicStr); nm != "" && bytes.HasPrefix(data, []byte(nm)) {
+		return nil, nil, ErrNewerFormat
 	}
 	hdr := len(magicStr) + saltLen
 	if len(data) < hdr+nonceLen || string(data[:len(magicStr)]) != magicStr {
