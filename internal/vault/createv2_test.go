@@ -106,6 +106,105 @@ func TestInitV2GivesEachFileItsOwnDataKeyAndSlotIDs(t *testing.T) {
 	}
 }
 
+// The data key itself, not the id beside it. dek and dek.id are drawn from two independent randRead
+// calls, so two files with different ids can still be sealed under one key - which is exactly the
+// property the test above cannot see. One compromised key must not open both envelopes.
+func TestInitV2DoesNotShareADataKeyBetweenTheTwoFiles(t *testing.T) {
+	dir, _ := initBoth(t)
+	ringPath := filepath.Join(dir, KeyringFileName)
+	vs, _, err := openSealed(filepath.Join(dir, vaultFileName), magic, initKeySource(t, initPass))
+	if err != nil {
+		t.Fatalf("openSealed vault.bin: %v", err)
+	}
+	ks, _, err := openSealed(ringPath, keyringMagic, initKeySource(t, initPass))
+	if err != nil {
+		t.Fatalf("openSealed %s: %v", KeyringFileName, err)
+	}
+	if len(vs.dek) != keyLen || len(ks.dek) != keyLen {
+		t.Fatalf("data key lengths %d and %d, want %d each", len(vs.dek), len(ks.dek), keyLen)
+	}
+	if bytes.Equal(vs.dek, ks.dek) {
+		t.Fatal("both files are sealed under the same data key")
+	}
+	// And the key is bound to its own file: the keyring's payload must not open under the vault's
+	// data key even if a future change made the two keys equal by accident.
+	aead, err := payloadAEAD(vs.dek)
+	if err != nil {
+		t.Fatalf("payloadAEAD: %v", err)
+	}
+	raw, err := os.ReadFile(ringPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aad, _, err := rawHeaderOf(raw)
+	if err != nil {
+		t.Fatalf("rawHeaderOf: %v", err)
+	}
+	body := raw[len(aad):]
+	if _, err := aead.Open(nil, body[:nonceLen], body[nonceLen:], aad); err == nil {
+		t.Fatalf("the %s payload opened under vault.bin's data key", KeyringFileName)
+	}
+}
+
+// createFileExcl's refusal, on its own. InitV2's pre-flight stat answers first on every path a test
+// can reach through InitV2, so the atomic no-clobber - the half the comment says makes the property
+// true rather than the one that words it well - needs a direct caller.
+func TestCreateFileExclRefusesAPathThatIsAlreadyThere(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"a whole file", []byte("the bytes that were there")},
+		// Inspect reads a zero-byte file as absent, so this is the one a format test cannot refuse.
+		{"a zero-byte file a torn create left", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), vaultFileName)
+			if err := os.WriteFile(path, tc.body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := createFileExcl(path, []byte("the bytes a creator would write")); !errors.Is(err, ErrVaultExists) {
+				t.Fatalf("createFileExcl over %s = %v, want ErrVaultExists", tc.name, err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("the file that was there is gone: %v", err)
+			}
+			if !bytes.Equal(got, tc.body) {
+				t.Fatalf("the file that was there was written over: %d bytes, want %d", len(got), len(tc.body))
+			}
+		})
+	}
+}
+
+// A symlink at the target is the case no stat can see: os.Stat follows the link, so a DANGLING one
+// reads as "nothing there" and the pre-flight check waves it through. O_EXCL is the only thing left
+// that refuses it, and without it a creation would write the vault wherever the link points - which
+// is anywhere on the disk, outside the data dir the operator named.
+func TestCreateFileExclRefusesADanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	elsewhere := filepath.Join(dir, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// An existing directory and a name in it that does not exist: without O_EXCL the open would
+	// create the target, so the refusal is the only thing keeping the bytes out of it.
+	target := filepath.Join(elsewhere, "landed")
+	link := filepath.Join(dir, vaultFileName)
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("this host cannot create a symlink: %v", err)
+	}
+	if _, err := os.Stat(link); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a dangling symlink does not stat as absent on this host (%v); the premise does not hold", err)
+	}
+	if err := createFileExcl(link, []byte("the bytes a creator would write")); err == nil {
+		t.Fatal("createFileExcl followed a dangling symlink instead of refusing it")
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the bytes landed at the symlink's target, outside the path that was asked for")
+	}
+}
+
 // Each file opens under the passphrase ALONE and under the machine key ALONE. That is the whole
 // point of a slot list, and it is the property `vault init` prints a line about: the service starts
 // with no passphrase, and an operator who loses the host key still has a way in.
