@@ -466,17 +466,20 @@ func TestNewerFormatLogLineCarriesTheReason(t *testing.T) {
 	var line map[string]any
 	var found int
 	for _, l := range strings.Split(out.String(), "\n") {
-		if !strings.Contains(l, `"format"`) {
+		// Matched on the message field, not a bare `"format"` token: a later log line that merely
+		// mentions the word must not be counted as this one.
+		if !strings.Contains(l, `"msg":"format"`) {
 			continue
 		}
 		found++
 		if err := json.Unmarshal([]byte(l), &line); err != nil {
 			t.Fatalf("not a JSON log line: %q: %v", l, err)
 		}
-		// The reason is the only detail the line may carry: no path, no passphrase, no file bytes.
+		// The reason is the only detail the line may carry, so the whole line is scanned, not just
+		// the field it is expected in: no path, no passphrase, no file bytes, in any field.
 		for _, leak := range []string{dir, "vault.bin", "CSV2", "a-test-passphrase"} {
-			if v, _ := line["reason"].(string); strings.Contains(v, leak) {
-				t.Fatalf("reason %q carries %q", v, leak)
+			if strings.Contains(l, leak) {
+				t.Fatalf("log line %q carries %q", l, leak)
 			}
 		}
 	}
