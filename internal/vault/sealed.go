@@ -26,10 +26,11 @@ import (
 // older server binary would then read it as corrupt - which deletes the rollback the tunnels
 // migration depends on at every step.
 
-// v2VaultMagic and v2KeyringMagic are the v2 format's magic strings. This binary now reads both -
-// the header parser lives in slots.go - and writes neither: `server vault init` is the only thing
-// that will ever create a v2 file. They are deliberately not in vault.go's const block with
-// `magic`, which is the one magic a write path here may use.
+// v2VaultMagic and v2KeyringMagic are the v2 format's magic strings. This binary reads both - the
+// header parser lives in slots.go - and writes one back only over a file that already carried it:
+// `server vault init` is the only thing that will ever CREATE a v2 file, and writeV2 is reachable
+// only from a sealed that arrived as v2 (see write). They are deliberately not in vault.go's const
+// block with `magic`, which is the one magic the v1 write path may use.
 const (
 	v2VaultMagic   = "CSV2"
 	v2KeyringMagic = "CSK2"
@@ -98,6 +99,12 @@ func deriveAEAD(pass string, salt []byte) (cipher.AEAD, error) {
 // nil. dek is the discriminator the writer branches on, and that is the whole reason nothing a v1
 // open produces can take the v2 write path: a file that did not arrive as v2 has no data key, so
 // there is no input to Open that turns a CSV1 file or an absent one into a v2 write.
+//
+// It carries no lock and is NOT safe for concurrent use. writeV2 advances rawHeader and header after
+// a successful replaceFile, so two writers on one sealed could seal a payload under a header the
+// other has already replaced. The owners hold the lock instead: every caller of write goes through
+// Vault.save under v.mu (vault.go) or Keyring.saveLocked under k.mu (keyring.go), which is what
+// makes Vault's "safe for concurrent use" true. A future caller must hold one of those.
 type sealed struct {
 	path string
 	salt []byte
@@ -247,6 +254,13 @@ func openSealedV2(path, magicStr string, data []byte, ks KeySource) (*sealed, []
 //     there is no key to call bad, and the actionable line is the one EnvKey or PromptKey wrote
 //     (which variable, or that stdin was empty).
 //   - ErrBadKey otherwise, naming the slot kinds that were tried and no value from any of them.
+//
+// "Tried" means handed to an opener, and the list is collected as the walk runs rather than derived
+// from the header afterwards. The two are not the same set: a slot of a kind this host has no opener
+// for, and a slot of a type this binary does not know, are never given a key, and reporting them as
+// tried sends an operator after a credential that was never asked for. The spec's service line is
+// `no slot could unwrap (tried: dpapi)` on a restored data dir whose header also carries the
+// passphrase slot the service cannot use.
 func recoverDEK(magicStr string, h Header, slots []Slot, ks KeySource) ([]byte, error) {
 	v2 := v2Magic(magicStr)
 	if v2 == "" {
@@ -265,11 +279,14 @@ func recoverDEK(magicStr string, h Header, slots []Slot, ks KeySource) ([]byte, 
 		passAsked    bool
 		passErr      error
 		unreachable  error
-		attempted    int
+		tried        []string
+		noKey        int
+		unknown      int
 	)
 	for _, s := range tryOrder(slots) {
 		// Already warned about by warnSkippedSlots. Nothing here can wrap or unwrap it.
 		if !knownSlotType(s.Type) {
+			unknown++
 			continue
 		}
 		var op SlotOpener
@@ -300,13 +317,14 @@ func recoverDEK(magicStr string, h Header, slots []Slot, ks KeySource) ([]byte, 
 		// No opener for this kind on this host. Not a failure: it is what a console run looks like
 		// on a vault that also has a dpapi slot from the host that created it.
 		if op == nil {
+			noKey++
 			continue
 		}
 		slotID, derr := base64.StdEncoding.DecodeString(s.ID)
 		if derr != nil || len(slotID) != slotIDLen {
 			return nil, errCorrupt
 		}
-		attempted++
+		tried = appendKind(tried, s.Type)
 		dek, uerr := op.Unwrap(s, slotAAD(v2, dekID, slotID, s.Type))
 		if uerr == nil {
 			return dek, nil
@@ -319,11 +337,23 @@ func recoverDEK(magicStr string, h Header, slots []Slot, ks KeySource) ([]byte, 
 	switch {
 	case unreachable != nil:
 		return nil, unreachable
-	case attempted == 0 && passErr != nil:
+	case len(tried) == 0 && passErr != nil:
 		return nil, passErr
 	}
-	return nil, fmt.Errorf("%w: no slot could unwrap the data key (slot types tried: %s)",
-		ErrBadKey, slotTypeList(slots))
+	return nil, fmt.Errorf("%w: no slot could unwrap the data key (%s)",
+		ErrBadKey, triedSummary(tried, noKey, unknown, passErr))
+}
+
+// appendKind adds one slot kind to the tried list, keeping try order and refusing a duplicate. Eight
+// passphrase slots are allowed, and an operator reading "passphrase, passphrase" learns nothing the
+// single name does not say.
+func appendKind(kinds []string, kind string) []string {
+	for _, k := range kinds {
+		if k == kind {
+			return kinds
+		}
+	}
+	return append(kinds, kind)
 }
 
 // openerFor picks the opener for one slot kind, or nil when this host has none. Matched on Type
@@ -356,35 +386,47 @@ func payloadAEAD(dek []byte) (cipher.AEAD, error) {
 	return aead, nil
 }
 
-// slotTypeList names the known slot kinds in try order, then the number of slots whose type this
-// binary does not know, for the one error an operator sees when nothing opened the file. The count
-// is a trailing summary and not a position: an unknown type is tried with the machine slots, which
-// is to say first, and only the kinds before the count are in the order they were tried. Types
-// only: a slot's id, its wrapped bytes and its parameters never appear in an error string.
+// triedSummary is the parenthesised half of the one error an operator sees when nothing opened the
+// file: the kinds that were tried, then the two reasons a slot was not, then the key source's own
+// reason when a passphrase slot was one of them. Types and counts only: a slot's id, its wrapped
+// bytes and its parameters never appear in an error string.
 //
-// Only the kinds this binary knows are named, and the rest are counted. A slot's `type` is up to
-// 255 bytes of attacker-chosen printable ASCII from a header that is not authenticated yet, and
-// this string goes to stderr, into a log line and into whatever an operator pastes into a ticket.
-// Echoing it back verbatim would hand a crafted header a line of the operator's output - which is
-// how a forged instruction or a stray control sequence gets in front of a human. The count is the
-// part that is actually useful anyway: it says a newer server put slots here that this one skipped.
-func slotTypeList(slots []Slot) string {
-	if len(slots) == 0 {
-		return "none"
+// The two untried counts stay apart because they send an operator to different places. noKey is a
+// slot of a kind this format defines and this host holds no key for - a dpapi slot on Linux, a
+// kek-file slot with no KEK configured - and the fix is to add a slot this host can open, or to open
+// it on the host that can. unknown is a slot of a type this binary has never heard of, which says a
+// newer server wrote here and this one is the wrong binary for the file.
+//
+// Every name in tried has passed knownSlotType, so the three fixed strings of this format are the
+// only things that can be printed, and the untried slots are counted rather than named. That is the
+// point and not an accident: a slot's `type` is up to 255 bytes of attacker-chosen printable ASCII
+// from a header that is not authenticated yet, and this string goes to stderr, into a log line and
+// into whatever an operator pastes into a ticket. Echoing it back verbatim would hand a crafted
+// header a line of the operator's output - which is how a forged instruction or a stray control
+// sequence gets in front of a human.
+//
+// passErr is carried here rather than returned because the walk did try something, so the answer is
+// ErrBadKey; dropping the reason the passphrase was never asked for would drop the only actionable
+// line (which variable was not set, or that stdin was empty). It is the error's text and not its
+// value, so errors.Is still matches ErrBadKey alone and the exit code an absent key maps to is
+// unchanged.
+func triedSummary(tried []string, noKey, unknown int, passErr error) string {
+	var b strings.Builder
+	list := "none"
+	if len(tried) > 0 {
+		list = strings.Join(tried, ", ")
 	}
-	out := make([]string, 0, len(slots)+1)
-	unknown := 0
-	for _, s := range tryOrder(slots) {
-		if knownSlotType(s.Type) {
-			out = append(out, s.Type)
-			continue
-		}
-		unknown++
+	fmt.Fprintf(&b, "slot types tried: %s", list)
+	if noKey > 0 {
+		fmt.Fprintf(&b, "; %d this host held no key for", noKey)
 	}
 	if unknown > 0 {
-		out = append(out, fmt.Sprintf("%d unknown", unknown))
+		fmt.Fprintf(&b, "; %d unknown", unknown)
 	}
-	return strings.Join(out, ", ")
+	if passErr != nil {
+		fmt.Fprintf(&b, "; no passphrase was available: %v", passErr)
+	}
+	return b.String()
 }
 
 // bakSuffix names the one-deep recovery copy kept beside a sealed file before a destructive write.

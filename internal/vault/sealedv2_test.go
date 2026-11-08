@@ -966,24 +966,161 @@ func TestV2WithNoKeyAtAllIsErrNoKey(t *testing.T) {
 
 // The error an operator sees when nothing opened names the kinds that were tried and no value from
 // any of them: not an id, not a salt, not a nonce, not a wrapped key.
+//
+// Both kinds are genuinely tried here, which is what makes the try-order assertion mean anything:
+// the key source carries a kek-file opener over a readable key that does not fit, and the passphrase
+// behind it is wrong. A source with no machine opener - EnvKey, say - would leave the kek-file slot
+// untried, and then naming it would be the defect
+// TestV2TheErrorNamesOnlyTheSlotKindsActuallyTried pins.
 func TestV2NoSlotOpenedNamesKindsAndNoValues(t *testing.T) {
 	p := writeFixture(t, t.TempDir(), "vault.bin",
 		buildV2(t, magic, []byte(fileDEK), []v2Spec{
 			passSpec("slot0001", "pw"),
 			kekSpec("slot0002", []byte(fileKEK)),
 		}, accountsPayload(t, "a")))
-	_, err := open(t, p, "wrong")
+	wrong := append([]byte(nil), []byte(fileKEK)...)
+	wrong[0] ^= 0xff
+	_, err := Open(p, kekSource(t, wrong, "wrong", nil))
 	if !errors.Is(err, ErrBadKey) {
 		t.Fatalf("want ErrBadKey, got %v", err)
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "kek-file, passphrase") {
-		t.Fatalf("the error does not name the kinds in try order: %q", msg)
+	if got := triedClause(t, err); got != "kek-file, passphrase" {
+		t.Fatalf("the kinds tried are %q, want them in try order: %q", got, msg)
 	}
 	for _, leak := range []string{b64([]byte(fileDEKID)), b64([]byte("slot0001")), b64([]byte(fileSalt))} {
 		if strings.Contains(msg, leak) {
 			t.Fatalf("the error carries a value from the header: %q", msg)
 		}
+	}
+}
+
+// A slot kind this host could not hand a key to was not tried, and the error must not say it was.
+// The spec's service line is `vault locked: no slot could unwrap (tried: dpapi)` on a restored data
+// dir whose header also carries a passphrase slot the service has no passphrase for - the kinds in
+// the header are not the kinds that were tried, and HostKeys' own contract says the message "must
+// not include a kind this host could never have satisfied".
+//
+// Both halves are reachable without an attacker, and both are reachable with one: adding a slot to a
+// header is a header edit, which is how a crafted file names a recovery rung nobody tried.
+func TestV2TheErrorNamesOnlyTheSlotKindsActuallyTried(t *testing.T) {
+	// A dpapi slot written by hand, because this package seals only the two symmetric kinds. It is a
+	// well-formed slot of a kind no opener here answers for, which is a Windows-written vault opened
+	// on Linux, or any host whose dpapi blob belongs to another account.
+	dpapiRaw := `{"id":"` + b64([]byte("slot0003")) + `","type":"` + slotTypeDPAPI +
+		`","scope":"machine","created":"` + fileCreated + `","wrap":{"blob":"AAAA"}}`
+
+	t.Run("a kind with no opener on this host is not named", func(t *testing.T) {
+		p := writeFixture(t, t.TempDir(), "vault.bin",
+			buildV2(t, magic, []byte(fileDEK), []v2Spec{
+				{raw: dpapiRaw},
+				passSpec("slot0001", "pw"),
+			}, accountsPayload(t, "a")))
+		// No openers at all, so only the passphrase slot can be handed a key - and the passphrase is
+		// wrong, so nothing opens.
+		_, err := Open(p, &recordingKeySource{pass: "wrong"})
+		if !errors.Is(err, ErrBadKey) {
+			t.Fatalf("want ErrBadKey, got %v", err)
+		}
+		if kinds := triedClause(t, err); kinds != slotTypePassphrase {
+			t.Fatalf("the kinds tried are %q, want %q alone: this host has no dpapi opener",
+				kinds, slotTypePassphrase)
+		}
+	})
+
+	// The spec's exit-3 shape exactly: a machine slot was tried and failed, the passphrase slot could
+	// not be tried because this process has no passphrase. Naming it as tried is wrong twice over -
+	// it was not, and the one actionable line (which variable was not set) is the one that is dropped.
+	t.Run("a passphrase slot nothing could ask for is not named", func(t *testing.T) {
+		kek := []byte(fileKEK)
+		p := writeFixture(t, t.TempDir(), "vault.bin",
+			buildV2(t, magic, []byte(fileDEK), []v2Spec{
+				kekSpec("slot0002", kek),
+				passSpec("slot0001", "pw"),
+			}, accountsPayload(t, "a")))
+		wrong := append([]byte(nil), kek...)
+		wrong[0] ^= 0xff
+		_, err := Open(p, kekSource(t, wrong, "", ErrNoKey))
+		if !errors.Is(err, ErrBadKey) {
+			t.Fatalf("want ErrBadKey, got %v", err)
+		}
+		msg, kinds := err.Error(), triedClause(t, err)
+		if kinds != slotTypeKEKFile {
+			t.Fatalf("the kinds tried are %q, want %q alone: nothing asked for a passphrase",
+				kinds, slotTypeKEKFile)
+		}
+		if !strings.Contains(msg, ErrNoKey.Error()) {
+			t.Fatalf("the error drops the key source's own reason, which is the actionable line: %q", msg)
+		}
+	})
+}
+
+// triedClause is the comma-separated kind list out of a "no slot could unwrap" error: the text
+// between "slot types tried: " and the next clause. Read as its own clause rather than by searching
+// the whole message, because the message's later clauses may legitimately contain a kind's name -
+// "no passphrase was available" is one - and a substring test over the lot would pass on a message
+// that still claims the wrong thing.
+func triedClause(t *testing.T, err error) string {
+	t.Helper()
+	const marker = "slot types tried: "
+	msg := err.Error()
+	i := strings.Index(msg, marker)
+	if i < 0 {
+		t.Fatalf("the error names no slot kinds at all: %q", msg)
+	}
+	rest := msg[i+len(marker):]
+	if j := strings.IndexAny(rest, ";)"); j >= 0 {
+		rest = rest[:j]
+	}
+	return rest
+}
+
+// retainingOpener hands out the data key and keeps the slice it handed out, so a test can look at
+// that memory after the open has failed. Nothing but a test may hold a DEK slice this way.
+type retainingOpener struct {
+	kind string
+	dek  []byte
+}
+
+func (o *retainingOpener) Type() string { return o.kind }
+
+func (o *retainingOpener) Unwrap(Slot, []byte) ([]byte, error) {
+	o.dek = append([]byte(nil), []byte(fileDEK)...)
+	return o.dek, nil
+}
+
+// The data key is zeroed when the payload refuses. The slot wrap authenticated, so the key is real
+// and this process is about to return an error with it still in memory; the error path is exactly
+// where a key nobody can use any more must not be left lying about.
+func TestV2AFailedPayloadOpenZeroesTheDataKey(t *testing.T) {
+	file := buildV2(t, magic, []byte(fileDEK), []v2Spec{kekSpec("slot0002", []byte(fileKEK))},
+		accountsPayload(t, "a"))
+	// One bit of the payload's ciphertext, so the header parses, the slot opens and the tag refuses.
+	file[len(file)-1] ^= 0x01
+	p := writeFixture(t, t.TempDir(), "vault.bin", file)
+	op := &retainingOpener{kind: slotTypeKEKFile}
+	if _, err := Open(p, &recordingKeySource{openers: []SlotOpener{op}}); !errors.Is(err, ErrBadKey) {
+		t.Fatalf("want ErrBadKey, got %v", err)
+	}
+	if len(op.dek) != keyLen {
+		t.Fatalf("the opener was never asked for the data key: %d bytes", len(op.dek))
+	}
+	for i, b := range op.dek {
+		if b != 0 {
+			t.Fatalf("the data key was left in memory after the payload refused: byte %d is %#x", i, b)
+		}
+	}
+}
+
+// Bytes appended after a complete envelope. rawHeaderOf bounds the file from below, so the extra
+// bytes land in the ciphertext and the payload's own tag is what refuses them: ErrBadKey, never a
+// success, and never a read of the accounts that were in the file before the append.
+func TestV2TrailingBytesAreRefused(t *testing.T) {
+	file := buildV2(t, magic, []byte(fileDEK), []v2Spec{passSpec("slot0001", "pw")},
+		accountsPayload(t, "a"))
+	p := writeFixture(t, t.TempDir(), "vault.bin", append(file, 0x00))
+	if _, err := open(t, p, "pw"); !errors.Is(err, ErrBadKey) {
+		t.Fatalf("a byte appended to the payload: want ErrBadKey, got %v", err)
 	}
 }
 
