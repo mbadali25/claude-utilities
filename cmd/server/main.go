@@ -280,12 +280,10 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 	if err != nil {
 		return err
 	}
-	v, err := vault.Open(filepath.Join(dataDir, "vault.bin"), keyEnv)
-	if err != nil {
-		return err
-	}
 	log := logx.New(errOut)
-	// Once per start, for both levels. The once-a-day (case-table row 6) and hourly (row 7)
+	// Once per start, for both levels, and at the EnsureCert call site rather than after
+	// vault.Open: a server that then exits 3 or 4 on the vault must still have said that its
+	// certificate is about to expire. The once-a-day (case-table row 6) and hourly (row 7)
 	// repeats need a ticker in the run loop, which arrives with Task 4.3 of the cert-vault plan;
 	// row 7's admin-UI notice is Task 8.7. Until then an expiring pair is visible here, in the
 	// journal and in the Windows event log, and nowhere else.
@@ -295,6 +293,10 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 		} else {
 			log.Info(text, "reason", "cert-expiry")
 		}
+	}
+	v, err := vault.Open(filepath.Join(dataDir, "vault.bin"), keyEnv)
+	if err != nil {
+		return err
 	}
 	reg := ownership.New()
 	h := hub.New(v, reg, filepath.Join(dataDir, "hosts.json"), log)

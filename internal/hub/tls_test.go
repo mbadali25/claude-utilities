@@ -341,6 +341,19 @@ func TestCertReasonForTheReACLFailureIsACLNotPermission(t *testing.T) {
 	}
 }
 
+// A read failure that is not a permission error (EISDIR, EIO) is still ErrCertUnreadable, but
+// calling it "permission" would be a false label, so it gets its own reason. This row is not in
+// the spec's table; it exists because the table's row 3 is specifically fs.ErrPermission.
+func TestUnreadableReasonForANonPermissionReadFailure(t *testing.T) {
+	err := unreadableErr(keyName, errors.New("input/output error"))
+	if !errors.Is(err, ErrCertUnreadable) {
+		t.Fatalf("err = %v, want ErrCertUnreadable", err)
+	}
+	if got := CertReason(err); got != "unreadable" {
+		t.Fatalf("reason = %q, want unreadable", got)
+	}
+}
+
 func TestCertReasonIsEmptyForAnUnrelatedError(t *testing.T) {
 	if got := CertReason(errors.New("listen tcp: address already in use")); got != "" {
 		t.Fatalf("reason invented for a non-certificate error: %q", got)
