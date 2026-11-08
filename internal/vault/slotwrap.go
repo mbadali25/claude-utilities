@@ -29,6 +29,12 @@ import (
 // format: changing it makes every existing slot unopenable.
 const slotWrapInfo = "claude-swap/slot-wrap/v2"
 
+// dpapiScopeMachine is the only `scope` a dpapi slot may carry in a file this binary writes or
+// opens (Decision 1). It is a format constant, which is why it is here rather than in either half
+// of the build: both halves name it, and so do both halves of the test suite. `"scope":"user"` is
+// reserved by the format for a later version and is refused today.
+const dpapiScopeMachine = "machine"
+
 // aadFixedLen is the AAD's length up to and including the slot type's length prefix: the 4-byte
 // magic, the dek.id and its prefix, the slot.id and its prefix, then one byte of type length. The
 // type itself follows and is at least one byte.
