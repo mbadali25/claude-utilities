@@ -38,6 +38,13 @@ func unlockHandle(f *os.File) error {
 	return windows.UnlockFileEx(windows.Handle(f.Fd()), 0, uint32(lockLen), 0, overlappedAtLockOffset())
 }
 
+// lockOpenNoFollow is zero here: Windows has no O_NOFOLLOW, so a reparse point at the lock path is
+// refused by AcquireLock's os.Lstat before the open rather than by the open itself. The narrow
+// window that leaves - the path swapped between the Lstat and the open - needs write access to the
+// data dir to reach, and closing it would mean CreateFile with FILE_FLAG_OPEN_REPARSE_POINT plus
+// GetFileInformationByHandle and os.NewFile in place of one os.OpenFile. Recorded rather than done.
+const lockOpenNoFollow = 0
+
 // overlappedAtLockOffset points the lock at the single byte at lockOffset. Locking a region beyond
 // the end of the file is allowed and does not extend it, which is why the lock file stays a few
 // hundred bytes rather than becoming a sparse 1 TiB file in every data dir.

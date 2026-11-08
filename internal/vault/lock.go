@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -55,6 +56,13 @@ const (
 // path when it could not. The CLI maps it to exit 2.
 var ErrLockHeld = errors.New("vault: the data-dir lock is held by another process")
 
+// ErrLockPathNotRegular marks a lock path that is not a plain file: a symlink, a directory, a
+// device node. It matters because the lock file is opened for writing, truncated, and then handed
+// to credfile.RestrictFile by path - so a link planted at the lock path by anyone who can write the
+// data dir would make all three happen to whatever it points at. Refusing is the only safe answer:
+// there is no legitimate reason for the data dir's lock to be anything but a file.
+var ErrLockPathNotRegular = errors.New("vault: the lock path is not a regular file")
+
 // heldError carries the operator-facing message while still matching ErrLockHeld.
 type heldError struct{ msg string }
 
@@ -67,6 +75,7 @@ func (e heldError) Unwrap() error { return ErrLockHeld }
 // mapped drive, so the refusal path has to be forceable.
 var (
 	restrictFile   = credfile.RestrictFile
+	restrictDir    = credfile.RestrictDir
 	proveExclusive = osProveExclusive
 )
 
@@ -105,14 +114,26 @@ func LockPath(dataDir string) string { return filepath.Join(dataDir, LockFileNam
 func AcquireLock(dataDir, cmd string) (*Lock, error) {
 	dataDir = filepath.Clean(dataDir)
 	path := LockPath(dataDir)
-	// The lock file's directory, which is the data dir: `vault init` takes the lock before
-	// anything in the data dir exists, so the first holder creates it, owner-only.
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, fmt.Errorf("vault: create data dir %s: %w", dataDir, err)
+	if err := makeDataDir(dataDir); err != nil {
+		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Clean(path), os.O_RDWR|os.O_CREATE, 0o600)
+	// Before the open, because the open creates the file, writeHolder truncates it and restrictFile
+	// rewrites its ACL by path: a symlink here would send all three somewhere else. os.Lstat does
+	// not follow the link, so what it describes is the lock path itself.
+	if st, err := os.Lstat(path); err == nil && !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("vault: %s is a %s: %w", path, lockPathKind(st.Mode()), ErrLockPathNotRegular)
+	}
+	f, err := os.OpenFile(filepath.Clean(path), os.O_RDWR|os.O_CREATE|lockOpenNoFollow, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("vault: open %s: %w", path, err)
+	}
+	// And again on the open handle, which is what will actually be written: the Lstat above leaves
+	// a window where the path could be swapped, lockOpenNoFollow closes it where the OS has an
+	// O_NOFOLLOW to close it with, and this fstat is what is left on the OS that does not.
+	if st, err := f.Stat(); err != nil {
+		return nil, closeAfter(f, fmt.Errorf("vault: stat %s: %w", path, err))
+	} else if !st.Mode().IsRegular() {
+		return nil, closeAfter(f, fmt.Errorf("vault: %s is a %s: %w", path, lockPathKind(st.Mode()), ErrLockPathNotRegular))
 	}
 	// Owner-only before the first byte is written. The lock file is not written through
 	// replaceFile, so it needs the mode and the Windows ACL set here; the holder line names a pid
@@ -148,6 +169,61 @@ func AcquireLock(dataDir, cmd string) (*Lock, error) {
 func closeAfter(f *os.File, err error) error {
 	_ = f.Close()
 	return err
+}
+
+// makeDataDir creates the data dir if it is not there, owner-only: `vault init` takes the lock
+// before anything in the data dir exists, so the first holder creates it. The MkdirAll is paired
+// with credfile.RestrictDir the way every other MkdirAll in this repository is (hub/enrol.go:91,
+// hub/adminpw.go:185) - the mode is nearly meaningless on Windows and the inheritable grant is what
+// makes the files written into it afterwards owner-only.
+//
+// It restricts only a directory it created. AcquireLock runs on every `server run` and every
+// mutator, and the data dir of a registered Windows service carries grants `service install` wrote
+// with /T, for the service account and BUILTIN\Administrators. Rewriting those on every start
+// would lock the operator out of a directory that already holds data, which is the rule
+// install.go already follows for the agent's state dir.
+// The data dir is the directory the operator named with --data-dir. It is the command's subject,
+// not input to be confined to a tree, so there is no traversal here to prevent - which is also why
+// AcquireLock's one filepath.Clean is all the normalising it gets.
+func makeDataDir(dataDir string) error {
+	dataDir = filepath.Clean(dataDir)
+	// #nosec G703 -- the data dir is the operator's own --data-dir, cleaned above
+	switch st, err := os.Stat(dataDir); {
+	case err == nil && st.IsDir():
+		return nil
+	case err == nil:
+		return fmt.Errorf("vault: data dir %s is a %s: %w", dataDir, lockPathKind(st.Mode()), ErrLockPathNotRegular)
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("vault: stat data dir %s: %w", dataDir, err)
+	}
+	// #nosec G703 -- same path, same reason
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("vault: create data dir %s: %w", dataDir, err)
+	}
+	if err := restrictDir(dataDir); err != nil {
+		return fmt.Errorf("vault: restrict data dir %s: %w", dataDir, err)
+	}
+	return nil
+}
+
+// lockPathKind names what is at a path for the refusal message, so an operator is told whether to
+// look for a link, a directory or something stranger. "regular file" never appears: the callers
+// only reach this when the mode is not one.
+func lockPathKind(m os.FileMode) string {
+	switch {
+	case m&os.ModeSymlink != 0:
+		return "symbolic link"
+	case m.IsDir():
+		return "directory"
+	case m&os.ModeDevice != 0:
+		return "device"
+	case m&os.ModeNamedPipe != 0:
+		return "named pipe"
+	case m&os.ModeSocket != 0:
+		return "socket"
+	default:
+		return "not a regular file"
+	}
 }
 
 // writeHolder replaces the first 4 KiB with this process's holder line and fsyncs it, so a
@@ -207,9 +283,14 @@ func ReadLockHolder(dataDir string) (pid int, cmd string, started time.Time, ok 
 		return 0, "", time.Time{}, false
 	}
 	defer func() { _ = f.Close() }()
+	// io.ReadFull, not f.Read: a single Read may stop short of the buffer without an error, and a
+	// holder line cut in half unmarshals to nothing and reads as "no metadata", which prints the
+	// message without the pid an operator needs. The buffer is the 4 KiB cap and a holder line is
+	// about ninety bytes, so io.ErrUnexpectedEOF is the ordinary outcome here, not a failure - what
+	// matters is how many bytes came back.
 	buf := make([]byte, lockMetaMax)
-	n, err := f.Read(buf)
-	if n <= 0 || (err != nil && n == 0) {
+	n, err := io.ReadFull(f, buf)
+	if n <= 0 || (err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)) {
 		return 0, "", time.Time{}, false
 	}
 	var h lockHolder

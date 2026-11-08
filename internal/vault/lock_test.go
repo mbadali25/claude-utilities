@@ -355,8 +355,99 @@ func TestAcquireReportsAnUnusableLockPath(t *testing.T) {
 	if errors.Is(err, ErrLockHeld) {
 		t.Fatalf("err = %v, want a plain failure, not ErrLockHeld", err)
 	}
+	if !errors.Is(err, ErrLockPathNotRegular) {
+		t.Errorf("err = %v, want ErrLockPathNotRegular for a directory at the lock path", err)
+	}
 	if !strings.Contains(err.Error(), LockPath(dir)) {
 		t.Errorf("message %q does not name the lock file", err.Error())
+	}
+}
+
+// A symlink planted at the lock path must not be followed. AcquireLock opens the path for writing,
+// writeHolder truncates it, and restrictFile rewrites its ACL by path: following a link would do
+// all three to a file chosen by whoever can write the data dir. The victim here stands in for
+// anything an attacker would point the link at.
+func TestAcquireRefusesASymlinkAtTheLockPath(t *testing.T) {
+	dir := lockDir(t)
+	victim := filepath.Join(t.TempDir(), "victim.bin")
+	const body = "victim contents that must not change"
+	if err := os.WriteFile(victim, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, LockPath(dir)); err != nil {
+		t.Skipf("os.Symlink is not available here (Windows needs SeCreateSymbolicLink or developer mode): %v", err)
+	}
+
+	_, err := AcquireLock(dir, "migrate")
+	if err == nil {
+		t.Fatal("AcquireLock followed a symlink at the lock path")
+	}
+	if !errors.Is(err, ErrLockPathNotRegular) {
+		t.Errorf("err = %v, want ErrLockPathNotRegular", err)
+	}
+	if errors.Is(err, ErrLockHeld) {
+		t.Errorf("err = %v, want a refusal that is not ErrLockHeld", err)
+	}
+	if !strings.Contains(err.Error(), LockPath(dir)) {
+		t.Errorf("message %q does not name the lock file", err.Error())
+	}
+
+	got, rerr := os.ReadFile(victim)
+	if rerr != nil {
+		t.Fatalf("the victim file no longer reads: %v", rerr)
+	}
+	if string(got) != body {
+		t.Fatalf("the victim's bytes changed: %q", got)
+	}
+}
+
+// The data dir AcquireLock creates gets the owner-only grant and not just the mode. `vault init`
+// takes the lock before anything in the data dir exists, so this is the one place the directory is
+// created, and every other MkdirAll in this repository pairs the two (hub/enrol.go:91,
+// hub/adminpw.go:185). On Windows the mode is nearly meaningless and the ACL is the whole
+// guarantee; the ACE itself is asserted in lock_windows_test.go.
+func TestAcquireRestrictsADataDirItCreates(t *testing.T) {
+	var got []string
+	restore := restrictDir
+	restrictDir = func(p string) error {
+		got = append(got, p)
+		return restore(p)
+	}
+	t.Cleanup(func() { restrictDir = restore })
+
+	dir := filepath.Join(t.TempDir(), "nested", "data")
+	acquire(t, dir, "init")
+
+	if len(got) != 1 || got[0] != dir {
+		t.Fatalf("RestrictDir calls = %v, want one for %q", got, dir)
+	}
+	if runtime.GOOS != "windows" {
+		st, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != 0o700 {
+			t.Fatalf("data dir mode = %v, want 0700", st.Mode().Perm())
+		}
+	}
+}
+
+// ...and only a data dir it created. `server run` takes this lock on every start, and the data dir
+// of a registered Windows service carries the grants `service install` wrote with /T (the service
+// account and BUILTIN\Administrators). Rewriting the ACL of a directory that already holds data
+// would lock the operator out of it, which install.go already refuses to do for the state dir.
+func TestAcquireDoesNotRestrictAnExistingDataDir(t *testing.T) {
+	calls := 0
+	restore := restrictDir
+	restrictDir = func(p string) error {
+		calls++
+		return restore(p)
+	}
+	t.Cleanup(func() { restrictDir = restore })
+
+	acquire(t, lockDir(t), "run") // t.TempDir() is already there
+	if calls != 0 {
+		t.Fatalf("RestrictDir was called %d times on a data dir that already existed", calls)
 	}
 }
 
