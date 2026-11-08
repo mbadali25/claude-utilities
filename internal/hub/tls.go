@@ -209,10 +209,17 @@ func plural(n int, unit string) string {
 }
 
 // generatePair writes a fresh self-signed pair over certFile and keyFile and returns the new
-// fingerprint. Both files are staged as owner-only temp files before either is renamed, so an
-// error leaves the pair exactly as it was. The two renames are not one atomic step: a crash
-// between them leaves one file of two, which EnsureCert then REFUSES (ErrCertPairIncomplete,
-// naming the missing file) instead of regenerating behind the operator's back.
+// fingerprint. Both files are staged as owner-only temp files before either is renamed, so a
+// failure before the first rename leaves the pair exactly as it was. The two renames are not one
+// atomic step, and the KEY is renamed first, so a crash between them lands differently depending
+// on what was there before:
+//   - a first generation leaves one file of two, which EnsureCert REFUSES as
+//     ErrCertPairIncomplete, naming the missing file;
+//   - a renew over an existing pair leaves the new key beside the OLD certificate - two files -
+//     which EnsureCert REFUSES as ErrCertMismatch.
+//
+// Either way it refuses instead of regenerating behind the operator's back, and no backup of the
+// old pair is kept: the way out of both is another `server cert renew`.
 func generatePair(certFile, keyFile string) (fingerprint string, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -382,7 +389,8 @@ func loadPair(certFile, keyFile string) (string, error) {
 	}
 	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
 	if !ok || !pub.Equal(&priv.PublicKey) {
-		return "", fmt.Errorf("hub: %s does not match %s; restore the matching file from a backup: %w",
+		return "", fmt.Errorf("hub: %s does not match %s; nothing here keeps a backup of the pair, so recover "+
+			"by running `server cert renew`, which mints a fresh pair and changes the sha256 every agent pins: %w",
 			keyName, certName, ErrCertMismatch)
 	}
 	if time.Now().After(cert.NotAfter) {

@@ -493,8 +493,9 @@ is why step 5 comes last.
   Interactive` is what avoids storing a password; the price is that a locked-but-logged-on session
   keeps them up, a logged-off or sleeping machine does not. Hosts show offline in the admin UI for
   that whole window.
-- **The server certificate pin is unaffected** by the tunnel, but a regenerated server certificate
-  still invalidates every agent's `--pin`.
+- **The server certificate pin is unaffected** by the tunnel, but a new server certificate still
+  invalidates every agent's `--pin`. Only `server cert renew` mints one: the server never replaces
+  a pair on its own, and refuses to start (exit 5) on a pair it cannot load.
 - **`ServerAliveInterval` does not catch every stall.** The unconditional restart loop, not the
   keepalive, is what actually keeps the tunnels up.
 
@@ -605,7 +606,7 @@ What this check **cannot** catch is `HOME` pointing at the *wrong* home. systemd
 
 Worth being explicit about what a swap then does to that user: it replaces **only** the `claudeAiOauth` block of that user's `~/.claude/.credentials.json`, leaving every other key (`mcpOAuth` among them) byte for byte, and it hands the rewritten file, the `.swap-backups` directory and the backups back to that user's uid and gid when the agent runs as root. It never touches `~/.claude.json`, which is why the card can keep showing the pre-swap account for a while.
 
-**The service runs but the host stays offline.** The agent dials out and pins the certificate, so check the pin first — a wrong `--pin` fails every connection. Re-run the installer with the pin the server prints now; a regenerated server certificate changes it.
+**The service runs but the host stays offline.** The agent dials out and pins the certificate, so check the pin first — a wrong `--pin` fails every connection. Re-run the installer with the pin the server prints now. Only `server cert renew` changes that pin; the server never replaces the pair on its own, and refuses to start (exit 5) on a pair it cannot load.
 
 ## Tests
 

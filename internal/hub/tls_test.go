@@ -143,6 +143,9 @@ func TestEnsureCertRefusesUnreadableKey(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits; the Windows deny-ACE case is TestEnsureCertRefusesUnreadableKeyWindows")
 	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 file, so the refusal cannot be provoked; run the suite as an ordinary user")
+	}
 	dir := t.TempDir()
 	certFixture(t, dir, time.Now().AddDate(10, 0, 0))
 	key := filepath.Join(dir, keyName)
@@ -150,8 +153,10 @@ func TestEnsureCertRefusesUnreadableKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(key, 0o600) })
+	// Asserted, not skipped on a successful read: CI runs without -v, so a skip here would make an
+	// uncovered case look like a pass. Root is the one environment that ignores the mode bits.
 	if _, err := os.ReadFile(key); err == nil {
-		t.Skipf("a 0000 mode does not deny this process (running as root?): %s stayed readable", keyName)
+		t.Fatalf("a 0000 mode left %s readable, so this test proves nothing", keyName)
 	}
 	before := pairSums(t, dir)
 	_, _, _, err := EnsureCert(dir)
@@ -458,9 +463,62 @@ func TestRenewCertLeavesNoTempFileOnAnInjectedFailure(t *testing.T) {
 	}
 }
 
+// The key is renamed into place BEFORE the certificate, so a failure between the two renames
+// leaves the NEW key beside the OLD certificate: two files, which is a MISMATCH and not the
+// incomplete pair the comment used to claim (that is the first-generation case, where there was
+// no old file to leave behind). Nothing makes a backup of the pair, so the message must not send
+// the operator looking for one.
+func TestRenewCertFailingOnTheSecondRenameLeavesAMismatchAndNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	certFixture(t, dir, time.Now().AddDate(10, 0, 0))
+	old := renameFn
+	calls := 0
+	renameFn = func(from, to string) error {
+		calls++
+		if calls == 2 {
+			return errors.New("injected failure on the second rename")
+		}
+		return old(from, to)
+	}
+	t.Cleanup(func() { renameFn = old })
+	if _, _, err := RenewCert(dir); err == nil {
+		t.Fatal("RenewCert reported success though the certificate rename failed")
+	}
+	renameFn = old
+	if calls != 2 {
+		t.Fatalf("renames attempted = %d, want 2 (key then certificate)", calls)
+	}
+	_, _, _, err := EnsureCert(dir)
+	if !errors.Is(err, ErrCertMismatch) {
+		t.Fatalf("err = %v, want ErrCertMismatch (the new key landed, the old certificate stayed)", err)
+	}
+	// It may say that no backup exists; it may not send the operator to restore one.
+	if strings.Contains(err.Error(), "from a backup") {
+		t.Fatalf("the message sends the operator to a backup nothing in this program writes: %v", err)
+	}
+	if !strings.Contains(err.Error(), "server cert renew") {
+		t.Fatalf("the message must name the only way out: %v", err)
+	}
+	ents, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("leftover temp file %s", e.Name())
+		}
+	}
+	if len(ents) != 2 {
+		t.Fatalf("cert dir holds %d entries, want the 2 files of the pair", len(ents))
+	}
+}
+
 func TestRenewCertRefusesAnUnreadablePair(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits; loadPair's Windows deny-ACE path is covered by TestEnsureCertRefusesUnreadableKeyWindows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 file, so the refusal cannot be provoked; run the suite as an ordinary user")
 	}
 	dir := t.TempDir()
 	certFixture(t, dir, time.Now().Add(-time.Hour)) // expired as well: renew must still refuse
@@ -469,8 +527,10 @@ func TestRenewCertRefusesAnUnreadablePair(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(key, 0o600) })
+	// Asserted, not skipped on a successful read: CI runs without -v, so a skip here would make an
+	// uncovered case look like a pass. Root is the one environment that ignores the mode bits.
 	if _, err := os.ReadFile(key); err == nil {
-		t.Skipf("a 0000 mode does not deny this process (running as root?): %s stayed readable", keyName)
+		t.Fatalf("a 0000 mode left %s readable, so this test proves nothing", keyName)
 	}
 	before := pairSums(t, dir)
 	if _, _, err := RenewCert(dir); !errors.Is(err, ErrCertUnreadable) {

@@ -72,13 +72,23 @@ func certRenewCmd(args []string, in io.Reader, out, errOut io.Writer) int {
 		return exitCodeFor(err)
 	}
 	if oldFP == "" {
+		// There was no certificate to read, so no fingerprint was ever published and there is
+		// nobody to re-enrol: the new pin is the whole story.
 		_, _ = fmt.Fprintf(out, "cert renew: there was no loadable pair; new certificate sha256=%s\n", newFP)
-	} else {
-		_, _ = fmt.Fprintf(out, "cert renew: old certificate sha256=%s\n", oldFP)
-		_, _ = fmt.Fprintf(out, "cert renew: new certificate sha256=%s\n", newFP)
+		return 0
 	}
-	_, _ = fmt.Fprintf(out, "cert renew: WARNING the pinned fingerprint has changed. Every enrolled agent must "+
-		"re-enrol with --pin %s; until it does, it refuses to connect.\n", newFP)
+	_, _ = fmt.Fprintf(out, "cert renew: old certificate sha256=%s\n", oldFP)
+	_, _ = fmt.Fprintf(out, "cert renew: new certificate sha256=%s\n", newFP)
+	// Order matters, and it is not the obvious one. A running server reads the pair once, when it
+	// opens its listener, and this version has no reload: it serves the OLD certificate until it
+	// is restarted. An agent re-enrolled on the new pin before that restart is an agent that
+	// cannot connect, so the restart is step 1 and the re-enrolment is step 2.
+	_, _ = fmt.Fprintln(out, "cert renew: WARNING the pinned fingerprint has changed.")
+	_, _ = fmt.Fprintln(out, "cert renew: 1. stop the server if it is running: it keeps serving the OLD pair "+
+		"until it is restarted, because the pair is loaded once at startup and never reloaded.")
+	_, _ = fmt.Fprintln(out, "cert renew: 2. start it again; it then serves the new pair.")
+	_, _ = fmt.Fprintf(out, "cert renew: 3. re-enrol every agent with --pin %s; until it does, it refuses "+
+		"to connect.\n", newFP)
 	return 0
 }
 
