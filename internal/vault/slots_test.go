@@ -1039,6 +1039,20 @@ func logLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
 	return out
 }
 
+// skipWarnings selects the "skipping a key slot" lines from a captured log. The open walk also logs
+// one line per KNOWN slot that was tried and failed (recoverDEK), which is a different fact about a
+// different slot, so a test about the skip warning counts those and not every line in the buffer.
+func skipWarnings(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range logLines(t, buf) {
+		if msg, _ := line["msg"].(string); strings.Contains(msg, "skipping a key slot") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
 // headerWithoutPassphraseSlots is the golden header with its one passphrase slot dropped: a header
 // this binary must still read and must refuse to write. It is built with encodeCompact rather than
 // marshalHeader because marshalHeader refusing it is the thing under test.
@@ -1133,9 +1147,9 @@ func TestUnknownSlotIsSkippedOnOpenWithAWarning(t *testing.T) {
 	if _, err := open(t, p, "pw"); !errors.Is(err, ErrBadKey) {
 		t.Fatalf("Open: want ErrBadKey, got %v", err)
 	}
-	lines := logLines(t, buf)
+	lines := skipWarnings(t, buf)
 	if len(lines) != 1 {
-		t.Fatalf("got %d log lines, want exactly one (one per unknown slot, none for a known one): %q",
+		t.Fatalf("got %d skip warnings, want exactly one (one per unknown slot, none for a known one): %q",
 			len(lines), buf.String())
 	}
 	line := lines[0]
@@ -1193,9 +1207,9 @@ func TestUnknownSlotWarningCannotBeSplicedByAHostileSlot(t *testing.T) {
 		t.Fatalf("Open: want ErrBadKey, got %v", err)
 	}
 	// One object on one line: logLines fails the test if either field broke out of its string.
-	lines := logLines(t, buf)
+	lines := skipWarnings(t, buf)
 	if len(lines) != 1 {
-		t.Fatalf("got %d log lines, want one: %q", len(lines), buf.String())
+		t.Fatalf("got %d skip warnings, want one: %q", len(lines), buf.String())
 	}
 	// The type comes back whole, and that is the assertion rather than a length bound: asciiType
 	// already caps a type at 255 bytes and logx caps a value at 256, so "is it under the cap" is a
@@ -1209,10 +1223,13 @@ func TestUnknownSlotWarningCannotBeSplicedByAHostileSlot(t *testing.T) {
 	if got != hostile {
 		t.Fatalf("slottype came back as %d bytes %q, want the 255 hostile bytes unchanged", len(got), got)
 	}
-	// And neither field spliced: the whole output is one line, so the id's embedded newline and
-	// every control-looking byte in the type were escaped by the encoder.
-	if strings.Count(strings.TrimRight(buf.String(), "\n"), "\n") != 0 {
-		t.Fatalf("the id's newline reached the output unescaped: %q", buf.String())
+	// And neither field spliced: every line in the output is one complete JSON object - logLines
+	// fails the test otherwise - so the count of objects equals the count of lines, which is the
+	// property that says the id's embedded newline and every control-looking byte in the type were
+	// escaped by the encoder rather than starting a line of their own. (The buffer holds more than
+	// one line now: the walk also logs the known slot it tried and failed.)
+	if want := strings.Count(strings.TrimRight(buf.String(), "\n"), "\n") + 1; len(logLines(t, buf)) != want {
+		t.Fatalf("the output is not one JSON object per line: %q", buf.String())
 	}
 }
 
