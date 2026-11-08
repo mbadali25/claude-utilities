@@ -276,6 +276,64 @@ func TestV2CrossMagicDoesNotUnwrap(t *testing.T) {
 	}
 }
 
+// Delete and ReplaceBlock are the two writes that copy the file's previous bytes to `.bak` first,
+// and `backup()` is deliberately format-blind: it copies the sealed envelope, header and all, so the
+// copy opens with the slots it had when it was written. That is what the spec's "the backup opens
+// with the keys the vault had when it was written" means, and PRs 8 and 9 lean on it, so it is
+// asserted on a v2 file rather than inferred from the v1 tests.
+func TestV2DeleteAndReplaceBlockKeepAReadableV2Backup(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mut  func(*testing.T, *Vault)
+	}{
+		{"Delete", func(t *testing.T, v *Vault) {
+			t.Helper()
+			if err := v.Delete("a"); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+		}},
+		{"ReplaceBlock", func(t *testing.T, v *Vault) {
+			t.Helper()
+			if err := v.ReplaceBlock("a", json.RawMessage(`{"accessToken":"`+secret+`"}`), acct("a").Updated); err != nil {
+				t.Fatalf("ReplaceBlock: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			p := writeFixture(t, dir, "vault.bin",
+				buildV2(t, magic, []byte(fileDEK), []v2Spec{passSpec("slot0001", "pw")},
+					accountsPayload(t, "a", "b")))
+			v, err := open(t, p, "pw")
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			tc.mut(t, v)
+			if got := fileMagic(t, p); got != v2VaultMagic {
+				t.Fatalf("the vault's magic became %q, want %q", got, v2VaultMagic)
+			}
+			bak := p + bakSuffix
+			if got := fileMagic(t, bak); got != v2VaultMagic {
+				t.Fatalf("the backup's magic is %q; backup() must copy the sealed envelope as it "+
+					"stands, header and all", got)
+			}
+			// The copy opens under the same key, which is the whole point of it being a byte copy.
+			old, err := open(t, bak, "pw")
+			if err != nil {
+				t.Fatalf("the v2 backup does not open: %v", err)
+			}
+			for _, id := range []string{"a", "b"} {
+				if _, ok := old.Get(id); !ok {
+					t.Fatalf("the backup lost account %q, so it is not the vault's previous state", id)
+				}
+			}
+			if _, err := open(t, p, "pw"); err != nil {
+				t.Fatalf("reopen the vault after the write: %v", err)
+			}
+		})
+	}
+}
+
 // --- the open order ---
 
 // The order the spec fixes: machine slots first, the passphrase last and only if a machine slot did
