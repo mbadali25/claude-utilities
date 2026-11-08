@@ -374,19 +374,69 @@ func TestOpenV2DoesNotAskForThePassphrase(t *testing.T) {
 
 // --- HostKeys ---
 
-// HostKeys is a declared signature with no body yet: it discards its options and returns nil on
-// every platform and for every input, because the dpapi opener is Task 3a.5 and the kek-file
-// opener is Task 3a.6. So this test cannot fail on any option or environment, and it does not
-// pretend to - it pins the placeholder itself. nil is what makes the passphrase fall-through work,
-// which is the behaviour a console run depends on today, and the test that distinguishes a
-// resolved credential from an unresolved one belongs to the task that can resolve one.
-func TestHostKeysIsAPlaceholderUntilSlot5(t *testing.T) {
-	for _, opts := range []HostKeyOptions{
-		{},
-		{CredentialName: "vault-kek", KEKFile: "/etc/claude-swap/kek", AllowRootCredsDecrypt: true},
-	} {
-		if got := HostKeys(opts); got != nil {
-			t.Fatalf("HostKeys(%+v) returned %d openers; it has no opener to return yet", opts, len(got))
+// HostKeys is this host's machine openers in try order, with the absent ones left out rather than
+// represented by a nil entry: the open flow skips an opener it has, and a nil in the slice would be
+// a nil dereference on the first slot of that type.
+//
+// What "absent" means is per platform and that is the design, not a gap: dpapiOpener answers nil off
+// Windows because DPAPI is a Windows API, and kekFileOpener answers nil when no KEK resolves. The
+// two together are what makes the passphrase fall-through work on a console run.
+//
+// AllowRootCredsDecrypt is deliberately not set anywhere here. It makes resolveKEK stat
+// /etc/credstore and /etc/credstore.encrypted, which on a real host is a live credential store; the
+// tests that exercise that route redirect credstoreDir and credstoreEncryptedDir (slot_kekfile_test.go).
+func TestHostKeysOmitsTheOpenersThisHostDoesNotHave(t *testing.T) {
+	t.Setenv(credentialsDirEnv, "")
+	t.Setenv(kekFileEnv, "")
+
+	// A platform's floor: with nothing configured, the only opener that can be there is the one the
+	// platform always has.
+	wantBare := []string{}
+	if dpapiOpener(dpapiScopeMachine) != nil {
+		wantBare = append(wantBare, slotTypeDPAPI)
+	}
+	if got := openerTypes(HostKeys(HostKeyOptions{})); !slicesEqual(got, wantBare) {
+		t.Fatalf("HostKeys with nothing configured gave %v, want %v", got, wantBare)
+	}
+	// nil and not an empty slice when there is nothing at all: the doc contract and the
+	// fall-through both read "no opener" off a nil.
+	if len(wantBare) == 0 && HostKeys(HostKeyOptions{}) != nil {
+		t.Fatal("HostKeys returned an empty non-nil slice; nil is how this package says 'no opener'")
+	}
+
+	// A resolvable KEK file adds the kek-file opener, and never a nil entry.
+	p := filepath.Join(t.TempDir(), "kek")
+	if err := os.WriteFile(p, bytes.Repeat([]byte{0x5e}, keyLen), 0o600); err != nil {
+		t.Fatalf("write kek file: %v", err)
+	}
+	got := HostKeys(HostKeyOptions{KEKFile: p})
+	for i, o := range got {
+		if o == nil {
+			t.Fatalf("HostKeys returned a nil opener at index %d", i)
 		}
 	}
+	if types := openerTypes(got); !slicesEqual(types, append(append([]string{}, wantBare...), slotTypeKEKFile)) {
+		t.Fatalf("HostKeys with a KEK file gave %v, want the platform's openers then %q",
+			types, slotTypeKEKFile)
+	}
+}
+
+func openerTypes(openers []SlotOpener) []string {
+	out := make([]string, 0, len(openers))
+	for _, o := range openers {
+		out = append(out, o.Type())
+	}
+	return out
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

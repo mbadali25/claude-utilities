@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/hkdf"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 )
 
@@ -222,6 +223,81 @@ func openSlot(kek, nonce, ct, aad []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: slot wrap held %d bytes, want a %d-byte key", errCorrupt, len(dek), keyLen)
 	}
 	return dek, nil
+}
+
+// symmetricWrapBytes decodes a symmetric slot's wrap: the nonce and the ciphertext, both padded
+// StdEncoding base64 of exactly the format's lengths. Both symmetric slot types go through it, so
+// there is one place that decides what a wrap of the wrong length is - malformed, not a bad key,
+// because a slot nobody could have written is not a key that did not fit.
+//
+// It names no slot type. A type is up to 255 bytes of attacker-chosen printable ASCII from a header
+// nothing has authenticated yet, and this message reaches stderr with no escaping around it; the
+// caller already knows which opener it is.
+func symmetricWrapBytes(slot Slot) (nonce, ct []byte, err error) {
+	nonce, err = base64.StdEncoding.DecodeString(slot.Wrap.Nonce)
+	if err != nil || len(nonce) != nonceLen {
+		return nil, nil, fmt.Errorf("%w: slot wrap nonce is not base64 of %d bytes", errCorrupt, nonceLen)
+	}
+	ct, err = base64.StdEncoding.DecodeString(slot.Wrap.CT)
+	if err != nil || len(ct) != wrapCTLen {
+		return nil, nil, fmt.Errorf("%w: slot wrap ct is not base64 of %d bytes", errCorrupt, wrapCTLen)
+	}
+	return nonce, ct, nil
+}
+
+// passphraseKEK derives a passphrase slot's key-encryption key: argon2id over the passphrase with
+// the slot's own recorded salt and cost. That KEK is then put through the same HKDF and the same
+// AES-256-GCM open as a machine slot's, so a passphrase slot and a kek-file slot differ in exactly
+// one step - where the 32 bytes come from - and share everything after it.
+//
+// The bounds are re-checked here through checkArgon2, the parser's own function, rather than trusted
+// from the parse. This is the one derivation an attacker-chosen number can make expensive, and it is
+// reachable from a fuzz target and from a caller holding a hand-built Slot; one more pass over three
+// integers costs nothing next to the derivation itself.
+func passphraseKEK(pass string, p Argon2Params) ([]byte, error) {
+	if pass == "" {
+		return nil, fmt.Errorf("%w: the key source returned an empty passphrase", ErrNoKey)
+	}
+	if err := checkArgon2(p); err != nil {
+		return nil, err
+	}
+	salt, err := base64.StdEncoding.DecodeString(p.Salt)
+	if err != nil || len(salt) != saltLen {
+		return nil, fmt.Errorf("%w: a passphrase slot's salt is not base64 of %d bytes", errCorrupt, saltLen)
+	}
+	//nolint:gosec // G115: checkArgon2 above bounds P to [minArgonPar, maxArgonPar], which is [1, 16].
+	return argon2IDKey([]byte(pass), salt, p.T, p.M, uint8(p.P), keyLen), nil
+}
+
+// passphraseSlotOpener is the SlotOpener for a passphrase slot. It is not a machine opener and never
+// appears in HostKeys: the open flow builds one from the passphrase the KeySource gave it, after
+// every machine slot has had its turn.
+//
+// It holds the passphrase for the length of one open. That is no worse than what already happens -
+// the key derived from it outlives the string - and it is never logged and never printed.
+type passphraseSlotOpener struct{ pass string }
+
+// Type is the only thing about this opener that may be logged or printed.
+func (passphraseSlotOpener) Type() string { return slotTypePassphrase }
+
+// Unwrap derives this slot's key-encryption key from the passphrase and opens the wrap under it.
+func (o passphraseSlotOpener) Unwrap(slot Slot, aad []byte) ([]byte, error) {
+	if slot.Type != slotTypePassphrase {
+		return nil, fmt.Errorf("%w: the passphrase opener was handed a slot of another type", errCorrupt)
+	}
+	if slot.Argon2id == nil {
+		return nil, fmt.Errorf("%w: a passphrase slot carries no argon2id parameters", errCorrupt)
+	}
+	kek, err := passphraseKEK(o.pass, *slot.Argon2id)
+	if err != nil {
+		return nil, err
+	}
+	defer zero(kek)
+	nonce, ct, err := symmetricWrapBytes(slot)
+	if err != nil {
+		return nil, err
+	}
+	return openSlot(kek, nonce, ct, aad)
 }
 
 // wrapAEAD builds the AES-256-GCM AEAD for one wrap key.

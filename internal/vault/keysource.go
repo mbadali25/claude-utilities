@@ -169,8 +169,29 @@ type HostKeyOptions struct {
 }
 
 // HostKeys returns the machine openers for this host, in try order, or nil when this host has
-// none. nil is what makes the passphrase fall-through work, and it is what this binary always
-// returns: the dpapi opener is Task 3a.5 and the kek-file opener is Task 3a.6, and a v1 header has
-// no slots for either of them to unwrap. The signature is here so the entry points of slice 4 can
-// be written against it without another public-interface change.
-func HostKeys(_ HostKeyOptions) []SlotOpener { return nil }
+// none. nil is what makes the passphrase fall-through work: a console run on a host with no machine
+// key gets no opener, so the open flow reaches the passphrase slot, which is the normal case.
+//
+// Absent openers are left OUT of the slice rather than carried in it as nil entries. The open flow
+// looks an opener up by its Type and calls it, so a nil in here would be a nil dereference on the
+// first slot of that type; and the "no slot could unwrap" message names the kinds that were tried,
+// which must not include a kind this host could never have satisfied.
+//
+// What "absent" means is per platform, by construction rather than by a GOOS branch here:
+// dpapiOpener answers nil off Windows, because DPAPI is a Windows API with no equivalent; and
+// kekFileOpener answers nil when no KEK resolves. A KEK that is configured and *unreachable* is not
+// absent - that opener is returned carrying its refusal, so the open reports ErrKEKUnreachable
+// instead of quietly asking for a passphrase.
+//
+// Nothing a default `server run` reaches calls this: cmd/server builds a vault.EnvKey, whose Machine
+// is nil. The service entry point of slice 4 is its first caller.
+func HostKeys(opts HostKeyOptions) []SlotOpener {
+	var out []SlotOpener
+	// Machine-held first, in the order the format's slot kinds are tried.
+	for _, o := range []SlotOpener{dpapiOpener(dpapiScopeMachine), kekFileOpener(opts)} {
+		if o != nil {
+			out = append(out, o)
+		}
+	}
+	return out
+}
