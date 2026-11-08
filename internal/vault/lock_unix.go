@@ -22,11 +22,23 @@ import (
 // in one process contend exactly as two processes do - which is what makes the lock testable.
 func lockHandle(f *os.File) error {
 	err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EACCES) {
+	if flockBusy(err) {
 		return errLockBusy
 	}
 	return err
 }
+
+// flockBusy reports whether a flock error means another open file description already holds the
+// lock. Only EWOULDBLOCK does - EAGAIN is its other name for the same value on Linux. EACCES is
+// not contention: it says this process may not lock the file, and calling that "busy" would print
+// `server is running (pid N, cmd ...)` from a holder line anyone can write, naming a process that
+// is not there, instead of the permission problem the operator has to fix.
+func flockBusy(err error) bool { return errors.Is(err, unix.EWOULDBLOCK) }
+
+// lockOpenNoFollow is the open flag that stops the lock file's open from following a symlink at the
+// final component. The kernel refuses with ELOOP instead, which closes the window between
+// AcquireLock's Lstat and its open.
+const lockOpenNoFollow = unix.O_NOFOLLOW
 
 func unlockHandle(f *os.File) error { return unix.Flock(int(f.Fd()), unix.LOCK_UN) }
 
@@ -40,10 +52,18 @@ func unlockHandle(f *os.File) error { return unix.Flock(int(f.Fd()), unix.LOCK_U
 // overlayfs all honour flock, but so do filesystems nobody has named yet, and an allowlist would
 // refuse to start a server on the next one rather than on a broken one. What cannot be read at all
 // is covered separately below.
+// The FUSE entries include the bare "fuse" and "fuseblk": a FUSE filesystem's flock is whatever the
+// userspace server chose to implement, and a mount table that names only "fuse" (an s3fs, rclone or
+// gvfs mount, a sandbox's own bind) says nothing about which. "drvfs" is how WSL names a Windows
+// drive it has mounted, which is the same shared-folder problem as vboxsf and vmhgfs. The clustered
+// filesystems (glusterfs, cephfs, lustre) are network filesystems by construction.
 var advisoryFilesystems = map[string]bool{
 	"nfs": true, "nfs2": true, "nfs3": true, "nfs4": true, "cifs": true, "smbfs": true,
-	"smb2": true, "smb3": true, "9p": true, "afs": true, "ncpfs": true, "coda": true,
-	"davfs": true, "fuse.sshfs": true, "fuse.davfs": true, "vboxsf": true,
+	"smb": true, "smb2": true, "smb3": true, "9p": true, "afs": true, "ncpfs": true,
+	"coda": true, "davfs": true, "fuse": true, "fuseblk": true, "fuse.sshfs": true,
+	"fuse.davfs": true, "fuse.s3fs": true, "fuse.rclone": true, "fuse.gvfsd": true,
+	"vboxsf": true, "virtiofs": true, "vmhgfs": true, "drvfs": true,
+	"glusterfs": true, "cephfs": true, "lustre": true,
 }
 
 // mountTable is the file the filesystem type is read from. A seam so a test can hand the probe a
@@ -66,6 +86,14 @@ func osProveExclusive(dataDir string) error {
 	if advisoryFilesystems[fsType] {
 		return fmt.Errorf("it is on %s, where flock is advisory-only or the server's to honour and cannot be proven exclusive", fsType)
 	}
+	// The same question, asked of the kernel instead of the mount table, and refused on either
+	// answer. The mount table is text a container, a bind mount or a chroot can make describe a
+	// mount this process is not on; statfs describes the directory. It can only add a refusal: a
+	// statfs that fails says nothing (see statfsNetworkFS), and one that says "local" does not
+	// rescue a mount table that said otherwise, because the refusals above have already returned.
+	if name, network := statfsNetworkFS(dataDir); network {
+		return fmt.Errorf("statfs reports it on %s, where an exclusive lock is the server's to honour and cannot be proven", name)
+	}
 	return nil
 }
 
@@ -74,7 +102,7 @@ func osProveExclusive(dataDir string) error {
 // "-" describe the mount, the mount point is the fifth of them, and the first field after the "-"
 // is the filesystem type.
 func filesystemType(path string) (string, error) {
-	abs, err := filepath.Abs(path)
+	abs, err := resolveForMountLookup(path)
 	if err != nil {
 		return "", err
 	}
@@ -109,6 +137,32 @@ func filesystemType(path string) (string, error) {
 		return "", errors.New("no mount point covers the path")
 	}
 	return bestType, nil
+}
+
+// resolveForMountLookup is the path the mount table is asked about: absolute, and with every
+// symlink resolved. A lexical path is not an answer to "which filesystem is this on" - a data dir
+// under /var/lib that is a link into an NFS mount reads back as the root filesystem's type, and the
+// one filesystem the probe exists to refuse is the one it would then allow.
+//
+// Two failure shapes, deliberately different. A path that is not there yet cannot be resolved and
+// is not lying about anything either - `vault init` takes the lock before the data dir exists, and
+// AcquireLock's own MkdirAll runs before the probe - so it keeps the lexical form. A path that is
+// there and still cannot be resolved (a dangling link, a component that cannot be traversed) is a
+// refusal: nothing here knows what it would land on, and "cannot prove exclusive" is the condition.
+func resolveForMountLookup(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return resolved, nil
+	}
+	// #nosec G703 -- abs is the operator's own --data-dir made absolute; this only asks whether it exists
+	if _, lerr := os.Lstat(filepath.Clean(abs)); errors.Is(lerr, os.ErrNotExist) {
+		return abs, nil
+	}
+	return "", fmt.Errorf("resolve %s: %w", abs, err)
 }
 
 // underMount reports whether path is at or below the mount point, on a component boundary: /datax

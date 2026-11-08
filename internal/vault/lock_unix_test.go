@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // mountinfoFixture is the shape /proc/self/mountinfo has, with the four lines that matter: a root
@@ -110,6 +112,95 @@ func TestFlockContendsBetweenTwoHandlesInOneProcess(t *testing.T) {
 		t.Fatal("a second handle took the lock")
 	}
 	_ = l
+}
+
+// A lexical path says nothing about the filesystem it lands on. A data dir that is a symlink into
+// an NFS mount reads back as the root filesystem's type unless the link is resolved first, and then
+// the one filesystem the probe exists to refuse is reported as able to hold an exclusive lock.
+func TestFilesystemTypeResolvesSymlinksBeforeTheMountLookup(t *testing.T) {
+	root := realTempDir(t)
+	share := filepath.Join(root, "share")
+	if err := os.MkdirAll(filepath.Join(share, "data"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(filepath.Join(share, "data"), link); err != nil {
+		t.Skipf("os.Symlink is not available here: %v", err)
+	}
+	// Only the real path is on the NFS mount; a lexical lookup on the link sees the root mount.
+	withMountTable(t, "28 1 8:2 / / rw,relatime - ext4 /dev/sda2 rw\n"+
+		"33 28 0:33 / "+share+" rw,relatime - nfs4 server:/export rw\n")
+
+	got, err := filesystemType(link)
+	if err != nil {
+		t.Fatalf("filesystemType(%q): %v", link, err)
+	}
+	if got != "nfs4" {
+		t.Fatalf("filesystemType(symlink into an NFS mount) = %q, want nfs4", got)
+	}
+	if err := osProveExclusive(link); err == nil {
+		t.Fatal("osProveExclusive reported a symlink into an NFS mount as able to hold an exclusive lock")
+	}
+}
+
+// A path that is there and still cannot be resolved is a refusal, not a fallback to the lexical
+// form: a dangling link at the data dir says nothing about what the lock would land on. A path that
+// does not exist at all is different - `vault init` probes before it creates - and keeps the
+// lexical answer.
+func TestFilesystemTypeRefusesAPathItCannotResolve(t *testing.T) {
+	withMountTable(t, mountinfoFixture)
+	root := realTempDir(t)
+	link := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "absent"), link); err != nil {
+		t.Skipf("os.Symlink is not available here: %v", err)
+	}
+	if got, err := filesystemType(link); err == nil {
+		t.Fatalf("filesystemType(dangling symlink) = %q, want a refusal", got)
+	}
+	if _, err := filesystemType(filepath.Join(root, "not-created-yet")); err != nil {
+		t.Fatalf("filesystemType on a path that does not exist yet = %v, want the lexical answer", err)
+	}
+}
+
+// The denylist is the list of filesystem types where flock is not this process's to rely on, and
+// the FUSE and shared-folder families were missing from it: a data dir on an s3fs or rclone mount,
+// a virtiofs or VMware shared folder, a clustered filesystem, or a Windows drive seen from WSL.
+func TestAdvisoryFilesystemsCoverTheFuseAndSharedFolderTypes(t *testing.T) {
+	for _, fs := range []string{
+		"fuse", "fuseblk", "fuse.s3fs", "fuse.rclone", "fuse.gvfsd",
+		"virtiofs", "vmhgfs", "glusterfs", "cephfs", "lustre", "smb", "drvfs",
+	} {
+		if !advisoryFilesystems[fs] {
+			t.Errorf("%s is not in advisoryFilesystems", fs)
+		}
+	}
+}
+
+// realTempDir is t.TempDir() with every symlink resolved, so a test that writes a mount table of
+// its own compares against the path the kernel would report rather than the one the OS handed out
+// (/tmp is a symlink on some systems).
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return real
+}
+
+// EACCES from flock is a permission failure, not contention. Mapping it to errLockBusy would make
+// AcquireLock print "server is running (pid N, cmd ...)" out of a holder line anyone who can write
+// the data dir can forge, naming a process that is not running, instead of the permission problem
+// the operator actually has.
+func TestFlockBusyIsOnlyContention(t *testing.T) {
+	if !flockBusy(unix.EWOULDBLOCK) {
+		t.Error("flockBusy(EWOULDBLOCK) = false: that is the contention error flock returns")
+	}
+	for _, err := range []error{nil, unix.EACCES, unix.EPERM, unix.EBADF, unix.ENOLCK, unix.EINTR} {
+		if flockBusy(err) {
+			t.Errorf("flockBusy(%v) = true, want false", err)
+		}
+	}
 }
 
 func TestUnescapeMountHandlesTheFourEscapes(t *testing.T) {
