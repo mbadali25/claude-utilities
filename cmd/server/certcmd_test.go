@@ -31,13 +31,16 @@ func seedPair(t *testing.T) (dataDir, fp string) {
 	return dataDir, fp
 }
 
+// pairBytes snapshots both PEM files. It fails rather than tolerating a read error: a nil for an
+// unreadable file would compare unequal to the same file read later and pass for a refusal the
+// command never made.
 func pairBytes(t *testing.T, dataDir string) [2][]byte {
 	t.Helper()
 	var out [2][]byte
 	for i, name := range []string{"server-cert.pem", "server-key.pem"} {
 		b, err := os.ReadFile(filepath.Join(dataDir, "tls", name))
 		if err != nil {
-			b = nil
+			t.Fatalf("snapshot %s: %v", name, err)
 		}
 		out[i] = b
 	}
@@ -87,6 +90,9 @@ func TestCertRenewOnAnUnreadablePairStillRefuses(t *testing.T) {
 	}
 	dataDir, _ := seedPair(t)
 	key := filepath.Join(dataDir, "tls", "server-key.pem")
+	// Captured while the pair is still readable: pairBytes cannot read a 0000 key, so a snapshot
+	// taken after the chmod would record nil for it and compare unequal for the wrong reason.
+	before := pairBytes(t, dataDir)
 	if err := os.Chmod(key, 0o000); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +100,6 @@ func TestCertRenewOnAnUnreadablePairStillRefuses(t *testing.T) {
 	if _, err := os.ReadFile(key); err == nil {
 		t.Skip("a 0000 mode does not deny this process (running as root?): the key stayed readable")
 	}
-	before := pairBytes(t, dataDir)
 	code, out := certRun([]string{"renew", "--data-dir", dataDir}, "renew\n")
 	if code != 5 {
 		t.Fatalf("code %d, want 5: %q", code, out)
