@@ -1,7 +1,11 @@
 package vault
 
 import (
+	"bytes"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -102,7 +106,7 @@ func TestPromptKeyReadsOneLineFromStdin(t *testing.T) {
 		{"s3cret\r\n", "s3cret"},
 		{"s3cret", "s3cret"}, // no trailing newline: EOF ends the line
 	} {
-		got, err := PromptKey(strings.NewReader(tc.in)).Passphrase()
+		got, err := PromptKey(strings.NewReader(tc.in), io.Discard).Passphrase()
 		if err != nil {
 			t.Fatalf("%q: Passphrase: %v", tc.in, err)
 		}
@@ -113,7 +117,7 @@ func TestPromptKeyReadsOneLineFromStdin(t *testing.T) {
 }
 
 func TestPromptKeyReturnsErrNoKeyOnEOF(t *testing.T) {
-	got, err := PromptKey(strings.NewReader("")).Passphrase()
+	got, err := PromptKey(strings.NewReader(""), io.Discard).Passphrase()
 	if !errors.Is(err, ErrNoKey) {
 		t.Fatalf("want ErrNoKey, got %v", err)
 	}
@@ -122,8 +126,120 @@ func TestPromptKeyReturnsErrNoKeyOnEOF(t *testing.T) {
 	}
 }
 
+// countingReader counts the Read calls a KeySource makes, so "the passphrase is read once for the
+// whole process" is asserted against stdin itself rather than inferred from two opens succeeding.
+type countingReader struct {
+	r     io.Reader
+	reads int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	c.reads++
+	return c.r.Read(p)
+}
+
+// cmd/server/main.go builds one KeySource in serve() and hands it to Open and then OpenKeyring,
+// because the keyring is sealed with the vault's passphrase. A single-use source makes that second
+// call fail on a drained stdin - the operator would be asked for the passphrase again, or, worse,
+// told there is none. One source, two sealed files, one read.
+func TestOnePromptKeyOpensTheVaultThenTheKeyringOnOneStdinRead(t *testing.T) {
+	dir := t.TempDir()
+	vp := filepath.Join(dir, "vault.bin")
+	kp := filepath.Join(dir, KeyringFileName)
+	t.Setenv(keyEnv, "pw")
+	v, err := Open(vp, EnvKey(keyEnv))
+	if err != nil {
+		t.Fatalf("seed Open: %v", err)
+	}
+	if err := v.Put(acct("a")); err != nil {
+		t.Fatalf("seed Put: %v", err)
+	}
+	seed, err := OpenKeyring(kp, EnvKey(keyEnv))
+	if err != nil {
+		t.Fatalf("seed OpenKeyring: %v", err)
+	}
+	if _, err := seed.Generate("h1"); err != nil {
+		t.Fatalf("seed Generate: %v", err)
+	}
+
+	in := &countingReader{r: strings.NewReader("pw\n")}
+	ks := PromptKey(in, io.Discard)
+	if _, err := Open(vp, ks); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	afterVault := in.reads
+	if afterVault == 0 {
+		t.Fatal("the vault open never read stdin")
+	}
+	k, err := OpenKeyring(kp, ks)
+	if err != nil {
+		t.Fatalf("OpenKeyring with the same KeySource: %v", err)
+	}
+	if _, ok := k.Get("h1"); !ok {
+		t.Fatal("the second open succeeded but lost the key")
+	}
+	if in.reads != afterVault {
+		t.Fatalf("the keyring open read stdin %d more times; the passphrase must be read once per process", in.reads-afterVault)
+	}
+}
+
+// The prompt line is written only on the terminal branch, and no test can own a real TTY on
+// Windows and Linux both, so the branch is forced and the text is read back off the injected
+// writer. What this pins is the text and where it goes. term.ReadPassword's no-echo read stays
+// unproven - it needs a TTY - and on this plain file it fails, which is why ErrNoKey is the
+// expected answer here.
+func TestPromptKeyWritesThePromptToTheInjectedWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-a-terminal")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+	var buf bytes.Buffer
+	ks := &promptKey{in: f, out: &buf, isTerminal: func(int) bool { return true }}
+	if _, err := ks.Passphrase(); !errors.Is(err, ErrNoKey) {
+		t.Fatalf("want ErrNoKey when the no-echo read fails, got %v", err)
+	}
+	got := buf.String()
+	if !strings.HasPrefix(got, "Vault passphrase (not echoed): ") {
+		t.Fatalf("the injected writer got %q; an operator must be told what is being asked for and "+
+			"that it will not echo", got)
+	}
+}
+
+// Nothing passes a writer yet, so the default is the one an operator actually meets. It must be
+// stderr: stdout may be a pipe a caller is parsing, and a prompt in it corrupts that stream.
+func TestPromptKeyWithNoWriterPromptsOnStderr(t *testing.T) {
+	p, ok := PromptKey(strings.NewReader(""), nil).(*promptKey)
+	if !ok {
+		t.Fatalf("PromptKey returned %T, not *promptKey", PromptKey(strings.NewReader(""), nil))
+	}
+	if p.writer() != os.Stderr {
+		t.Fatal("a PromptKey built with no writer must prompt on stderr")
+	}
+}
+
+// A piped run gets no prompt: there is nobody to read it, and the bytes would land in whatever the
+// caller pointed stderr at.
+func TestPromptKeyPipedInputWritesNoPrompt(t *testing.T) {
+	var buf bytes.Buffer
+	got, err := PromptKey(strings.NewReader("s3cret\n"), &buf).Passphrase()
+	if err != nil {
+		t.Fatalf("Passphrase: %v", err)
+	}
+	if got != "s3cret" {
+		t.Fatalf("got %q, want the piped line", got)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("a piped run wrote %q; the prompt belongs to the terminal branch only", buf.String())
+	}
+}
+
 func TestPromptKeyMachineIsNil(t *testing.T) {
-	if got := PromptKey(strings.NewReader("")).Machine(); got != nil {
+	if got := PromptKey(strings.NewReader(""), io.Discard).Machine(); got != nil {
 		t.Fatalf("PromptKey offered %d machine openers; it must offer none", len(got))
 	}
 }
@@ -223,14 +339,53 @@ func TestOpenKeyringUsesTheKeySource(t *testing.T) {
 	}
 }
 
+// A file written by a newer server is recognised from four bytes of magic, which needs no key, so
+// no key may be asked for. newerformat_test.go pins the error an operator gets; this pins that
+// nothing was asked to produce it. It matters more now than it did with an env var name: a
+// PromptKey would stop the run dead on a prompt that cannot open the file whatever is typed, and
+// telling an operator to set CLAUDESWAP_KEY for an unopenable file is how a correct passphrase
+// gets rotated out of confusion. Both magics, because each reader recognises only its own.
+func TestOpenV2DoesNotAskForThePassphrase(t *testing.T) {
+	dir := t.TempDir()
+	vp := writeFixture(t, dir, "vault.bin", v2Fixture(t))
+	kp := writeFixture(t, dir, KeyringFileName, withMagic(t, newerKeyringMagic))
+
+	vks := &recordingKeySource{pass: "pw"}
+	if _, err := Open(vp, vks); !errors.Is(err, ErrNewerFormat) {
+		t.Fatalf("Open: want ErrNewerFormat, got %v", err)
+	}
+	kks := &recordingKeySource{pass: "pw"}
+	if _, err := OpenKeyring(kp, kks); !errors.Is(err, ErrNewerFormat) {
+		t.Fatalf("OpenKeyring: want ErrNewerFormat, got %v", err)
+	}
+	for _, tc := range []struct {
+		what string
+		ks   *recordingKeySource
+	}{{"CSV2 vault", vks}, {"CSK2 keyring", kks}} {
+		if tc.ks.passCalls != 0 {
+			t.Fatalf("%s: Passphrase called %d times, want 0", tc.what, tc.ks.passCalls)
+		}
+		if tc.ks.machineCall != 0 {
+			t.Fatalf("%s: Machine called %d times, want 0", tc.what, tc.ks.machineCall)
+		}
+	}
+}
+
 // --- HostKeys ---
 
-// On this binary HostKeys has no opener to return on any platform: the dpapi opener is Task 3a.5
-// and the kek-file opener is Task 3a.6. nil is what makes the passphrase fall-through work, so the
-// nil case is the one worth pinning now - it is the behaviour a console run depends on.
-func TestHostKeysIsNilWhenNeitherCredentialNorFlagResolves(t *testing.T) {
-	t.Setenv("CREDENTIALS_DIRECTORY", "")
-	if got := HostKeys(HostKeyOptions{}); got != nil {
-		t.Fatalf("HostKeys returned %d openers with no credential directory and no --kek-file", len(got))
+// HostKeys is a declared signature with no body yet: it discards its options and returns nil on
+// every platform and for every input, because the dpapi opener is Task 3a.5 and the kek-file
+// opener is Task 3a.6. So this test cannot fail on any option or environment, and it does not
+// pretend to - it pins the placeholder itself. nil is what makes the passphrase fall-through work,
+// which is the behaviour a console run depends on today, and the test that distinguishes a
+// resolved credential from an unresolved one belongs to the task that can resolve one.
+func TestHostKeysIsAPlaceholderUntilSlot5(t *testing.T) {
+	for _, opts := range []HostKeyOptions{
+		{},
+		{CredentialName: "vault-kek", KEKFile: "/etc/claude-swap/kek", AllowRootCredsDecrypt: true},
+	} {
+		if got := HostKeys(opts); got != nil {
+			t.Fatalf("HostKeys(%+v) returned %d openers; it has no opener to return yet", opts, len(got))
+		}
 	}
 }

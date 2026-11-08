@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"golang.org/x/term"
 )
@@ -74,23 +75,68 @@ func (e envKey) Machine() []SlotOpener { return nil }
 // promptKey reads the passphrase from a terminal with no echo, or one line of stdin when stdin is
 // not a terminal, exactly as `server set-password` reads a password. It has no machine openers for
 // the same reason EnvKey has none: an operator at a console has the passphrase.
-type promptKey struct{ in io.Reader }
+//
+// The read happens once per source and the answer is kept, because one process opens two sealed
+// files with the same passphrase: cmd/server's serve() builds one KeySource and hands it to Open
+// and then OpenKeyring. A source that read stdin again would hit a drained pipe, or ask an
+// operator a second time for one startup.
+type promptKey struct {
+	in  io.Reader
+	out io.Writer
+	// isTerminal is term.IsTerminal unless a test replaces it. The prompt is written on the
+	// terminal branch only, and no test can own a real TTY on Windows and Linux both, so the
+	// branch has to be forceable for the prompt text to be asserted at all.
+	isTerminal func(fd int) bool
+	once       sync.Once
+	pass       string
+	err        error
+}
 
-// PromptKey returns a KeySource that asks for the passphrase interactively. It is for the operator
-// CLI; a service must never be given one, because a service has no terminal and a prompt there
-// would either block or silently read whatever stdin happens to be.
-func PromptKey(in io.Reader) KeySource { return promptKey{in: in} }
+// promptText is what an operator sees. It names the file being unlocked and promises no echo,
+// because a passphrase typed into a terminal that looks dead is retyped into the next one.
+const promptText = "Vault passphrase (not echoed): "
+
+// PromptKey returns a KeySource that asks for the passphrase interactively, writing its prompt to
+// out, or to os.Stderr when out is nil. The prompt never goes to stdout: stdout may be a pipe a
+// caller is parsing. It is for the operator CLI; a service must never be given one, because a
+// service has no terminal and a prompt there would either block or silently read whatever stdin
+// happens to be.
+//
+// The returned source reads its input at most once and then answers from memory, so one source can
+// open the vault and then the keyring. The passphrase therefore stays in this process's memory for
+// its lifetime - exactly as the environment variable it replaced did, and for the same reason: the
+// key derived from it outlives the string anyway. It is never logged and never printed.
+func PromptKey(in io.Reader, out io.Writer) KeySource { return &promptKey{in: in, out: out} }
+
+func (p *promptKey) writer() io.Writer {
+	if p.out == nil {
+		return os.Stderr
+	}
+	return p.out
+}
+
+func (p *promptKey) terminal(f *os.File) bool {
+	if p.isTerminal != nil {
+		return p.isTerminal(int(f.Fd()))
+	}
+	return term.IsTerminal(int(f.Fd()))
+}
 
 // maxStdinPassphrase bounds a piped passphrase so a stuck or hostile producer cannot be read
 // forever. Same bound, same reason, as cmd/server's piped password.
 const maxStdinPassphrase = 4 << 10
 
-func (p promptKey) Passphrase() (string, error) {
-	if f, ok := p.in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
-		// The prompt goes to stderr, not stdout: stdout may be a pipe a caller is parsing.
-		_, _ = fmt.Fprint(os.Stderr, "Vault passphrase (not echoed): ")
+func (p *promptKey) Passphrase() (string, error) {
+	p.once.Do(func() { p.pass, p.err = p.read() })
+	return p.pass, p.err
+}
+
+func (p *promptKey) read() (string, error) {
+	if f, ok := p.in.(*os.File); ok && p.terminal(f) {
+		out := p.writer()
+		_, _ = fmt.Fprint(out, promptText)
 		line, err := term.ReadPassword(int(f.Fd()))
-		_, _ = fmt.Fprintln(os.Stderr)
+		_, _ = fmt.Fprintln(out)
 		if err != nil {
 			return "", fmt.Errorf("%w: read passphrase: %w", ErrNoKey, err)
 		}
@@ -112,7 +158,7 @@ func (p promptKey) Passphrase() (string, error) {
 	return pass, nil
 }
 
-func (p promptKey) Machine() []SlotOpener { return nil }
+func (p *promptKey) Machine() []SlotOpener { return nil }
 
 // HostKeyOptions says where this host's machine-held key material may be found. CredentialName is
 // the file name to look for under $CREDENTIALS_DIRECTORY (systemd's LoadCredentialEncrypted),

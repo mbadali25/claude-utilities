@@ -72,6 +72,10 @@ type Vault struct {
 // variable name, PromptKey for an operator at a console. Open never writes to
 // disk.
 //
+// ks must not be nil. A nil KeySource is a programmer error, not an input error: there is no
+// sensible answer to "open this with no key source at all", and inventing one - falling back to an
+// environment variable, say - is the second way in that decision O1 removed on purpose. It panics.
+//
 // The payload is a JSON array of accounts and stays that way: a server that is rolled back must
 // still be able to read a vault a newer one has written, so tunnel keys live in their own file
 // (keyring.go) rather than in a new envelope here.
