@@ -79,15 +79,20 @@ func defaultDataDir() string {
 	return "claude-swap-server"
 }
 
-// Exit codes. 0 clean stop, 1 runtime failure, 2 bad usage or missing input, 5 certificate
-// refused. 3 (vault locked) and 4 (format) arrive with later slices of the cert-vault plan.
+// Exit codes. 0 clean stop, 1 runtime failure, 2 bad usage or missing input, 4 the vault was
+// written in a format this binary cannot read, 5 certificate refused. 3 (vault locked) arrives
+// with a later slice of the cert-vault plan, and 4 gains its other two causes there too (a v1
+// vault with no passphrase, and no vault and no passphrase).
+//
+// Every code a restart cannot fix is non-restarting on both OSes; only 1 is retried.
 const (
 	exitRuntime     = 1
+	exitNewerFormat = 4
 	exitCertRefused = 5
 )
 
 // run returns the process exit code: 0 clean stop, 1 runtime failure, 2 bad usage or missing
-// secrets, 5 a refused certificate.
+// secrets, 4 a vault this binary cannot read, 5 a refused certificate.
 func run(ctx context.Context, args []string, getenv func(string) string, in io.Reader, errOut io.Writer) int {
 	// The fixed subcommand name set. Anything else, a leading "-" included, goes to the flag
 	// parser below, so a bare `server --listen ...` keeps working for scripts/start-server.ps1.
@@ -141,15 +146,48 @@ func run(ctx context.Context, args []string, getenv func(string) string, in io.R
 	// This is the one place a serve error becomes an exit code, so it is the one place the
 	// `cert refused` line can carry both the reason and the code.
 	if err := serve(ctx, *listen, *dataDir, pw, *tunnels, *refreshTokens, parseRefreshAccounts(*refreshAccounts), *staleAfter, errOut); err != nil && !errors.Is(err, context.Canceled) {
+		if r := vaultReason(err); r != "" {
+			logx.New(errOut).Error("format", slog.String("reason", r))
+		}
 		reportCertError(errOut, "server", err)
 		return exitCodeFor(err)
 	}
 	return 0
 }
 
-// exitCodeFor maps a serve error to a process exit code. Later slices of the cert-vault plan
-// extend it (3 vault locked, 4 format); today only the certificate refusals leave exit 1.
-func exitCodeFor(err error) int { return certExitCode(err) }
+// exitCodeFor maps a serve error to a process exit code. It is the single mapping site: `serve`
+// returns errors unchanged and `run` is the only place an error becomes an int.
+//
+// The order is fixed rather than left to the reader: certificate refusals first (5), then the
+// vault rows (4, and 3 as a later slice extends them), then 1. The two domains are disjoint today
+// - the cert sentinels live in internal/hub, the vault sentinels in internal/vault, and no error
+// satisfies errors.Is against both - but fixing the order means an error that one day wraps both
+// resolves to the more specific refusal deterministically.
+func exitCodeFor(err error) int {
+	if c := certExitCode(err); c != exitRuntime {
+		return c
+	}
+	return vaultExitCode(err)
+}
+
+// vaultExitCode is 4 when the vault was written by a newer server and 1 for anything else. A
+// restart cannot make this binary read that format, so 4 sits outside the restart loop on both
+// OSes. A later slice adds 3 (no slot could unwrap) and 4's other two causes.
+func vaultExitCode(err error) int {
+	if errors.Is(err, vault.ErrNewerFormat) {
+		return exitNewerFormat
+	}
+	return exitRuntime
+}
+
+// vaultReason is the half of the case table an exit code cannot carry, and it is a fixed string:
+// the error text names a file this process could not read, so quoting it could quote file content.
+func vaultReason(err error) string {
+	if errors.Is(err, vault.ErrNewerFormat) {
+		return "newer-format"
+	}
+	return ""
+}
 
 // certExitCode is 5 for any of internal/hub's certificate refusals and 1 for anything else. A
 // restart cannot fix a refused certificate, so 5 sits outside the restart loop on both OSes.
