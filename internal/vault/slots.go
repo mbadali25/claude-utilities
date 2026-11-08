@@ -90,8 +90,10 @@ type DEKInfo struct {
 // Argon2id are omitted when empty, which is what makes one struct produce all three shapes the
 // spec's example shows.
 //
-// raw is the bytes this slot arrived as, kept so a header-changing save re-emits an untouched slot
-// unchanged - byte for byte, whether or not this binary understands its type.
+// It carries no copy of the bytes it was decoded from. Retention is Header.Slots' job: marshalHeader
+// re-emits every slot the caller did not name from that element's original json.RawMessage, so an
+// untouched slot is byte identical whether or not this binary understands its type. A second copy
+// on the decoded slot would be one more thing that could disagree with the first.
 type Slot struct {
 	ID       string        `json:"id"`
 	Type     string        `json:"type"`
@@ -100,8 +102,6 @@ type Slot struct {
 	Created  string        `json:"created"`
 	Argon2id *Argon2Params `json:"argon2id,omitempty"`
 	Wrap     WrapInfo      `json:"wrap"`
-
-	raw json.RawMessage `json:"-"`
 }
 
 // Argon2Params is a passphrase slot's recorded cost, so it can be raised later without a format
@@ -205,11 +205,21 @@ func parseHeader(raw []byte) (Header, []Slot, error) {
 	}
 	slots := make([]Slot, 0, len(h.Slots))
 	passphrases := 0
+	// Slot ids are unique within a header. The id is length-prefixed into every slot's AAD exactly
+	// so a slot cannot be moved between slots, and marshalHeader keys its `changed` map by id: a
+	// duplicate would make one slot operation land on two slots and leave "which slot opened this
+	// file" unanswerable in the audit line. Sized from the already-capped slot count, not from a
+	// number in the header.
+	ids := make(map[string]bool, len(h.Slots))
 	for _, elem := range h.Slots {
 		s, err := parseSlot(elem)
 		if err != nil {
 			return Header{}, nil, err
 		}
+		if ids[s.ID] {
+			return Header{}, nil, errCorrupt
+		}
+		ids[s.ID] = true
 		if s.Type == slotTypePassphrase {
 			passphrases++
 			if passphrases > maxPassphraseSlots {
@@ -230,7 +240,6 @@ func parseSlot(raw json.RawMessage) (Slot, error) {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return Slot{}, errCorrupt
 	}
-	s.raw = append(json.RawMessage(nil), raw...)
 	if err := decodeExactly(s.ID, slotIDLen); err != nil {
 		return Slot{}, err
 	}
@@ -263,17 +272,39 @@ func parseSlot(raw json.RawMessage) (Slot, error) {
 			return Slot{}, errCorrupt
 		}
 	}
-	if s.Type == slotTypePassphrase {
+	// `argon2id` belongs to a passphrase slot, is forbidden on the other two types this binary
+	// knows, and is none of this parser's business on a type it does not know.
+	//
+	// That last clause is the forward-compatibility rule, not laxness. An unknown slot is skipped on
+	// open and re-emitted from the bytes it arrived as, so a newer server's slot survives a round
+	// trip through this one; refusing the whole file over a member of a slot this binary will never
+	// derive from would break that for nothing. The bounds exist to keep a crafted cost out of the
+	// derivation, and the derivation is reachable only from the passphrase arm below.
+	switch s.Type {
+	case slotTypePassphrase:
 		if s.Argon2id == nil {
 			return Slot{}, errCorrupt
 		}
 		if err := checkArgon2(*s.Argon2id); err != nil {
 			return Slot{}, err
 		}
-	} else if s.Argon2id != nil {
-		return Slot{}, errCorrupt
+	case slotTypeDPAPI, slotTypeKEKFile:
+		if s.Argon2id != nil {
+			return Slot{}, errCorrupt
+		}
 	}
 	return s, nil
+}
+
+// knownSlotType reports whether this binary understands the type well enough to act on it. The one
+// list, so the parser's type-specific checks and the error string an operator sees cannot disagree
+// about what "unknown" means.
+func knownSlotType(t string) bool {
+	switch t {
+	case slotTypePassphrase, slotTypeDPAPI, slotTypeKEKFile:
+		return true
+	}
+	return false
 }
 
 // checkArgon2 bounds every recorded cost. This runs on the parsed integers, before anything is
@@ -307,8 +338,16 @@ func decodeExactly(field string, n int) error {
 // decision - the slot try order is fixed by kind, not by age - but an unparseable one means the
 // header was not written by anything that follows this format, and that is worth saying before any
 // crypto runs rather than after.
+//
+// As strict as nowString, deliberately: RFC 3339 in UTC at one-second precision with the Z
+// designator, and no other spelling. A zero offset or a fraction names the same instant, so
+// accepting one would not be wrong about the time - it would be a second spelling of a field the
+// byte-exact encoding rules give one, and two headers differing only there would stop being
+// byte-comparable. The round trip through Format is the check, so the two cannot drift: anything
+// nowString can emit passes, and anything that passes is what nowString would have emitted.
 func checkCreated(s string) error {
-	if _, err := time.Parse(time.RFC3339, s); err != nil {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil || t.UTC().Format(time.RFC3339) != s {
 		return errCorrupt
 	}
 	return nil
@@ -394,7 +433,25 @@ func marshalHeader(h Header, changed map[string]Slot) ([]byte, error) {
 		}
 		out.Slots = append(out.Slots, enc)
 	}
-	return encodeCompact(out)
+	b, err := encodeCompact(out)
+	if err != nil {
+		return nil, err
+	}
+	// The writer is held to the reader's bounds, by handing its own output to the reader. A file
+	// this binary wrote and cannot parse again is a vault nobody can open, and the slot caps are
+	// exactly what a caller adding slots in a loop walks past without noticing. Parsing the result
+	// is the single source of truth for "what the parser accepts"; a second copy of the caps here
+	// could fall out of step with parseHeader, which is the failure this guards against.
+	if _, _, err := parseHeader(b); err != nil {
+		return nil, err
+	}
+	// hdrLen is the one bound the parse cannot cover: rawHeaderOf checks it against the file's
+	// length prefix, which does not exist yet. Over the cap and the file would be unreadable even
+	// though its JSON parses.
+	if len(b) > maxHdrLen {
+		return nil, errCorrupt
+	}
+	return b, nil
 }
 
 // encodeSlot encodes one changed or added slot from its typed form. Only a slot the caller touched

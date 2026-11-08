@@ -47,6 +47,15 @@ var ErrNewerFormat = errors.New("vault: written by a newer server; downgrade wit
 //
 // Exported rather than renamed: errCorrupt is asserted by name in a dozen tests here, and a
 // rename would churn every one of them for no behaviour.
+//
+// Being the same value as errCorrupt widens exit 4 deliberately, and that is worth stating because
+// it is wider than the v2 header the spec's bound was written for. errCorrupt is also what the v1
+// path answers for a bad magic, a truncated file or a header shorter than magic+salt+nonce, so
+// those now exit 4 where they used to exit 1. That is the right code for all of them on the same
+// reasoning the spec gives for an out-of-bounds v2 number: a restart cannot make the bytes
+// readable, so the service units must not retry it, and "malformed" must never be reported as a
+// bad key, because an operator pushed towards rotating a correct passphrase is an Anti-goal.
+// The spec's exit table does not yet carry a `malformed` row for 4; the code and the runbook do.
 var ErrMalformed = errCorrupt
 
 // v2Magic is the v2 magic for the same kind of file as magicStr, or "" for a magic with no v2
@@ -167,16 +176,33 @@ func openSealedV2(data []byte) (*sealed, []byte, error) {
 		ErrBadKey, slotTypeList(slots))
 }
 
-// slotTypeList names the slot kinds in try order, for the one error an operator sees when nothing
-// opened the file. Types only: a slot's id, its wrapped bytes and its parameters never appear in an
-// error string.
+// slotTypeList names the known slot kinds in try order, then the number of slots whose type this
+// binary does not know, for the one error an operator sees when nothing opened the file. The count
+// is a trailing summary and not a position: an unknown type is tried with the machine slots, which
+// is to say first, and only the kinds before the count are in the order they were tried. Types
+// only: a slot's id, its wrapped bytes and its parameters never appear in an error string.
+//
+// Only the kinds this binary knows are named, and the rest are counted. A slot's `type` is up to
+// 255 bytes of attacker-chosen printable ASCII from a header that is not authenticated yet, and
+// this string goes to stderr, into a log line and into whatever an operator pastes into a ticket.
+// Echoing it back verbatim would hand a crafted header a line of the operator's output - which is
+// how a forged instruction or a stray control sequence gets in front of a human. The count is the
+// part that is actually useful anyway: it says a newer server put slots here that this one skipped.
 func slotTypeList(slots []Slot) string {
 	if len(slots) == 0 {
 		return "none"
 	}
-	out := make([]string, 0, len(slots))
+	out := make([]string, 0, len(slots)+1)
+	unknown := 0
 	for _, s := range tryOrder(slots) {
-		out = append(out, s.Type)
+		if knownSlotType(s.Type) {
+			out = append(out, s.Type)
+			continue
+		}
+		unknown++
+	}
+	if unknown > 0 {
+		out = append(out, fmt.Sprintf("%d unknown", unknown))
 	}
 	return strings.Join(out, ", ")
 }
