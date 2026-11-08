@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -132,9 +133,109 @@ func TestNonPrimitiveUnderAllowedKeyDropped(t *testing.T) {
 	}
 }
 
+// vaultKeys are the keys Task 3a.9 adds for the vault and the service. They are in the `allowed`
+// map literal, beside the twenty-six that were there before, rather than registered through Allow:
+// Allow is for a package registering its own field at init time, and a second place where the
+// base list lives is a second place for it to drift. Slice 8 adds `statedir`, `mech`, `operator`
+// and `setat` to the same literal, never a parallel list.
+var vaultKeys = []string{"slot", "slottype", "slots", "format", "service", "op", "exit", "datadir"}
+
+func TestNewKeysAreAllowed(t *testing.T) {
+	for _, k := range vaultKeys {
+		var buf bytes.Buffer
+		New(&buf).Info("x", k, "v-"+k)
+		m := logLine(t, &buf)
+		if m[k] != "v-"+k {
+			t.Errorf("%s = %v, want %q: %s", k, m[k], "v-"+k, buf.String())
+		}
+	}
+}
+
+// The new keys must also be registrable through Allow, because that is the check that says a key
+// name cannot carry a secret. A key already in `allowed` returns from Allow before the check runs,
+// so asserting Allow does not panic would prove nothing: the substrings are compared directly.
+// This is what rules out `exitcode` and is why the exit status is logged as `exit`.
+func TestNewKeysCarryNoForbiddenSubstring(t *testing.T) {
+	for _, k := range vaultKeys {
+		for _, p := range forbiddenKeyParts {
+			if strings.Contains(normKey(k), p) {
+				t.Errorf("key %q contains forbidden substring %q", k, p)
+			}
+		}
+	}
+}
+
+func TestExitcodeStillPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal(`Allow("exitcode") did not panic: "code" is a forbidden substring`)
+		}
+	}()
+	Allow("exitcode")
+}
+
+// A key naming key material is dropped by the allowlist whether or not anyone called Allow: Allow
+// guards the registration, the allowlist guards the emission, and a caller that never registers
+// still cannot log one.
+func TestForbiddenKeyIsDroppedEvenWithoutAllow(t *testing.T) {
+	var buf bytes.Buffer
+	New(&buf).Info("x",
+		"kek", "leakkek", "dek", "leakdek", "wrapNonce", "leakwrap", "dpapiBlob", "leakblob",
+		"passphrase", "leakpass", "nonce", "leaknonce")
+	out := buf.String()
+	for _, leak := range []string{"leakkek", "leakdek", "leakwrap", "leakblob", "leakpass", "leaknonce"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("leaked %q: %s", leak, out)
+		}
+	}
+	m := logLine(t, &buf)
+	for _, k := range []string{"kek", "dek", "wrapNonce", "dpapiBlob", "passphrase", "nonce"} {
+		if m[k] != "[dropped]" {
+			t.Errorf("%s = %v, want [dropped]: %s", k, m[k], out)
+		}
+	}
+}
+
+// "path" is deliberately not an allowlisted key. A path is logged under `datadir` (or `statedir`
+// in slice 8) after TildePath has taken the profile prefix off it; a general-purpose `path` would
+// be the one key through which a credentials file's location, and with it a username, slips out.
+func TestNoPathKeyExists(t *testing.T) {
+	if isAllowed("path") {
+		t.Fatal(`"path" is allowlisted: a path is logged as datadir, through TildePath`)
+	}
+}
+
+func TestTildePathReplacesTheProfilePrefix(t *testing.T) {
+	home := `C:\Users\swapper`
+	env := "USERPROFILE"
+	sep := `\`
+	if runtime.GOOS != "windows" {
+		home, env, sep = "/home/swapper", "HOME", "/"
+	}
+	t.Setenv(env, home)
+	cases := []struct{ in, want string }{
+		{home + sep + "AppData" + sep + "claude-swap", "~" + sep + "AppData" + sep + "claude-swap"},
+		{home, "~"},
+		{home + sep, "~" + sep},
+		{"/var/lib/claude-swap/data", "/var/lib/claude-swap/data"},
+		// A sibling whose name merely starts with the home's name keeps its own path.
+		{home + "2" + sep + "data", home + "2" + sep + "data"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := TildePath(c.in); got != c.want {
+			t.Errorf("TildePath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if strings.Contains(TildePath(home+sep+"AppData"), "swapper") {
+		t.Fatalf("TildePath left the username in the path")
+	}
+}
+
 func TestAllowRejectsSecretNames(t *testing.T) {
 	bad := []string{"accessToken", "clientSecret", "passWord", "passwd", "apiKey", "set_cookie", "sessionId",
-		"Authorization", "authHeader", "userEmail", "oauthCode", "credentials", "bearer", "block", ""}
+		"Authorization", "authHeader", "userEmail", "oauthCode", "credentials", "bearer", "block", "",
+		"kek", "dek", "wrapNonce", "dpapiBlob", "passphrase", "vaultKek", "slotNonce"}
 	for _, k := range bad {
 		func() {
 			defer func() {
