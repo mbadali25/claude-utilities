@@ -486,6 +486,15 @@ func TestResolveKEKNeverLogsThePathOrTheBytes(t *testing.T) {
 	if !slices.Contains(closed, route) {
 		t.Fatalf("route %q is not in the closed set %q", route, closed)
 	}
+	// Route() is what a mutator will read `reason` from, so it must be the same value resolveKEK
+	// reported and not a second, drifting copy.
+	op, ok := kekFileOpener(HostKeyOptions{CredentialName: "vault-kek", KEKFile: path}).(interface{ Route() string })
+	if !ok {
+		t.Fatal("the kek-file opener does not expose Route(), so a mutator has no reason to log")
+	}
+	if op.Route() != route {
+		t.Fatalf("Route() = %q, resolveKEK said %q", op.Route(), route)
+	}
 	for _, leak := range []string{path, dir, credstoreDir, credstoreEncryptedDir, kekCredstoreFile} {
 		if strings.Contains(route, leak) {
 			t.Fatalf("route %q carries %q", route, leak)

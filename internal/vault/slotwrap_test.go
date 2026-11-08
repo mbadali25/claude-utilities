@@ -2,7 +2,6 @@ package vault
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -372,15 +371,18 @@ func TestConstantRandReaderMakesTheNonceTestsFail(t *testing.T) {
 	// the uniqueness test for the wrong reason. Poisoning the seam here proves the test is wired to
 	// the randomness the implementation actually uses.
 	prev := randRead
-	randRead = func(b []byte) (int, error) {
-		for i := range b {
-			b[i] = 0x7e
-		}
-		return len(b), nil
-	}
-	t.Cleanup(func() { randRead = prev })
 
-	t.Run("a constant reader repeats a nonce", func(t *testing.T) {
+	// The poisoning is scoped to this function and restored by its own defer, not by t.Cleanup:
+	// cleanup runs after the whole test, so an assertion about the restore registered there would
+	// run before it and prove nothing.
+	func() {
+		randRead = func(b []byte) (int, error) {
+			for i := range b {
+				b[i] = 0x7e
+			}
+			return len(b), nil
+		}
+		defer func() { randRead = prev }()
 		nonces, err := wrapGenerations(3, 2)
 		if err != nil {
 			t.Fatalf("wrapGenerations: %v", err)
@@ -388,15 +390,20 @@ func TestConstantRandReaderMakesTheNonceTestsFail(t *testing.T) {
 		if dup := repeatedNonce(nonces); dup == nil {
 			t.Fatal("a constant rand reader produced no repeated nonce, so the uniqueness test is not wired to the seam")
 		}
-	})
+	}()
 
-	// And the seam is restorable: the real reader is back for everything after this test.
-	t.Run("the real reader is restored", func(t *testing.T) {
-		b := make([]byte, nonceLen)
-		if _, err := rand.Read(b); err != nil {
-			t.Fatalf("rand.Read: %v", err)
-		}
-	})
+	// And the seam really is back, so nothing after this test runs on a constant reader. Asserted
+	// through randRead itself - reading crypto/rand directly here would only prove crypto/rand works.
+	a, b := make([]byte, nonceLen), make([]byte, nonceLen)
+	if _, err := randRead(a); err != nil {
+		t.Fatalf("randRead: %v", err)
+	}
+	if _, err := randRead(b); err != nil {
+		t.Fatalf("randRead: %v", err)
+	}
+	if bytes.Equal(a, b) {
+		t.Fatal("randRead was left as the constant reader")
+	}
 }
 
 func TestSealSlotRefusesAMalformedAAD(t *testing.T) {
