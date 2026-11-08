@@ -41,8 +41,9 @@ import (
 // writes nothing - not a file, not a journal, not a byte in the data dir - and plainKEK selects the
 // rung for the command that creates a KEK, which is not this one (see the file comment).
 //
-// It returns the process exit code: 0 created or planned, 2 a refusal the operator fixes by changing
-// what is there or what they typed, 3 a file no slot opened after it was created, 1 anything else.
+// It returns the process exit code: 0 created or planned; 2 a refusal the operator fixes by changing
+// what is there or what they typed; 3 a file that no slot opened once it existed; 1 anything else,
+// including a file that opened and whose payload would not parse.
 func vaultInit(dataDir string, dryRun, plainKEK bool, stdin io.Reader, out io.Writer) int {
 	const op = "init"
 	lock, err := vault.AcquireLock(dataDir, op)
@@ -224,7 +225,10 @@ func verifyAfterInit(dataDir, pass string, out io.Writer) int {
 				if err != nil {
 					return mutatorExitCode(err)
 				}
-				return exitVaultLocked
+				// A false PayloadOK with no error of its own means the payload decrypted and did not
+				// parse. That is not "no slot opened it" (3) - a slot did - so it is the runtime code,
+				// and the exit table below says so.
+				return exitRuntime
 			}
 			_, _ = fmt.Fprintf(out, "vault init: %s opens under %s (%d entries)\n", name, c.label, res.Entries)
 		}

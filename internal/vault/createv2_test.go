@@ -312,18 +312,39 @@ func TestInitV2CreatesOwnerOnlyFiles(t *testing.T) {
 // A failure on the SECOND file undoes the first. Nothing existed before the call - that is checked -
 // so removing what this call itself created loses nothing, and it leaves a data dir `init` can be
 // run against again rather than one that refuses for ever.
+// The failure is injected through randRead rather than by making the second path unwritable, and
+// that is not a style choice: InitV2 stats BOTH paths before it creates either, and os.Stat on a
+// directory returns no error - so a directory at tunnelkeys.bin refuses at the pre-flight with
+// ErrVaultExists, having created nothing, and the rollback loop never runs. The stub below starves
+// the keyring of randomness the moment vault.bin exists, which lands the failure exactly where this
+// test says it does. The assertion that the error is NOT ErrVaultExists is what keeps it honest.
 func TestInitV2RemovesTheFirstFileWhenTheSecondFails(t *testing.T) {
 	dir := t.TempDir()
-	// A directory where tunnelkeys.bin must go: the create cannot succeed and cannot be mistaken for
-	// a vault, and it needs no injected seam.
-	if err := os.Mkdir(filepath.Join(dir, KeyringFileName), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	ks := initKeySource(t, initPass)
+	vaultPath := filepath.Join(dir, vaultFileName)
+
+	prev := randRead
+	randRead = func(b []byte) (int, error) {
+		if _, err := os.Stat(vaultPath); err == nil {
+			return 0, errors.New("injected: no randomness left for the keyring")
+		}
+		return prev(b)
 	}
-	if _, err := InitV2(dir, initPass, kekMachineSlot(), initKeySource(t, initPass)); err == nil {
-		t.Fatalf("InitV2 with an unwritable keyring path succeeded")
+	t.Cleanup(func() { randRead = prev })
+
+	_, err := InitV2(dir, initPass, kekMachineSlot(), ks)
+	if err == nil {
+		t.Fatal("InitV2 succeeded with the keyring's randomness starved")
 	}
-	if _, err := os.Stat(filepath.Join(dir, vaultFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("vault.bin survived a failed InitV2 (stat err %v)", err)
+	if errors.Is(err, ErrVaultExists) {
+		t.Fatalf("the failure landed at the pre-flight, not on the second file, so the rollback was "+
+			"never exercised: %v", err)
+	}
+	if _, serr := os.Stat(vaultPath); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("vault.bin survived a failed InitV2 (stat err %v)", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, KeyringFileName)); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("tunnelkeys.bin exists after the failure that created it (stat err %v)", serr)
 	}
 }
 

@@ -660,3 +660,41 @@ func watchJournalAtClear(t *testing.T, got *vault.VaultOp, saw *bool) func() {
 	}
 	return func() { clearJournalFn = prev }
 }
+
+// A journal `init` left behind - its verify failed after both files were created, so it is deliberately
+// not cleared - is settled by the next mutator rather than refused by it. The operator is already
+// being sent to `verify --all-slots` by the line init printed; a mutator that then refused for ever
+// would leave no way forward but deleting a file by hand.
+//
+// And the settle removes nothing: init'"'"'s journal carries no claim on a recovery copy, so the .bak
+// beside the vault is still there afterwards.
+func TestAMutatorSettlesAnInitJournalAndKeepsTheRecoveryCopy(t *testing.T) {
+	dir := twoSlotDir(t)
+	withPassphraseEnv(t)
+	bak := vaultPath(dir) + ".bak"
+	if err := os.WriteFile(bak, mustRead(t, vaultPath(dir)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := mustRead(t, bak)
+	if err := vault.WriteVaultOp(dir, vault.VaultOp{
+		Op: "init", Files: []string{"vault.bin", vault.KeyringFileName},
+		Stage: vault.StageRenamed}); err != nil {
+		t.Fatalf("WriteVaultOp: %v", err)
+	}
+	// add-slot, not rotate: a rotate re-seals the recovery copy itself, so the .bak changing would say
+	// nothing about what the settle did. add-slot never touches it, which makes any change the
+	// settle's.
+	var out bytes.Buffer
+	if code := vaultAddSlot(dir, slotTypePassphrase, false, strings.NewReader("a-new-passphrase\n"), &out); code != 0 {
+		t.Fatalf("exit %d, want 0: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "an interrupted init was settled") {
+		t.Fatalf("the settle is not reported: %s", out.String())
+	}
+	if !bytes.Equal(before, mustRead(t, bak)) {
+		t.Fatal("settling an init journal changed the recovery copy")
+	}
+	if _, ok, _ := vault.ReadVaultOp(dir); ok {
+		t.Fatal("the journal survived the command")
+	}
+}
