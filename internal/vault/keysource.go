@@ -46,10 +46,8 @@ type SlotOpener interface {
 	Unwrap(slot Slot, aad []byte) ([]byte, error)
 }
 
-// Slot is one key slot from a v2 header. Task 3a.2 owns its fields and is the authority on them;
-// it is declared here, opaque, because SlotOpener names it and nothing in this binary parses or
-// writes a v2 header yet.
-type Slot struct{}
+// Slot, which SlotOpener names, is the v2 header's key slot. It was declared opaque here while
+// nothing could parse a header; slots.go now owns its fields and the bounds on them.
 
 // envKey reads a passphrase from a named environment variable. The zero machine openers are the
 // point: a console run has a passphrase and needs no machine slot, so the fall-through to the

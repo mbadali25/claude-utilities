@@ -8,15 +8,17 @@ import (
 	"testing"
 )
 
-// Shelf life: two assertions here are deliberately temporary. Task 3a.2 of the cert-vault plan
-// makes CSV2 the current format, at which point a CSV2 file is no longer "newer" and
-// ErrNewerFormat moves to a header v other than 2. That task owns the inversion of
-// TestOpenV2VaultReturnsErrNewerFormat and TestOpenV2KeyringReturnsErrNewerFormat. Until then
-// these are correct for the window in which v1 is the current format.
+// The shelf life this file was written with has expired, as planned: Task 3a.2 made CSV2 the
+// current format, so a CSV2 file is no longer "written by a newer server" and ErrNewerFormat moved
+// from the magic to the header's `v`. The two assertions that said otherwise are inverted below
+// rather than deleted, and the `v != 2` half of ErrNewerFormat is pinned by TestClosedTopLevelHeader
+// in slots_test.go. TestErrNewerFormatMessageNamesDowngrade rides on that path now and is unchanged.
 
-// v2Fixture is the synthetic 40-byte "written by a newer server" header: the magic, a plausible
-// header length and filler. It holds no key material and no payload, nothing in it can be
-// decrypted, and nothing in this package may write a file in this format.
+// v2Fixture is the committed 40-byte CSV2 file: the magic, a header length of 24 and filler. It is
+// now what it always literally was - a **malformed** v2 header - and that is why it is kept rather
+// than retired: it says its header is 24 bytes long, which puts the whole file 20 bytes under the
+// 8 + hdrLen + 12 + 16 minimum, so it is the on-disk case for the length bound. It holds no key
+// material and no payload, and nothing in this package may write a file in this format.
 func v2Fixture(t *testing.T) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "newer-v2-header.bin"))
@@ -26,8 +28,8 @@ func v2Fixture(t *testing.T) []byte {
 	// Guards the one way this fixture rots silently: a checkout filter or an editor that prepends
 	// a BOM or rewrites line endings moves the magic off byte 0, and every test below then passes
 	// for the wrong reason.
-	if len(data) != 40 || !strings.HasPrefix(string(data), newerVaultMagic) {
-		t.Fatalf("fixture is %d bytes and does not start with %s", len(data), newerVaultMagic)
+	if len(data) != 40 || !strings.HasPrefix(string(data), v2VaultMagic) {
+		t.Fatalf("fixture is %d bytes and does not start with %s", len(data), v2VaultMagic)
 	}
 	return data
 }
@@ -51,37 +53,43 @@ func writeFixture(t *testing.T, dir, name string, data []byte) string {
 	return p
 }
 
-func TestOpenV2VaultReturnsErrNewerFormat(t *testing.T) {
+// The inversion. A CSV2 file is parsed now, so this fixture's 24-byte header claim against a
+// 40-byte file is a malformed v2 header: errCorrupt, and never ErrNewerFormat, because the magic no
+// longer names a writer this binary cannot follow.
+func TestOpenACSV2FileWithAMalformedHeaderIsErrCorrupt(t *testing.T) {
 	p := writeFixture(t, t.TempDir(), "vault.bin", v2Fixture(t))
 	_, err := open(t, p, "pw")
-	if !errors.Is(err, ErrNewerFormat) {
-		t.Fatalf("want ErrNewerFormat, got %v", err)
+	if !errors.Is(err, errCorrupt) {
+		t.Fatalf("want errCorrupt, got %v", err)
 	}
-	// "malformed vault file" is what sends an operator looking for a corrupt disk or a wrong
-	// passphrase. A newer format must never also report as malformed.
-	if errors.Is(err, errCorrupt) {
-		t.Fatalf("also reports as malformed: %v", err)
+	if errors.Is(err, ErrNewerFormat) {
+		t.Fatalf("still reports as a newer format: %v", err)
+	}
+	// Never a bad key either: a crafted header must not push an operator towards rotating a
+	// correct passphrase.
+	if errors.Is(err, ErrBadKey) {
+		t.Fatalf("reports a bad key for an unparseable header: %v", err)
 	}
 }
 
-func TestOpenV2KeyringReturnsErrNewerFormat(t *testing.T) {
+func TestOpenACSK2FileWithAMalformedHeaderIsErrCorrupt(t *testing.T) {
 	t.Setenv(keyEnv, "pw")
-	p := writeFixture(t, t.TempDir(), KeyringFileName, withMagic(t, newerKeyringMagic))
+	p := writeFixture(t, t.TempDir(), KeyringFileName, withMagic(t, v2KeyringMagic))
 	_, err := OpenKeyring(p, EnvKey(keyEnv))
-	if !errors.Is(err, ErrNewerFormat) {
-		t.Fatalf("want ErrNewerFormat, got %v", err)
+	if !errors.Is(err, errCorrupt) {
+		t.Fatalf("want errCorrupt, got %v", err)
 	}
-	if errors.Is(err, errCorrupt) {
-		t.Fatalf("also reports as malformed: %v", err)
+	if errors.Is(err, ErrNewerFormat) {
+		t.Fatalf("still reports as a newer format: %v", err)
 	}
 }
 
-// A newer magic is recognised only against the magic the caller asked for. Recognising either v2
+// A v2 magic is recognised only against the magic the caller asked for. Recognising either v2
 // magic in either reader would be the first step towards a keyring opening as a vault.
 func TestCrossMagicStillErrCorrupt(t *testing.T) {
 	t.Setenv(keyEnv, "pw")
 	dir := t.TempDir()
-	kp := writeFixture(t, dir, "keyring-bytes-in-a-vault-path.bin", withMagic(t, newerKeyringMagic))
+	kp := writeFixture(t, dir, "keyring-bytes-in-a-vault-path.bin", withMagic(t, v2KeyringMagic))
 	if _, err := Open(kp, EnvKey(keyEnv)); !errors.Is(err, errCorrupt) {
 		t.Fatalf("CSK2 opened as a vault: want errCorrupt, got %v", err)
 	}
@@ -108,29 +116,35 @@ func TestShortFileStillErrCorrupt(t *testing.T) {
 	}
 }
 
-// --- the order of the passphrase check against the magic check ---
+// --- the order of the passphrase check against the v2 branch ---
 //
-// Reading the magic needs no passphrase, so the one answer a v2 file must never produce is "set
-// environment variable": the operator would go and set a key for a file no key can open, and the
-// temptation after that is to rotate the passphrase. The three tests below pin the whole ordering,
-// not just the case that changed: the two that assert ErrNoKey are the regression pins for it.
+// Reading the magic and parsing a header need no passphrase, so the one answer a v2 file must never
+// produce is "set environment variable": the operator would go and set a key for a file whose
+// header cannot be read, and the temptation after that is to rotate the passphrase. The four tests
+// below pin the whole ordering, not just the cases that changed: the two that assert ErrNoKey are
+// the regression pins for it.
 
-func TestOpenV2VaultWithNoKeyStillReportsNewerFormat(t *testing.T) {
+func TestOpenAMalformedCSV2WithNoKeyStillReportsMalformed(t *testing.T) {
 	p := writeFixture(t, t.TempDir(), "vault.bin", v2Fixture(t))
 	_, err := open(t, p, "")
-	if !errors.Is(err, ErrNewerFormat) {
-		t.Fatalf("want ErrNewerFormat, got %v - that answer sends the operator to set a key for "+
-			"a file no key opens", err)
+	if !errors.Is(err, errCorrupt) {
+		t.Fatalf("want errCorrupt, got %v - any other answer sends the operator to set a key for "+
+			"a file whose header cannot be read", err)
+	}
+	if errors.Is(err, ErrNoKey) {
+		t.Fatalf("the header answer moved behind the key check: %v", err)
 	}
 }
 
-func TestOpenV2KeyringWithNoKeyStillReportsNewerFormat(t *testing.T) {
+func TestOpenAMalformedCSK2WithNoKeyStillReportsMalformed(t *testing.T) {
 	t.Setenv(keyEnv, "")
-	p := writeFixture(t, t.TempDir(), KeyringFileName, withMagic(t, newerKeyringMagic))
+	p := writeFixture(t, t.TempDir(), KeyringFileName, withMagic(t, v2KeyringMagic))
 	_, err := OpenKeyring(p, EnvKey(keyEnv))
-	if !errors.Is(err, ErrNewerFormat) {
-		t.Fatalf("want ErrNewerFormat, got %v - that answer sends the operator to set a key for "+
-			"a file no key opens", err)
+	if !errors.Is(err, errCorrupt) {
+		t.Fatalf("want errCorrupt, got %v", err)
+	}
+	if errors.Is(err, ErrNoKey) {
+		t.Fatalf("the header answer moved behind the key check: %v", err)
 	}
 }
 

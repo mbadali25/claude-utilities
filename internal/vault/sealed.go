@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/crypto/argon2"
 
@@ -24,36 +24,60 @@ import (
 // older server binary would then read it as corrupt - which deletes the rollback the tunnels
 // migration depends on at every step.
 
-// newerVaultMagic and newerKeyringMagic are the magic strings the next format version writes.
-// This binary cannot read either file; it recognises the magic only so it can say which binary
-// wrote it. They are deliberately not in vault.go's const block with `magic`: nothing here may
-// ever write one.
+// v2VaultMagic and v2KeyringMagic are the v2 format's magic strings. This binary now reads both -
+// the header parser lives in slots.go - and writes neither: `server vault init` is the only thing
+// that will ever create a v2 file. They are deliberately not in vault.go's const block with
+// `magic`, which is the one magic a write path here may use.
 const (
-	newerVaultMagic   = "CSV2"
-	newerKeyringMagic = "CSK2"
+	v2VaultMagic   = "CSV2"
+	v2KeyringMagic = "CSK2"
 )
 
-// ErrNewerFormat means the file was written by a server newer than this one. It is not errCorrupt:
-// "malformed vault file" sends an operator looking for a corrupt disk or a wrong passphrase, and
-// the one thing that must not happen is a correct passphrase being rotated out of confusion.
+// ErrNewerFormat means the file was written by a server newer than this one. Since v2 landed the
+// condition is the header's `v`, not the magic: a `v` other than 2, or a top-level member this
+// binary does not know, is a header written by something newer. It is not errCorrupt: "malformed
+// vault file" sends an operator looking for a corrupt disk or a wrong passphrase, and the one
+// thing that must not happen is a correct passphrase being rotated out of confusion.
 var ErrNewerFormat = errors.New("vault: written by a newer server; downgrade with `server vault downgrade` on the newer binary")
 
-// newerMagic is the magic the next format version writes for the same kind of file, or "" for a
-// magic with no newer counterpart. One function, so there is no place a reader can accept the
-// other file's newer magic.
-func newerMagic(magicStr string) string {
+// ErrMalformed is the exported face of errCorrupt, for the one caller outside this package that
+// has to tell a file this binary cannot parse from a runtime failure: cmd/server maps it to exit 4,
+// the same code a newer format gets, because a restart cannot make either readable. It is the same
+// error value, so errors.Is matches both names.
+//
+// Exported rather than renamed: errCorrupt is asserted by name in a dozen tests here, and a
+// rename would churn every one of them for no behaviour.
+//
+// Being the same value as errCorrupt widens exit 4 deliberately, and that is worth stating because
+// it is wider than the v2 header the spec's bound was written for. errCorrupt is also what the v1
+// path answers for a bad magic, a truncated file or a header shorter than magic+salt+nonce, so
+// those now exit 4 where they used to exit 1. That is the right code for all of them on the same
+// reasoning the spec gives for an out-of-bounds v2 number: a restart cannot make the bytes
+// readable, so the service units must not retry it, and "malformed" must never be reported as a
+// bad key, because an operator pushed towards rotating a correct passphrase is an Anti-goal.
+// The spec's exit table does not yet carry a `malformed` row for 4; the code and the runbook do.
+var ErrMalformed = errCorrupt
+
+// v2Magic is the v2 magic for the same kind of file as magicStr, or "" for a magic with no v2
+// counterpart. One function, so there is no place a reader can accept the other file's v2 magic.
+func v2Magic(magicStr string) string {
 	switch magicStr {
 	case magic:
-		return newerVaultMagic
+		return v2VaultMagic
 	case keyringMagic:
-		return newerKeyringMagic
+		return v2KeyringMagic
 	}
 	return ""
 }
 
+// argon2IDKey is argon2.IDKey unless a test replaces it. The seam exists so a test can prove the
+// header's recorded cost never reaches the derivation: a parameter out of bounds must be refused on
+// the parsed integer, not by the allocator inside argon2id.
+var argon2IDKey = argon2.IDKey
+
 // deriveAEAD derives the file key from the passphrase and salt and returns the AEAD.
 func deriveAEAD(pass string, salt []byte) (cipher.AEAD, error) {
-	key := argon2.IDKey([]byte(pass), salt, argonTime, argonMem, argonPar, keyLen)
+	key := argon2IDKey([]byte(pass), salt, argonTime, argonMem, argonPar, keyLen)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("vault: cipher: %w", err)
@@ -76,18 +100,14 @@ type sealed struct {
 // yields a fresh salt and nil plaintext, and nothing is written to disk. magic must be 4 bytes.
 func openSealed(path, magicStr string, ks KeySource) (*sealed, []byte, error) {
 	data, readErr := os.ReadFile(filepath.Clean(path))
-	// Before the header is parsed, before anything is allocated for it, before the key is derived
-	// and - the whole point of being first - before the passphrase is even looked for: a file
-	// written by a newer server says so, rather than looking malformed or looking like a missing
-	// key. Reading four bytes of magic needs no passphrase, and telling an operator to "set
-	// environment variable CLAUDESWAP_KEY" for a file no key can open is how a correct passphrase
-	// ends up rotated out of confusion. Keyed on the magic this caller asked for, so a keyring's
-	// magic in a vault's path stays errCorrupt. HasPrefix, not a slice compare: a file shorter
-	// than the magic must not index past its end. A truncated CSV2 file is still reported as
-	// newer - the magic alone names the writer, and this binary cannot tell a truncated v2 file
-	// from a complete one either way.
-	if nm := newerMagic(magicStr); readErr == nil && nm != "" && bytes.HasPrefix(data, []byte(nm)) {
-		return nil, nil, ErrNewerFormat
+	// The v2 branch comes before the passphrase is even looked for, and that ordering is the point:
+	// reading the magic and parsing the header need no passphrase, and telling an operator to "set
+	// environment variable CLAUDESWAP_KEY" for a file whose header is unreadable is how a correct
+	// passphrase ends up rotated out of confusion. Keyed on the magic this caller asked for, so a
+	// keyring's magic in a vault's path stays errCorrupt. HasPrefix, not a slice compare: a file
+	// shorter than the magic must not index past its end.
+	if v2 := v2Magic(magicStr); readErr == nil && v2 != "" && bytes.HasPrefix(data, []byte(v2)) {
+		return openSealedV2(data)
 	}
 	// Everything below here keeps the order it had before the magic test moved above it: a file
 	// this binary might be able to read asks for the passphrase first, so a missing key still
@@ -96,8 +116,7 @@ func openSealed(path, magicStr string, ks KeySource) (*sealed, []byte, error) {
 	// The passphrase comes from the KeySource and its error is returned unchanged: the source knows
 	// what it tried and names it (EnvKey names the variable, PromptKey says stdin was empty), and
 	// wrapping that again here would bury the one detail an operator acts on. Machine key slots are
-	// not consulted: a v1 header has none, so there is nothing for an opener to unwrap. Task 3a.2's
-	// v2 header is where the slots-then-passphrase order starts to mean something.
+	// not consulted: a v1 header has none, so there is nothing for an opener to unwrap.
 	pass, err := ks.Passphrase()
 	if err != nil {
 		return nil, nil, err
@@ -114,7 +133,7 @@ func openSealed(path, magicStr string, ks KeySource) (*sealed, []byte, error) {
 	s := &sealed{path: path}
 	if len(data) == 0 {
 		s.salt = make([]byte, saltLen)
-		if _, rerr := rand.Read(s.salt); rerr != nil {
+		if _, rerr := randRead(s.salt); rerr != nil {
 			return nil, nil, fmt.Errorf("vault: salt: %w", rerr)
 		}
 		s.aead, err = deriveAEAD(pass, s.salt)
@@ -135,13 +154,66 @@ func openSealed(path, magicStr string, ks KeySource) (*sealed, []byte, error) {
 	return s, plain, nil
 }
 
+// openSealedV2 reads a v2 file's header and says what it found.
+//
+// It does not yet recover the data key. The slot wrap and the three slot openers are later tasks,
+// so a well-formed v2 header this binary can parse has no slot it can unwrap and the answer is
+// ErrBadKey, naming the slot types it would have tried and no value from any of them. That is the
+// honest answer and it is the one the spec's open flow gives when no slot works; what changes when
+// the openers land is that some of them succeed.
+//
+// No passphrase is asked for on this path at all: every answer here is reachable from the bytes.
+func openSealedV2(data []byte) (*sealed, []byte, error) {
+	_, headerJSON, err := rawHeaderOf(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	_, slots, err := parseHeader(headerJSON)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, nil, fmt.Errorf("%w: no slot could unwrap the data key (slot types tried: %s)",
+		ErrBadKey, slotTypeList(slots))
+}
+
+// slotTypeList names the known slot kinds in try order, then the number of slots whose type this
+// binary does not know, for the one error an operator sees when nothing opened the file. The count
+// is a trailing summary and not a position: an unknown type is tried with the machine slots, which
+// is to say first, and only the kinds before the count are in the order they were tried. Types
+// only: a slot's id, its wrapped bytes and its parameters never appear in an error string.
+//
+// Only the kinds this binary knows are named, and the rest are counted. A slot's `type` is up to
+// 255 bytes of attacker-chosen printable ASCII from a header that is not authenticated yet, and
+// this string goes to stderr, into a log line and into whatever an operator pastes into a ticket.
+// Echoing it back verbatim would hand a crafted header a line of the operator's output - which is
+// how a forged instruction or a stray control sequence gets in front of a human. The count is the
+// part that is actually useful anyway: it says a newer server put slots here that this one skipped.
+func slotTypeList(slots []Slot) string {
+	if len(slots) == 0 {
+		return "none"
+	}
+	out := make([]string, 0, len(slots)+1)
+	unknown := 0
+	for _, s := range tryOrder(slots) {
+		if knownSlotType(s.Type) {
+			out = append(out, s.Type)
+			continue
+		}
+		unknown++
+	}
+	if unknown > 0 {
+		out = append(out, fmt.Sprintf("%d unknown", unknown))
+	}
+	return strings.Join(out, ", ")
+}
+
 // bakSuffix names the one-deep recovery copy kept beside a sealed file before a destructive write.
 const bakSuffix = ".bak"
 
 // write seals plain with a fresh nonce and replaces the file atomically, owner-only.
 func (s *sealed) write(magicStr string, plain []byte) error {
 	nonce := make([]byte, nonceLen)
-	if _, err := rand.Read(nonce); err != nil {
+	if _, err := randRead(nonce); err != nil {
 		return fmt.Errorf("vault: nonce: %w", err)
 	}
 	header := append([]byte(magicStr), s.salt...)
