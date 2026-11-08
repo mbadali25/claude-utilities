@@ -40,7 +40,13 @@ const (
 )
 
 // usageText is the command summary; the name avoids the internal/usage import.
-const usageText = `usage: server <flags> | server set-password [--data-dir DIR] | server cert renew [--data-dir DIR]
+const usageText = `usage: server run <flags> | server <flags> | server set-password [--data-dir DIR]
+       server cert renew [--data-dir DIR] | server vault <subcommand> [--data-dir DIR]
+  run                    run the hub and admin UI. This is the preferred form; the bare flag form
+                         below is kept unchanged for existing scripts (scripts/start-server.ps1 and
+                         the e2e start script pass --listen with no subcommand).
+  vault <subcommand>     status, verify, add-slot, remove-slot, rotate, change-passphrase.
+                         Run "server vault" with no subcommand to list them.
   --listen host:port     run the hub and admin UI (required, no default)
   --data-dir DIR         vault, host list, TLS certificate and admin password hash
   --tunnels              supervise the reverse SSH tunnels to the Linux hosts, and
@@ -92,23 +98,58 @@ func defaultDataDir() string {
 // restart behaviour of a packaged install is whatever those units end up saying.
 const (
 	exitRuntime     = 1
+	exitUsage       = 2
+	exitVaultLocked = 3
 	exitNewerFormat = 4
 	exitCertRefused = 5
 )
 
+// A subcommand is one member of the fixed name set. One signature for all of them so the table
+// below is data a test can walk: the guard it enforces is "no name without an owner, and no owner
+// without a name", in either direction.
+type subcommand func(ctx context.Context, args []string, getenv func(string) string, in io.Reader, errOut io.Writer) int
+
+// dispatchTable is the fixed subcommand name set. Decision 13: these names and nothing else;
+// anything else, a leading "-" included, goes to the flag parser, so a bare `server --listen ...`
+// keeps working for scripts/start-server.ps1 and the e2e start script.
+//
+// Five names, three owners. `set-password` and `cert` were here already, `run` and `vault` are this
+// slice's, and `service` joins in slice 4 with `server service install`. A name is registered only
+// by the task that has a handler for it: a name in this table with nothing behind it would be a
+// subcommand that exists in the usage text and fails at the prompt.
+func dispatchTable() map[string]subcommand {
+	return map[string]subcommand{
+		"run": func(ctx context.Context, args []string, getenv func(string) string, _ io.Reader, errOut io.Writer) int {
+			return serveCmd(ctx, args, getenv, errOut)
+		},
+		"set-password": func(_ context.Context, args []string, _ func(string) string, in io.Reader, errOut io.Writer) int {
+			return setPasswordCmd(args, in, errOut)
+		},
+		"cert": func(_ context.Context, args []string, _ func(string) string, in io.Reader, errOut io.Writer) int {
+			return certCmd(args, in, errOut, errOut)
+		},
+		"vault": func(_ context.Context, args []string, _ func(string) string, in io.Reader, errOut io.Writer) int {
+			return vaultCmd(args, in, errOut, errOut)
+		},
+	}
+}
+
 // run returns the process exit code: 0 clean stop, 1 runtime failure, 2 bad usage or missing
-// secrets, 4 a vault this binary cannot read, 5 a refused certificate.
+// secrets, 3 a vault no slot could unwrap, 4 a vault this binary cannot read, 5 a refused
+// certificate.
 func run(ctx context.Context, args []string, getenv func(string) string, in io.Reader, errOut io.Writer) int {
-	// The fixed subcommand name set. Anything else, a leading "-" included, goes to the flag
-	// parser below, so a bare `server --listen ...` keeps working for scripts/start-server.ps1.
 	if len(args) > 0 {
-		switch args[0] {
-		case "set-password":
-			return setPasswordCmd(args[1:], in, errOut)
-		case "cert":
-			return certCmd(args[1:], in, errOut, errOut)
+		if handler, ok := dispatchTable()[args[0]]; ok {
+			return handler(ctx, args[1:], getenv, in, errOut)
 		}
 	}
+	return serveCmd(ctx, args, getenv, errOut)
+}
+
+// serveCmd parses the console run's flags and serves. It is reached two ways and must behave
+// identically through both: `server run --listen ...` and the bare `server --listen ...` that every
+// existing script uses.
+func serveCmd(ctx context.Context, args []string, getenv func(string) string, errOut io.Writer) int {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 	listen := fs.String("listen", "", "host:port to listen on (required, no default)")
@@ -172,7 +213,8 @@ func exitCodeFor(err error) int {
 	return vaultExitCode(err)
 }
 
-// vaultExitCode is 4 when this binary cannot read the vault's format and 1 for anything else.
+// vaultExitCode is 4 when this binary cannot read the vault's format, 3 when a key slot's key is
+// configured and out of reach, and 1 for anything else.
 // Two causes share the code: a header written by a newer server, and a header that is malformed -
 // which since the v2 parser landed includes every out-of-bounds number in a v2 header. A restart
 // cannot make either readable, so 4 is one of the codes the service units of slices 4 and 8 must
@@ -184,6 +226,19 @@ func exitCodeFor(err error) int {
 func vaultExitCode(err error) int {
 	if errors.Is(err, vault.ErrNewerFormat) || errors.Is(err, vault.ErrMalformed) {
 		return exitNewerFormat
+	}
+	// 3 is the spec's "vault locked" row: a kek-file slot is configured and this process cannot
+	// reach its key, which is the machine-key loss case (a restored data dir, a cleared TPM, a lost
+	// credential.secret). A restart cannot fix it, so it is one of the codes the service units keep
+	// out of their restart loop, and it must never be reported as a bad key - the fix is a root
+	// shell, a mode bit or `server vault add-slot`, never rotating a passphrase that is correct.
+	//
+	// ErrBadKey keeps exit 1 here deliberately: on the console path it is a wrong CLAUDESWAP_KEY,
+	// which is an operator's typo and not a locked vault. The service entry point of slice 4, which
+	// has no passphrase at all and for which "no slot could unwrap" IS the locked state, maps it
+	// with the rest of its own table.
+	if errors.Is(err, vault.ErrKEKUnreachable) {
+		return exitVaultLocked
 	}
 	return exitRuntime
 }
