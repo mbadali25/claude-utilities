@@ -162,29 +162,52 @@ func refuseExisting(path string) error {
 // with no passphrase slot is ErrNoRecoverySlot.
 func createSealedV2(path, magicStr string, plain []byte, pass string, machine Slot,
 	machineSealer slotSealer) (FileInfo, error) {
-	info := FileInfo{Name: filepath.Base(path), Format: FormatV2}
+	data, info, err := buildSealedV2(filepath.Base(path), magicStr, plain, pass, machine, machineSealer)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	if err := createFileExcl(path, data); err != nil {
+		return FileInfo{}, err
+	}
+	return info, nil
+}
+
+// buildSealedV2 is the bytes of one new v2 file and the FileInfo that describes them. It writes
+// nothing: the caller chooses the write mechanism, and the two mechanisms are not
+// interchangeable. `init` creates a file that must not already be there and goes through
+// createFileExcl's O_EXCL; `migrate` replaces a v1 file that must already be there and goes through
+// replaceFile's rename. A single function that did both would need a flag saying which, and a flag
+// is how a creator ends up clobbering.
+//
+// Everything that decides the bytes is drawn here rather than taken from the caller - the data key,
+// its id, both slot ids, the passphrase salt, every wrap nonce and the payload nonce - for the
+// reason InitV2's comment gives: a caller that supplied any of them would be choosing key material
+// from outside the one place that owns it.
+func buildSealedV2(name, magicStr string, plain []byte, pass string, machine Slot,
+	machineSealer slotSealer) ([]byte, FileInfo, error) {
+	info := FileInfo{Name: name, Format: FormatV2}
 	v2 := v2Magic(magicStr)
 	if v2 == "" {
-		return FileInfo{}, fmt.Errorf("%w: this file kind has no v2 format", errCorrupt)
+		return nil, FileInfo{}, fmt.Errorf("%w: this file kind has no v2 format", errCorrupt)
 	}
 	dek := make([]byte, keyLen)
 	if _, err := randRead(dek); err != nil {
-		return FileInfo{}, fmt.Errorf("vault: init: data key: %w", err)
+		return nil, FileInfo{}, fmt.Errorf("vault: v2: data key: %w", err)
 	}
 	defer zero(dek)
 	dekID := make([]byte, dekIDLen)
 	if _, err := randRead(dekID); err != nil {
-		return FileInfo{}, fmt.Errorf("vault: init: dek id: %w", err)
+		return nil, FileInfo{}, fmt.Errorf("vault: v2: dek id: %w", err)
 	}
 	created := nowString()
 
 	passSlot, err := newPassphraseSlot(created)
 	if err != nil {
-		return FileInfo{}, err
+		return nil, FileInfo{}, err
 	}
 	machineSlot, err := newMachineSlot(machine, created)
 	if err != nil {
-		return FileInfo{}, err
+		return nil, FileInfo{}, err
 	}
 	pairs := []struct {
 		slot   Slot
@@ -202,11 +225,11 @@ func createSealedV2(path, magicStr string, plain []byte, pass string, machine Sl
 	for _, p := range pairs {
 		slotID, derr := decodeSlotID(p.slot.ID)
 		if derr != nil {
-			return FileInfo{}, derr
+			return nil, FileInfo{}, derr
 		}
 		wrap, serr := p.sealer.seal(dek, slotAAD(v2, dekID, slotID, p.slot.Type))
 		if serr != nil {
-			return FileInfo{}, serr
+			return nil, FileInfo{}, serr
 		}
 		s := p.slot
 		s.Wrap = wrap
@@ -214,14 +237,14 @@ func createSealedV2(path, magicStr string, plain []byte, pass string, machine Sl
 	}
 	headerJSON, err := marshalHeader(h, changed)
 	if err != nil {
-		return FileInfo{}, err
+		return nil, FileInfo{}, err
 	}
 	// The slots are reported from a parse of the bytes that are about to be written, not from the
 	// structs above: what an operator is shown has to be what the file carries, which is the same
 	// reason writeV2 parses its own header before it advances anything.
 	parsedHeader, parsedSlots, err := parseHeader(headerJSON)
 	if err != nil {
-		return FileInfo{}, err
+		return nil, FileInfo{}, err
 	}
 	for _, s := range parsedSlots {
 		info.Slots = append(info.Slots, SlotInfo{ID: s.ID, Type: s.Type, Scope: s.Scope,
@@ -241,21 +264,18 @@ func createSealedV2(path, magicStr string, plain []byte, pass string, machine Sl
 
 	aead, err := payloadAEAD(dek)
 	if err != nil {
-		return FileInfo{}, err
+		return nil, FileInfo{}, err
 	}
 	nonce := make([]byte, nonceLen)
 	if _, err := randRead(nonce); err != nil {
-		return FileInfo{}, fmt.Errorf("vault: init: nonce: %w", err)
+		return nil, FileInfo{}, fmt.Errorf("vault: v2: nonce: %w", err)
 	}
 	var buf bytes.Buffer
 	buf.Write(raw)
 	buf.Write(nonce)
 	buf.Write(aead.Seal(nil, nonce, plain, raw))
-	if err := createFileExcl(path, buf.Bytes()); err != nil {
-		return FileInfo{}, err
-	}
 	info.DEKID = dekIDPrefix(parsedHeader.DEK.ID)
-	return info, nil
+	return buf.Bytes(), info, nil
 }
 
 // newPassphraseSlot is one fresh passphrase slot: a random id, a random argon2id salt and this

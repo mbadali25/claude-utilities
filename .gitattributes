@@ -1,3 +1,9 @@
 *.go text eol=lf
 *.sh text eol=lf
+# Vault fixtures are sealed envelopes: every byte is load-bearing and a golden test compares them
+# byte for byte. Declared binary rather than left to git's content sniffing, which only looks for a
+# NUL - internal/vault/testdata/vault-v1.bin happens to contain none and does contain an 0x0a, so
+# with core.autocrlf=true (the default on this project's Windows checkouts) it would be rewritten to
+# 0x0d 0x0a on checkout and the fixture would stop opening.
+*.bin binary
 internal/sessions/testdata/*.txt text eol=lf
