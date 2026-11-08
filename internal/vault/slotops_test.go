@@ -470,6 +470,54 @@ func TestRotateChangesEverySlotsWrap(t *testing.T) {
 	}
 }
 
+// Two independent passphrase slots are a designed shape (`add-slot --type passphrase` for a second
+// operator, and the staged rotation the spec names). A regeneration has to re-wrap EVERY slot, and
+// the ONE passphrase this run holds opens only its own slot: re-wrapping the other one under it
+// would silently retype a second operator's key to this operator's, locking them out and handing
+// this passphrase a second slot. That is a change to who can open the vault, so it is a refusal
+// before anything is written - not a side effect.
+func TestRegenerateRefusesAPassphraseSlotTheGivenPassphraseDoesNotOpen(t *testing.T) {
+	const otherPass = "the-second-operators-passphrase"
+	for _, tc := range []struct {
+		name string
+		call func(v *Vault, ks KeySource) error
+	}{
+		{"rotate", func(v *Vault, ks KeySource) error { return v.Rotate(ks) }},
+		{"remove-slot", func(v *Vault, ks KeySource) error {
+			_, err := v.RemoveSlot(b64([]byte("slot0003")), ks)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := v2VaultAt(t, dir, []v2Spec{
+				passSpec("slot0001", addSlotPass),
+				passSpec("slot0002", otherPass),
+				kekSpec("slot0003", addSlotKEK()),
+			}, "a1")
+			before := bytesOf(t, path)
+			v := openV2(t, path, addSlotPass)
+			ks := &recordingKeySource{pass: addSlotPass,
+				openers: []SlotOpener{kekFileOpenerFor(t, addSlotKEK())}}
+			err := tc.call(v, ks)
+			if !errors.Is(err, ErrNoKey) {
+				t.Fatalf("%s with one of two passphrases = %v, want ErrNoKey", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), b64([]byte("slot0002"))) {
+				t.Fatalf("the refusal does not name the slot it cannot re-wrap: %v", err)
+			}
+			if !bytes.Equal(before, bytesOf(t, path)) {
+				t.Fatalf("%s wrote to the vault before refusing", tc.name)
+			}
+			// And the second operator's passphrase still opens the file, which is the property the
+			// refusal exists to keep.
+			if _, oerr := Open(path, &recordingKeySource{pass: otherPass}); oerr != nil {
+				t.Fatalf("the second operator's passphrase no longer opens the vault: %v", oerr)
+			}
+		})
+	}
+}
+
 // kekFileOpenerFor is a kek-file opener over a temp key file holding kek: the machine half of an
 // operator's key source, with no credstore and no root route in sight.
 func kekFileOpenerFor(t *testing.T, kek []byte) SlotOpener {

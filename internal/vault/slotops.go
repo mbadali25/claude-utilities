@@ -822,7 +822,7 @@ func (v *Vault) regenerateLocked(ks KeySource, dropID, op string) (string, error
 		return "", fmt.Errorf("%w: %s cannot be re-wrapped by this binary; remove it with `server vault remove-slot <id>`",
 			ErrUnknownSlotPresent, strings.Join(unknown, ", "))
 	}
-	sealers, err := proveSealers(ks, survivors)
+	sealers, err := proveSealers(ks, survivors, h)
 	if err != nil {
 		return "", err
 	}
@@ -905,7 +905,15 @@ func (v *Vault) regenerateLocked(ks KeySource, dropID, op string) (string, error
 // present and refuse, and DPAPI can be unavailable, and finding either one halfway through a
 // generation change would leave a file whose slots do not all open it. Every reason is collected so
 // an operator is told about all of their unreachable slots at once, not the first.
-func proveSealers(ks KeySource, slots []Slot) ([]slotSealer, error) {
+//
+// A passphrase slot gets a second, stronger probe against the CURRENT header h: the one passphrase
+// this run holds must actually OPEN the slot before the slot is re-wrapped under it. Two
+// independent passphrase slots are a designed shape - a second operator, and the staged rotation
+// the spec names - and a run holding one of the two passphrases could otherwise re-wrap the other
+// slot under its own, which locks the second operator out and hands this passphrase a second slot.
+// That is a silent change to who can open the vault, so it is a refusal naming the slot, and the
+// way out is `remove-slot` of that slot (it is not the last passphrase slot) or the passphrase for it.
+func proveSealers(ks KeySource, slots []Slot, h Header) ([]slotSealer, error) {
 	ss := &sealerSet{ks: ks}
 	out := make([]slotSealer, len(slots))
 	probeDEK := make([]byte, keyLen)
@@ -914,6 +922,9 @@ func proveSealers(ks KeySource, slots []Slot) ([]slotSealer, error) {
 	var unreachable, unknownType, other error
 	for i, s := range slots {
 		sealer, err := ss.sealerFor(s)
+		if err == nil && s.Type == slotTypePassphrase {
+			err = proveOpens(s, h, ss.pass)
+		}
 		if err == nil {
 			slotID, derr := base64.StdEncoding.DecodeString(s.ID)
 			if derr != nil || len(slotID) != slotIDLen {
@@ -948,6 +959,27 @@ func proveSealers(ks KeySource, slots []Slot) ([]slotSealer, error) {
 		lead = ErrUnknownSlotPresent
 	}
 	return nil, fmt.Errorf("%w: cannot re-wrap every slot (%s)", lead, strings.Join(reasons, "; "))
+}
+
+// proveOpens reports whether pass unwraps this passphrase slot under the header it is in today. The
+// data key it recovers is thrown away immediately: this is an authorisation check on the slot, not a
+// key the caller needs - the new generation's key is drawn after every refusal.
+//
+// ErrNoKey rather than ErrBadKey: nothing here is a wrong passphrase for the FILE (the file is open),
+// it is a slot this run holds no key for, which is the same shape as a kek-file slot this host cannot
+// reach. It also maps to the console's exit 2 and is one of the refusals that provably wrote nothing.
+func proveOpens(s Slot, h Header, pass string) error {
+	aad, err := slotAADOf(h, s)
+	if err != nil {
+		return err
+	}
+	dek, uerr := (passphraseSlotOpener{pass: pass}).Unwrap(s, aad)
+	if uerr != nil {
+		return fmt.Errorf("%w: this run's passphrase does not open passphrase slot %s, so re-wrapping it "+
+			"would retype it to this passphrase; remove that slot or supply its passphrase", ErrNoKey, s.ID)
+	}
+	zero(dek)
+	return nil
 }
 
 // ChangePassphrase re-wraps the SAME data key under a new passphrase, with a fresh argon2id salt.
