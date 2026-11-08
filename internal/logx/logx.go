@@ -15,7 +15,9 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -42,14 +44,36 @@ var allowed = map[string]bool{
 	// "runas" is the local account an agent process runs as: a username, never a credential
 	// and never an email. It is the ONLY key through which a username may be logged.
 	"runas": true,
+	// The vault and service keys. "slot" is a slot id, "slottype" its kind ("dpapi", "kek-file",
+	// "passphrase"), "slots" a count, "format" a file format version, "service" a lifecycle event,
+	// "op" the operation a line is about, "exit" a process exit status and "datadir" a directory
+	// path that has been through TildePath. None of them can carry key material: a slot's id and
+	// type are the only things about a slot that may be printed at all (see vault.SlotOpener), and
+	// the wrap, the blob and the passphrase have no key to be logged under - forbiddenKeyParts
+	// rejects every spelling of them.
+	//
+	// The exit status is "exit", never "exitcode": "code" is a forbidden substring, so "exitcode"
+	// cannot be registered, and "code" itself is already taken by small result codes.
+	//
+	// They are in this literal rather than registered through Allow because this is the base list
+	// and a second home for it is a second thing to drift. Slice 8 adds "statedir", "mech",
+	// "operator" and "setat" here, never to a parallel list.
+	"slot": true, "slottype": true, "slots": true, "format": true, "service": true,
+	"op": true, "exit": true, "datadir": true,
 }
 
 var allowedMu sync.RWMutex
 
-// forbiddenKeyParts are substrings a key registered via Allow may never contain.
+// forbiddenKeyParts are substrings a key registered via Allow may never contain. The second line
+// is the vault's: a key encryption key, a data encryption key, a wrap, a DPAPI blob, a passphrase
+// and a GCM nonce are the six things the v2 format holds that must never reach a log line, and a
+// substring match catches the spellings ("wrapNonce", "dpapiBlob", "vaultKek") a name list would
+// not. "key" already covers "kek" by itself; it is named anyway so removing "key" later cannot
+// quietly open it.
 var forbiddenKeyParts = []string{
 	"token", "secret", "password", "passwd", "pwd", "key", "cookie", "session", "authorization",
 	"auth", "email", "credential", "cred", "bearer", "block", "code", "identity", "refresh",
+	"kek", "dek", "wrap", "blob", "passphrase", "nonce",
 }
 
 // Allow registers extra attribute keys to be emitted. Call it at init time only. A key must
@@ -74,6 +98,44 @@ func Allow(keys ...string) {
 		}
 		allowed[n] = true
 	}
+}
+
+// TildePath replaces a leading user-profile or home directory with "~", so a path may be logged
+// under "datadir" without the username inside it becoming a logged identity. `%USERPROFILE%` on
+// Windows and `$HOME` elsewhere, both through os.UserHomeDir; a path outside the home, such as a
+// service's /var/lib/claude-swap/data or C:\ProgramData\..., is returned unchanged because it has
+// no username to hide.
+//
+// The prefix must end at a separator: C:\Users\bob2 is not inside C:\Users\bob. The comparison is
+// case-insensitive on Windows only, where C:\USERS\Bob and C:\Users\bob are one directory.
+func TildePath(p string) string {
+	if p == "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	home = strings.TrimRight(home, `/\`)
+	if home == "" || len(p) < len(home) {
+		return p
+	}
+	if !samePath(p[:len(home)], home) {
+		return p
+	}
+	rest := p[len(home):]
+	if rest != "" && rest[0] != '/' && rest[0] != '\\' {
+		return p
+	}
+	return "~" + rest
+}
+
+// samePath compares two path fragments the way the running OS does.
+func samePath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 func isAllowed(k string) bool {
