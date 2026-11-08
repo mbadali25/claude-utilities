@@ -92,11 +92,10 @@ var ErrVaultOpUnreadable = errors.New("vault: the vaultop journal is unreadable;
 var ErrVaultOpMixedPair = errors.New("vault: the files this operation spans disagree about their format version")
 
 // resealBak re-seals one file's .bak under the current generation, or deletes it when it cannot be
-// opened. It is a seam: the re-seal needs the slot openers and the v2 write path, which are Task
-// 3b.2, and until then the only honest action is the one the spec names for a .bak the command
-// cannot open - delete it, and say so. Nothing in this binary writes a journal yet, so no real
-// data dir reaches this.
-var resealBak = removeBakOnly
+// opened. It is a seam so a test can inject a failure; its implementation is settleReseal
+// (slotops.go), which reads the live file's own key and header back - at StageRenamed those are the
+// new generation - and falls back to removeBakOnly for a live file it cannot read or open.
+var resealBak = settleReseal
 
 // removeBakOnly is the default resealBak: delete the .bak beside path, or report that there was
 // none. A .bak left behind after a slot removal is openable by the key that was removed, which is

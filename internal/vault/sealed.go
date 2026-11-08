@@ -329,6 +329,13 @@ func recoverDEK(magicStr string, h Header, slots []Slot, ks KeySource) ([]byte, 
 		if uerr == nil {
 			return dek, nil
 		}
+		// One line per slot that was tried and failed. Without it the only record is the single "no
+		// slot could unwrap" at the end, which names kinds and not slots - so a vault that opens
+		// today on its last good slot looks exactly like one that opens on its first, right up until
+		// it opens on none. Bounded by maxSlots, and the id and the type are the only things about a
+		// slot that may be logged: never a wrap, never a blob, never the key that failed.
+		logger.Warn("vault: a key slot did not unwrap the data key",
+			"slot", s.ID, "slottype", s.Type, "result", "failed")
 		// Kept rather than returned, so a later slot that opens still wins.
 		if unreachable == nil && errors.Is(uerr, ErrKEKUnreachable) {
 			unreachable = uerr

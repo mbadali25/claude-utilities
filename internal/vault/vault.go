@@ -88,6 +88,13 @@ type Vault struct {
 	mu       sync.Mutex
 	file     *sealed
 	accounts map[string]Account
+	// ks is the key source this vault was opened with, kept because a slot operation needs the same
+	// keys the open used: `add-slot --type kek-file` wraps under the KEK this host resolves, and a
+	// rotation re-wraps every machine slot. Keeping it means the KEK never crosses this package's
+	// boundary to be handed back in, and that a slot can never be wrapped under a key the open flow
+	// would not have accepted. It holds no more than it did during Open - EnvKey reads a variable,
+	// PromptKey caches one line, HostKeys caches its openers - and none of it is ever logged.
+	ks KeySource
 }
 
 // Open loads the vault at path, creating an empty in-memory one if the file
@@ -116,7 +123,7 @@ func Open(path string, ks KeySource) (*Vault, error) {
 	if err != nil {
 		return nil, err
 	}
-	v := &Vault{file: f, accounts: map[string]Account{}}
+	v := &Vault{file: f, accounts: map[string]Account{}, ks: ks}
 	if plain == nil {
 		return v, nil
 	}
@@ -273,6 +280,18 @@ func (v *Vault) ReplaceBlock(id string, block json.RawMessage, at time.Time) err
 // save encrypts with a fresh nonce and replaces the file atomically (0600).
 // Caller holds v.mu.
 func (v *Vault) save() error {
+	plain, err := v.accountsJSON()
+	if err != nil {
+		return err
+	}
+	return v.file.write(magic, plain)
+}
+
+// accountsJSON is the payload: the account list as one JSON array, ordered by id so two writes of
+// the same store produce the same bytes. It is shared with the slot mutators (slotops.go), which
+// write the same payload under a changed header - one encoder, so a slot operation cannot write a
+// payload shaped differently from an ordinary save. Caller holds v.mu.
+func (v *Vault) accountsJSON() ([]byte, error) {
 	list := make([]Account, 0, len(v.accounts))
 	for _, a := range v.accounts {
 		list = append(list, a)
@@ -280,9 +299,9 @@ func (v *Vault) save() error {
 	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
 	plain, err := json.Marshal(list)
 	if err != nil {
-		return fmt.Errorf("vault: encode: %w", err)
+		return nil, fmt.Errorf("vault: encode: %w", err)
 	}
-	return v.file.write(magic, plain)
+	return plain, nil
 }
 
 // removeQuiet deletes a temp file on a failure path that already returns its own
