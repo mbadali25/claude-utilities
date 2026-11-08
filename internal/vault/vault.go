@@ -44,6 +44,17 @@ var (
 	// ErrLabelTaken means another account already has that label (case-insensitive).
 	ErrLabelTaken = errors.New("vault: an account with that label already exists")
 
+	// ErrNoRecoverySlot means a v2 write would leave a file with no passphrase slot. Such a file can
+	// still be opened - a hand-damaged header has to be readable to be repairable - but it cannot be
+	// saved, because a machine slot is tied to one host: lose the host and the vault is gone with it.
+	// It is also why a service, which has no passphrase, cannot create a vault from nothing.
+	ErrNoRecoverySlot = errors.New("vault: refusing to write a vault with no passphrase slot")
+	// ErrUnknownSlotPresent means the header carries a slot of a type this binary does not know. It
+	// is not an error on open - such a slot is skipped and its bytes are retained - but it is the
+	// refusal for an operation that would have to re-wrap every slot: `rotate`, and `remove-slot` of
+	// any other slot. Task 3b.2 is its only caller; nothing returns it yet.
+	ErrUnknownSlotPresent = errors.New("vault: a slot of an unknown type is present")
+
 	errCorrupt = errors.New("vault: malformed vault file")
 
 	// renameFn is replaced in tests to inject write failures.
@@ -79,6 +90,14 @@ type Vault struct {
 // The payload is a JSON array of accounts and stays that way: a server that is rolled back must
 // still be able to read a vault a newer one has written, so tunnel keys live in their own file
 // (keyring.go) rather than in a new envelope here.
+//
+// Create-on-open stays v1: `server vault init` is the only v2 creator (Task 3b.3), and no later
+// task moves this writer. A v2 file needs a passphrase slot and a machine slot, a typed passphrase
+// and a printed recovery rung, none of which a path inside Open has or could ask for - and a v2
+// file with no passphrase slot is refused on write anyway (ErrNoRecoverySlot). So a console
+// `server --listen ...` against an empty data dir still creates a CSV1 vault, exactly as today;
+// the service's no-vault path is a refusal (exit 4, naming `vault init`), never a creation.
+// TestCreateOnOpenStillWritesV1 is a permanent assertion of that, not a temporary one.
 func Open(path string, ks KeySource) (*Vault, error) {
 	f, plain, err := openSealed(path, magic, ks)
 	if err != nil {

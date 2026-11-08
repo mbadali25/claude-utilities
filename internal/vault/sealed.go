@@ -168,10 +168,15 @@ func openSealedV2(data []byte) (*sealed, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	_, slots, err := parseHeader(headerJSON)
+	h, slots, err := parseHeader(headerJSON)
 	if err != nil {
 		return nil, nil, err
 	}
+	// A slot of a type this binary does not know is skipped, never refused, and one warning per
+	// skipped slot says so. It comes before the attempt rather than after the failure: a header
+	// written by a newer server may well open through one of its known slots once the openers are
+	// wired, and the operator still wants to know a slot was passed over.
+	warnSkippedSlots(h)
 	return nil, nil, fmt.Errorf("%w: no slot could unwrap the data key (slot types tried: %s)",
 		ErrBadKey, slotTypeList(slots))
 }

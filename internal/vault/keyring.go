@@ -79,6 +79,10 @@ func info(t TunnelKey) KeyInfo {
 // ks says which keys this process may use, exactly as it does for Open - the keyring is sealed
 // with the same passphrase as the vault, so both entry points hand the same KeySource to both.
 // It never writes to disk. As with Open, a nil ks is a programmer error and panics.
+//
+// And as with Open, create-on-open stays v1: a keyring this path creates is CSK1, because the
+// keyring is migrated in the same run as the vault and `server vault init` is the only creator of
+// either in v2 (Task 3b.3). TestKeyringCreateOnOpenStillWritesCSK1 pins it.
 func OpenKeyring(path string, ks KeySource) (*Keyring, error) {
 	f, plain, err := openSealed(path, keyringMagic, ks)
 	if err != nil {
