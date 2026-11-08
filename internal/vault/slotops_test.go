@@ -395,6 +395,48 @@ func TestRemoveSlotLeavesAV1BakAlone(t *testing.T) {
 	}
 }
 
+// A v2 file with NO passphrase slot can be opened - a hand-damaged header has to be readable to be
+// repairable - but it cannot be written. That refusal lives in the writer, which is reached only
+// after the recovery copy has been dealt with, so it has to be checked before anything is touched:
+// a refusal that cost the operator their .bak is not a refusal.
+func TestAMutatorOnAFileWithNoPassphraseSlotKeepsTheBak(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(v *Vault) error
+	}{
+		{"remove-slot", func(v *Vault) error {
+			_, err := v.RemoveSlot(b64([]byte("slot0002")), kekSource(t, addSlotKEK(), "", ErrNoKey))
+			return err
+		}},
+		{"rotate", func(v *Vault) error { return v.Rotate(kekSource(t, addSlotKEK(), "", ErrNoKey)) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			specs := []v2Spec{kekSpec("slot0002", addSlotKEK())}
+			path := v2VaultAt(t, dir, specs, "a1")
+			// A .bak nothing available opens, which is the branch that DELETES: the opened branch is
+			// saved by the writer's own refusal, this one is not, so it is the case worth pinning.
+			writeBak(t, path, bytes.Repeat([]byte{0x5a}, keyLen),
+				[]v2Spec{passSpec("slot0009", "a-lost-passphrase")}, "a1", "a2")
+			bakBefore := bytesOf(t, path+bakSuffix)
+			before := bytesOf(t, path)
+			v, err := Open(path, kekSource(t, addSlotKEK(), "", ErrNoKey))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if err := tc.call(v); !errors.Is(err, ErrNoRecoverySlot) {
+				t.Fatalf("%s on a file with no passphrase slot = %v, want ErrNoRecoverySlot", tc.name, err)
+			}
+			if !bytes.Equal(before, bytesOf(t, path)) {
+				t.Fatalf("%s wrote to the vault", tc.name)
+			}
+			if !bytes.Equal(bakBefore, bytesOf(t, path+bakSuffix)) {
+				t.Fatalf("%s touched the .bak before refusing", tc.name)
+			}
+		})
+	}
+}
+
 // --- rotate ---
 
 func TestRotateChangesEverySlotsWrap(t *testing.T) {

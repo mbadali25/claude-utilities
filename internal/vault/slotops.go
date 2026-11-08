@@ -799,6 +799,16 @@ func (v *Vault) regenerateLocked(ks KeySource, dropID, op string) (string, error
 	if dropped.Type == slotTypePassphrase && countPassphraseSlots(survivors) == 0 {
 		return "", ErrLastPassphraseSlot
 	}
+	// The same rule from the other direction, and it is not redundant. A v2 file with no passphrase
+	// slot at all can be OPENED - a hand-damaged header has to be readable to be repairable - and on
+	// such a file neither the clause above nor anything else here fires, because the slot being
+	// removed is not a passphrase slot. The writer refuses it (ErrNoRecoverySlot, from
+	// marshalHeader), but the writer is reached AFTER the recovery copy has been dealt with, and the
+	// delete branch of that step is not undoable: the operator would get a clean refusal and no
+	// .bak. Checked here, before a key is drawn and before anything is touched.
+	if countPassphraseSlots(survivors) == 0 {
+		return "", ErrNoRecoverySlot
+	}
 	// Unknown survivors first and on their own: "this is the wrong binary for this file" is a
 	// different instruction from "this host cannot reach a key", and an operator handed both at once
 	// acts on neither.

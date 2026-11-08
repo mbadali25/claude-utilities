@@ -209,6 +209,30 @@ func TestBareFlagsStillReachTheFlagParser(t *testing.T) {
 	}
 }
 
+// `run` is the preferred form and must land in the same parser as the bare one, with the same
+// flags: the table only proves the name has a handler, and a wrong args slice behind it would be
+// invisible everywhere else.
+func TestRunSubcommandReachesTheSameFlagParser(t *testing.T) {
+	var out bytes.Buffer
+	code := run(context.Background(), []string{"run", "--listen", "127.0.0.1:1"},
+		func(string) string { return "" }, strings.NewReader(""), &out)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if !strings.Contains(out.String(), keyEnv) {
+		t.Fatalf("`run --listen` did not reach the flag parser: %q", out.String())
+	}
+	// And its flags are the console run's, not a subset: an unknown one fails in the parser.
+	var bad bytes.Buffer
+	if code := run(context.Background(), []string{"run", "--wibble"},
+		func(string) string { return "" }, strings.NewReader(""), &bad); code != 2 {
+		t.Fatalf("exit %d for an unknown flag, want 2: %q", code, bad.String())
+	}
+	if !strings.Contains(bad.String(), "not defined") {
+		t.Fatalf("`run --wibble` was not refused by the flag parser: %q", bad.String())
+	}
+}
+
 // A name that is not in the fixed set is not an error of its own: it goes to the flag parser and
 // fails there, which is the shape main.go has always had.
 func TestUnknownSubcommandNameGoesToTheFlagParser(t *testing.T) {

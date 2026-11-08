@@ -76,6 +76,13 @@ func dataDirFromFlagOrService(flagValue string) (string, bool, error) {
 
 // vaultCmd dispatches `server vault <subcommand>`. It is reached from run's fixed subcommand name
 // set, so it never sees the console run's flags.
+//
+// out and errOut are the same writer in production, and that writer is os.Stderr: main() passes it
+// as both, exactly as `cert renew` is called. So `server vault status > file` captures nothing
+// today - the output is on stderr. It is deliberate rather than overlooked: giving these commands a
+// real stdout means changing run's signature, which every existing test of it passes five arguments
+// to, and the plan's Interfaces fix these signatures. Whoever adds `server service` (Task 4.5) is
+// threading a stdout through anyway and should take this with it.
 func vaultCmd(args []string, stdin io.Reader, out, errOut io.Writer) int {
 	if len(args) == 0 {
 		_, _ = fmt.Fprintln(errOut, vaultUsage)
@@ -289,6 +296,10 @@ func vaultVerify(dataDir string, allSlots bool, stdin io.Reader, out io.Writer) 
 		_, _ = fmt.Fprintln(out, "vault verify:", logx.Redact(err.Error()))
 		return exitUsage
 	}
+	// worst is the highest code any file produced, and the codes are ordered by how far from a
+	// working vault the state is - 2 unreadable header, 3 no slot opens, 4 wrong format - so a pair
+	// with two problems reports the further one. It is deliberately not the FIRST problem: a script
+	// branching on this wants one number, and the per-file lines above carry both causes for a human.
 	worst := 0
 	if line, mixed := vault.MixedPair(dataDir); mixed {
 		_, _ = fmt.Fprintln(out, "vault verify: the two files disagree about their format version")
