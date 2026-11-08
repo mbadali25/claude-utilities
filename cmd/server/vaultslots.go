@@ -331,7 +331,12 @@ func mutatorExitCode(err error) int {
 	case errors.Is(err, vault.ErrLastPassphraseSlot), errors.Is(err, vault.ErrUnknownSlotPresent),
 		errors.Is(err, vault.ErrKEKUnreachable), errors.Is(err, vault.ErrSlotNotFound),
 		errors.Is(err, vault.ErrSlotExists), errors.Is(err, vault.ErrNoRecoverySlot),
-		errors.Is(err, vault.ErrNoKey):
+		errors.Is(err, vault.ErrNoKey), errors.Is(err, vault.ErrVaultExists):
+		// ErrVaultExists belongs here and not with the runtime codes. `init`'s own pre-check refuses an
+		// existing file with exit 2, but it reads a zero-byte or short file - what a torn create leaves
+		// - as absent, so the refusal then comes from the creator's atomic O_EXCL instead. It is the
+		// same refusal and the operator's step is the same one (move the file aside), so it cannot
+		// report a different code depending on which of the two checks happened to see it first.
 		return exitUsage
 	case errors.Is(err, vault.ErrBadKey):
 		return exitVaultLocked

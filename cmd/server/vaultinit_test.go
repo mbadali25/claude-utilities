@@ -193,6 +193,15 @@ func TestInitRefusesWhenOnlyTheKeyringExists(t *testing.T) {
 	if !strings.Contains(out.String(), vault.KeyringFileName) {
 		t.Fatalf("the refusal does not name the file it found: %s", out.String())
 	}
+	// And it names the file that is NOT there, because "one of the two" is the state a crash between
+	// the two creates leaves and the operator's next step is to move the stray file aside. `migrate`
+	// is not that step - it is for a v1 PAIR - so a half-initialised dir must not be sent there.
+	if !strings.Contains(out.String(), "vault.bin") {
+		t.Fatalf("the refusal does not name the file that is missing: %s", out.String())
+	}
+	if strings.Contains(out.String(), "migrate") {
+		t.Fatalf("a half-initialised data dir is sent to `migrate`, which is for a v1 pair: %s", out.String())
+	}
 	if !bytes.Equal(before, mustRead(t, ringPath)) {
 		t.Fatal("a refused init wrote to the existing keyring")
 	}
@@ -356,6 +365,79 @@ func TestADefaultRunCannotCreateAV2Vault(t *testing.T) {
 	}
 	if got := mustRead(t, vaultPath(dir)); !bytes.HasPrefix(got, []byte("CSV1")) {
 		t.Fatal("a refused init changed the v1 vault's format")
+	}
+}
+
+// The all-slots check has to read WHICH slots opened, not just whether the payload did. VerifyFile
+// takes the data key from the first slot that opens and the machine slot is tried first, so a
+// passphrase slot that is present and does not open still leaves PayloadOK true - and `init` would
+// print "the passphrase is the recovery key for both files" over a recovery rung that is already
+// broken. The fixture is the shape that produces it: a machine slot this host can open, beside a
+// passphrase slot under a different passphrase.
+func TestInitVerifyRefusesAPassphraseSlotThatDoesNotOpen(t *testing.T) {
+	dir := emptyDataDir(t)
+	withKEKFile(t, fixtureKEK())
+	specs := []fixSpec{{id: "slot0001", kek: fixtureKEK()}, {id: "slot0002", pass: fixturePass}}
+	writeV2Fixture(t, vaultPath(dir), "CSV2", specs, emptyAccounts())
+	writeV2Fixture(t, filepath.Join(dir, vault.KeyringFileName), "CSK2", specs, []byte(`{"keys":[]}`))
+
+	var out bytes.Buffer
+	if code := verifyAfterInit(dir, "not-the-passphrase-the-slot-was-made-under", &out); code == 0 {
+		t.Fatalf("the verify accepted a passphrase slot that does not open: %s", out.String())
+	}
+	if !strings.Contains(out.String(), fixB64([]byte("slot0002"))) {
+		t.Fatalf("the refusal does not name the slot that did not open: %s", out.String())
+	}
+}
+
+// The journal must read `renamed` by the time `init` clears it. A journal still at `started` beside
+// two files that exist is a lie about the disk: the next command's settle reports "reverted" for a
+// creation that in fact completed. runMutation got this ladder; `init` writes its own journal, so it
+// needs its own proof - and it has to go through the same clearJournalFn seam to be observable.
+func TestInitAdvancesTheJournalBeforeClearingIt(t *testing.T) {
+	dir := emptyDataDir(t)
+	withHostMachineKey(t)
+	var atClear vault.VaultOp
+	var sawClear bool
+	restore := watchJournalAtClear(t, &atClear, &sawClear)
+	defer restore()
+
+	initOK(t, dir)
+	if !sawClear {
+		t.Fatal("init cleared no journal through the seam, so the ladder cannot be read")
+	}
+	if atClear.Stage != vault.StageRenamed {
+		t.Fatalf("the journal was at stage %q when init cleared it, want %q", atClear.Stage, vault.StageRenamed)
+	}
+	if atClear.Op != "init" {
+		t.Fatalf("the journal names op %q, want %q", atClear.Op, "init")
+	}
+	// False is the no-delete branch, and `init` never has a recovery copy to touch.
+	if atClear.ResealsBak {
+		t.Fatal("init's journal claims a settle may touch the recovery copy")
+	}
+}
+
+// A zero-byte vault.bin is what a crash during a create leaves. The command's own pre-check reads it
+// as absent - Inspect cannot tell a torn create from a fresh install - so the refusal comes from the
+// creator's atomic create instead. It is still a refusal an operator fixes by moving a file, which
+// is exit 2 in this binary's table, not the runtime code a failure nobody can act on gets.
+func TestInitOverAZeroByteVaultExitsUsage(t *testing.T) {
+	dir := emptyDataDir(t)
+	withHostMachineKey(t)
+	t.Setenv(keyEnv, fixturePass)
+	if err := os.WriteFile(vaultPath(dir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := vaultInit(dir, false, false, strings.NewReader(""), &out); code != exitUsage {
+		t.Fatalf("exit %d over a zero-byte vault.bin, want %d: %s", code, exitUsage, out.String())
+	}
+	if got := mustRead(t, vaultPath(dir)); len(got) != 0 {
+		t.Fatalf("the zero-byte file was written over: %d bytes", len(got))
+	}
+	if _, err := os.Stat(filepath.Join(dir, vault.KeyringFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a refused init created the keyring")
 	}
 }
 

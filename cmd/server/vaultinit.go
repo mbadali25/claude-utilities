@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"claude-utilities/internal/logx"
 	"claude-utilities/internal/vault"
@@ -42,8 +43,8 @@ import (
 // rung for the command that creates a KEK, which is not this one (see the file comment).
 //
 // It returns the process exit code: 0 created or planned; 2 a refusal the operator fixes by changing
-// what is there or what they typed; 3 a file that no slot opened once it existed; 1 anything else,
-// including a file that opened and whose payload would not parse.
+// what is there or what they typed; 3 a file that no slot opened once it existed, or one of whose
+// slots did not; 1 anything else, including a file that opened and whose payload would not parse.
 func vaultInit(dataDir string, dryRun, plainKEK bool, stdin io.Reader, out io.Writer) int {
 	const op = "init"
 	lock, err := vault.AcquireLock(dataDir, op)
@@ -102,7 +103,7 @@ func vaultInit(dataDir string, dryRun, plainKEK bool, stdin io.Reader, out io.Wr
 		// InitV2 either created both files or left the directory as it found it - a file it created
 		// before a later failure is removed again - so there is nothing for a settle to finish, and a
 		// journal left behind would make the next command settle an operation that did not happen.
-		clearJournal(dataDir, op, out)
+		clearJournalFn(dataDir, op, out)
 		_, _ = fmt.Fprintf(out, "vault %s: %s\n", op, logx.Redact(err.Error()))
 		return mutatorExitCode(err)
 	}
@@ -124,7 +125,9 @@ func vaultInit(dataDir string, dryRun, plainKEK bool, stdin io.Reader, out io.Wr
 	if code := verifyAfterInit(dataDir, pass, out); code != 0 {
 		return code
 	}
-	clearJournal(dataDir, op, out)
+	// Through the seam runMutation's last step uses, so the stage the journal carries when it goes is
+	// observable from a test. See clearJournalFn and TestInitAdvancesTheJournalBeforeClearingIt.
+	clearJournalFn(dataDir, op, out)
 
 	_, _ = fmt.Fprintf(out, "vault %s: machine slot %s\n", op, note)
 	_, _ = fmt.Fprintf(out, "vault %s: the passphrase is the recovery key for both files; it is the only way "+
@@ -142,7 +145,10 @@ func vaultInit(dataDir string, dryRun, plainKEK bool, stdin io.Reader, out io.Wr
 // The format is read from the header, so this costs no key and no prompt. The create itself refuses
 // again, atomically, on the file's existence - including a zero-byte file this check reads as absent.
 func refuseAnExistingFile(dataDir, op string, out io.Writer) int {
-	for _, name := range []string{vaultFileName, vault.KeyringFileName} {
+	names := []string{vaultFileName, vault.KeyringFileName}
+	formats := make([]string, len(names))
+	found := 0
+	for i, name := range names {
 		info, err := vault.Inspect(filepath.Join(dataDir, name))
 		if err != nil {
 			_, _ = fmt.Fprintf(out, "vault %s: %s is there and unreadable: %s\n", op, name, logx.Redact(err.Error()))
@@ -152,11 +158,28 @@ func refuseAnExistingFile(dataDir, op string, out io.Writer) int {
 		if info.Format == vault.FormatAbsent {
 			continue
 		}
-		_, _ = fmt.Fprintf(out, "vault %s: %s is already there (%s), so there is nothing to create: "+
-			"use `server vault migrate` for a v1 file, and nothing at all for a v2 one\n", op, name, info.Format)
+		formats[i] = string(info.Format)
+		found++
+	}
+	if found == 0 {
+		return 0
+	}
+	// A keyring with no vault beside it gets its own sentence, because neither command the other
+	// message names is the operator's next step there: `migrate` needs a vault to migrate, and
+	// "nothing at all" is wrong about a dir missing the file every account lives in. It is also the
+	// one shape that cannot be an ordinary data dir - a host that never ran with --tunnels has
+	// vault.bin and no keyring, which is normal and belongs to `migrate` like any other vault.
+	if formats[0] == "" {
+		_, _ = fmt.Fprintf(out, "vault %s: %s is there (%s) and %s is not, and there is no sequence "+
+			"of commands that writes a keyring without a vault: nothing was written. Read `server "+
+			"vault status`, then move %s out of the data dir by hand before running `init` again\n",
+			op, names[1], formats[1], names[0], names[1])
 		return exitUsage
 	}
-	return 0
+	_, _ = fmt.Fprintf(out, "vault %s: %s is already there (%s), so there is nothing to create: "+
+		"use `server vault migrate` for a v1 file, and nothing at all for a v2 one\n",
+		op, names[0], formats[0])
+	return exitUsage
 }
 
 // machineSlotForHost names the machine slot this host can have, and the line the command prints
@@ -217,6 +240,22 @@ func verifyAfterInit(dataDir, pass string, out io.Writer) int {
 	for _, c := range checks {
 		for _, name := range []string{vaultFileName, vault.KeyringFileName} {
 			res, err := vault.VerifyFile(filepath.Join(dataDir, name), c.ks, c.allSlots)
+			// Which slots opened, before the payload, and only for the all-slots check. VerifyFile
+			// takes the data key from the FIRST slot that gives it up and the machine slot is tried
+			// first, so PayloadOK says the file opened and nothing about the slots after the one that
+			// opened it. Without this the printed line "opens under every slot in turn" would be true
+			// of a file whose passphrase slot does not open - which is the recovery rung this command
+			// prints a paragraph about, and the one failure an operator cannot discover later.
+			if err == nil && c.allSlots {
+				if shut := slotsThatDidNotOpen(res); len(shut) > 0 {
+					_, _ = fmt.Fprintf(out, "vault init: %s opened, but %d of its slots did not: %s\n",
+						name, len(shut), strings.Join(shut, ", "))
+					_, _ = fmt.Fprintln(out, "vault init: both files were created and a key this command "+
+						"just wrote does not open one of them. The journal is left in place; run "+
+						"`server vault verify --all-slots`.")
+					return exitVaultLocked
+				}
+			}
 			if err != nil || !res.PayloadOK {
 				_, _ = fmt.Fprintf(out, "vault init: %s did NOT open under %s: %s\n", name, c.label,
 					logx.Redact(errText(err)))
@@ -234,6 +273,30 @@ func verifyAfterInit(dataDir, pass string, out io.Writer) int {
 		}
 	}
 	return 0
+}
+
+// slotsThatDidNotOpen names the slots a verify handed a key to and could not open. It is the half of
+// a VerifyResult that PayloadOK cannot carry: the payload opens under one key, and this is every
+// other key the same header promised.
+//
+// A slot of a type this binary does not know is left out: it was never handed a key - VerifyFile
+// records a reason for it instead of an attempt - so counting it would refuse a file for carrying a
+// slot a newer server wrote. Every other slot counts, a machine slot this host cannot reach
+// included, because the caller is `init`: it created both slots itself a moment ago, under a
+// passphrase this run read and a machine key it proved on a throwaway wrap before the first byte.
+// On that path there is no honest reason for a known slot not to open.
+func slotsThatDidNotOpen(res vault.VerifyResult) []string {
+	known := make(map[string]bool, len(res.File.Slots))
+	for _, s := range res.File.Slots {
+		known[s.ID] = s.Known
+	}
+	shut := make([]string, 0, len(res.Tried))
+	for _, r := range res.Tried {
+		if known[r.ID] && !r.Opened {
+			shut = append(shut, r.ID)
+		}
+	}
+	return shut
 }
 
 // errText is an error's message, or a stand-in when a check failed with no error of its own (a
