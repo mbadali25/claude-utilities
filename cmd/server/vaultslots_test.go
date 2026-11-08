@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,6 +132,32 @@ func TestEveryMutatorWritesAVaultOpJournalFirst(t *testing.T) {
 	}
 	if _, ok, _ := vault.ReadVaultOp(dir); ok {
 		t.Fatalf("the journal outlived a finished mutation")
+	}
+}
+
+// The recovery copy is dealt with BEFORE the new generation is written, so a write that then fails
+// has already re-sealed or DELETED the .bak. The spec's accepted risk for that deletion is that the
+// printed line is the notice, so the notice has to survive the failure: a command that reported only
+// the error would have deleted an operator's recovery copy silently.
+func TestAFailedMutationStillSaysWhatHappenedToTheBak(t *testing.T) {
+	dir := twoSlotDir(t)
+	withPassphraseEnv(t)
+	var out bytes.Buffer
+	code := runMutation(dir, mutation{
+		op:    "remove-slot",
+		files: []string{"vault.bin"},
+		apply: func(*vault.Vault, vault.KeySource) (string, error) {
+			return "bak removed (no available slot opened it)", errors.New("vault: write: disk full")
+		},
+	}, &out)
+	if code == 0 {
+		t.Fatalf("exit 0 on a failed mutation: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "bak removed") {
+		t.Fatalf("a failed mutation did not report what it did to the recovery copy: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "disk full") {
+		t.Fatalf("the failure itself is not reported: %s", out.String())
 	}
 }
 

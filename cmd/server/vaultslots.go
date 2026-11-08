@@ -215,6 +215,13 @@ func runMutation(dataDir string, m mutation, out io.Writer) int {
 		if wroteNothing(err) {
 			clearJournal(dataDir, m.op, out)
 		}
+		// Before the error, and on the failure path as much as the success one. The recovery copy is
+		// dealt with before the new generation is written, so a write that then fails has already
+		// re-sealed or DELETED the .bak - and the spec's accepted risk for that deletion is that the
+		// printed line is the notice. Reporting only the error would take the notice away.
+		if result != "" {
+			_, _ = fmt.Fprintf(out, "vault %s: %s\n", m.op, result)
+		}
 		_, _ = fmt.Fprintf(out, "vault %s: %s\n", m.op, logx.Redact(err.Error()))
 		code := mutatorExitCode(err)
 		auditLine(out, m.op, "", "", "refused", code)
@@ -413,9 +420,12 @@ func vaultRemoveSlot(dataDir, slotID string, stdin io.Reader, out io.Writer) int
 					}
 				}
 			}
+			// bak is returned on BOTH paths: RemoveSlot deals with the recovery copy before the new
+			// generation is written, so a failure after that step has still re-sealed or deleted it and
+			// the operator has to be told which. Dropping it here would make a deletion silent.
 			bak, err := v.RemoveSlot(slotID, ks)
 			if err != nil {
-				return "", err
+				return bak, err
 			}
 			return fmt.Sprintf("slot %s removed, data key rotated; %s", slotID, bak), nil
 		}}, out)
