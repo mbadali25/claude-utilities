@@ -381,6 +381,182 @@ func TestCertRefusedLogLineCarriesTheReason(t *testing.T) {
 	}
 }
 
+// --- Task 1.2: exit 4 and a reason for a vault a newer server wrote ---
+
+// newerFormatVault makes a data dir whose vault.bin is slice 1's synthetic 40-byte v2 header. It
+// reads the committed fixture rather than rebuilding those bytes here, so this test and the deploy
+// gate (which copies the same file to the server host) cannot disagree about what produces exit 4.
+//
+// It also sets the passphrase in the real environment: run's injected getenv gates the flag check,
+// but internal/vault reads os.Getenv itself, so the env map alone never reaches vault.Open.
+func newerFormatVault(t *testing.T) (dir, vaultFile string) {
+	t.Helper()
+	t.Setenv(keyEnv, "a-test-passphrase")
+	data, err := os.ReadFile(filepath.Join("..", "..", "internal", "vault", "testdata", "newer-v2-header.bin"))
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	dir = t.TempDir()
+	vaultFile = filepath.Join(dir, "vault.bin")
+	if err := os.WriteFile(vaultFile, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir, vaultFile
+}
+
+func TestVaultExitCodeIsFourForNewerFormat(t *testing.T) {
+	newer := fmt.Errorf("serve: %w", vault.ErrNewerFormat)
+	if got := vaultExitCode(newer); got != 4 {
+		t.Errorf("vaultExitCode %d, want 4", got)
+	}
+	if got := exitCodeFor(newer); got != 4 {
+		t.Errorf("exitCodeFor %d, want 4", got)
+	}
+}
+
+func TestVaultExitCodeIsOneForAnUnrelatedError(t *testing.T) {
+	if got := vaultExitCode(io.ErrUnexpectedEOF); got != 1 {
+		t.Errorf("vaultExitCode %d, want 1", got)
+	}
+	// The order inside exitCodeFor is fixed rather than left to the reader: a certificate refusal
+	// is the more specific answer, so it keeps 5 even once the vault rows exist.
+	if got := exitCodeFor(fmt.Errorf("serve: %w", hub.ErrCertExpired)); got != 5 {
+		t.Errorf("exitCodeFor %d for a cert refusal, want 5", got)
+	}
+}
+
+func TestServeOnANewerFormatVaultExitsFourAndWritesNothing(t *testing.T) {
+	dir, vaultFile := newerFormatVault(t)
+	before, err := os.ReadFile(vaultFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
+	code := run(context.Background(), args, env(map[string]string{keyEnv: "a-test-passphrase", passwordEnv: "a-long-enough-password"}), noStdin(), &out)
+	if code != 4 {
+		t.Fatalf("code %d, want 4: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "newer server") || strings.Contains(out.String(), "malformed") {
+		t.Fatalf("the operator is not told who wrote the file: %s", out.String())
+	}
+	after, err := os.ReadFile(vaultFile)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("vault.bin was rewritten: %v", err)
+	}
+	// A refused open must leave no half-written replacement behind either.
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+func TestNewerFormatLogLineCarriesTheReason(t *testing.T) {
+	dir, _ := newerFormatVault(t)
+	var out bytes.Buffer
+	args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
+	if code := run(context.Background(), args, env(map[string]string{keyEnv: "a-test-passphrase", passwordEnv: "a-long-enough-password"}), noStdin(), &out); code != 4 {
+		t.Fatalf("code %d: %s", code, out.String())
+	}
+	var line map[string]any
+	var found int
+	for _, l := range strings.Split(out.String(), "\n") {
+		// Matched on the message field, not a bare `"format"` token: a later log line that merely
+		// mentions the word must not be counted as this one.
+		if !strings.Contains(l, `"msg":"format"`) {
+			continue
+		}
+		found++
+		if err := json.Unmarshal([]byte(l), &line); err != nil {
+			t.Fatalf("not a JSON log line: %q: %v", l, err)
+		}
+		// The reason is the only detail the line may carry, so the whole line is scanned, not just
+		// the field it is expected in: no path, no passphrase, no file bytes, in any field.
+		for _, leak := range []string{dir, "vault.bin", "CSV2", "a-test-passphrase"} {
+			if strings.Contains(l, leak) {
+				t.Fatalf("log line %q carries %q", l, leak)
+			}
+		}
+	}
+	if found != 1 {
+		t.Fatalf("want exactly one `format` line, got %d:\n%s", found, out.String())
+	}
+	if line["reason"] != "newer-format" {
+		t.Fatalf("reason = %v, want newer-format", line["reason"])
+	}
+}
+
+// reasonLines returns the structured lines in out whose msg field is msg, so a test can insist on
+// exactly one of them rather than on a substring appearing somewhere.
+func reasonLines(t *testing.T, out, msg string) []map[string]any {
+	t.Helper()
+	var found []map[string]any
+	for _, l := range strings.Split(out, "\n") {
+		if !strings.Contains(l, `"msg":"`+msg+`"`) {
+			continue
+		}
+		var line map[string]any
+		if err := json.Unmarshal([]byte(l), &line); err != nil {
+			t.Fatalf("not a JSON log line: %q: %v", l, err)
+		}
+		found = append(found, line)
+	}
+	return found
+}
+
+// Both reason halves belong to the one reporting helper, not to run's serve branch: `cert renew`
+// shares exitCodeFor, so a vault error arriving there would otherwise exit 4 with no reason line
+// at all. hub.RenewCert cannot return a vault error today - this is the structure, not a reachable
+// bug - and the helper is tested directly because there is no way to make the real command produce
+// one.
+func TestReportRefusalLogsTheVaultReason(t *testing.T) {
+	var out bytes.Buffer
+	reportRefusal(&out, "cert renew", fmt.Errorf("renew: %w", vault.ErrNewerFormat))
+	lines := reasonLines(t, out.String(), "format")
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one `format` line, got %d:\n%s", len(lines), out.String())
+	}
+	if lines[0]["reason"] != "newer-format" {
+		t.Fatalf("reason = %v, want newer-format", lines[0]["reason"])
+	}
+	if len(reasonLines(t, out.String(), "cert refused")) != 0 {
+		t.Fatalf("a vault error reported as a certificate refusal:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "cert renew: renew: vault: written by a newer server") {
+		t.Fatalf("the prefixed message is gone:\n%s", out.String())
+	}
+}
+
+func TestReportRefusalLogsTheCertReason(t *testing.T) {
+	var out bytes.Buffer
+	reportRefusal(&out, "server", fmt.Errorf("serve: %w", hub.ErrCertExpired))
+	lines := reasonLines(t, out.String(), "cert refused")
+	if len(lines) != 1 || lines[0]["reason"] == "" {
+		t.Fatalf("want one `cert refused` line with a reason, got %d:\n%s", len(lines), out.String())
+	}
+	if len(reasonLines(t, out.String(), "format")) != 0 {
+		t.Fatalf("a certificate refusal reported as a vault format:\n%s", out.String())
+	}
+}
+
+func TestReportRefusalInventsNoReasonForAnUnrelatedError(t *testing.T) {
+	var out bytes.Buffer
+	reportRefusal(&out, "server", io.ErrUnexpectedEOF)
+	for _, msg := range []string{"format", "cert refused"} {
+		if len(reasonLines(t, out.String(), msg)) != 0 {
+			t.Fatalf("invented a %q line:\n%s", msg, out.String())
+		}
+	}
+	if !strings.Contains(out.String(), "server: "+io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("the prefixed message is gone:\n%s", out.String())
+	}
+}
+
 func TestServerRefusesACorruptPasswordFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, adminpw.FileName), []byte(`{"v":1,"algo":"nope"}`), 0o600); err != nil {
