@@ -6,12 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"path/filepath"
 	"strings"
 
 	"claude-utilities/internal/hub"
-	"claude-utilities/internal/logx"
 )
 
 // certUsage is the `cert` command summary. There is one subcommand on purpose: nothing else in
@@ -68,7 +66,7 @@ func certRenewCmd(args []string, in io.Reader, out, errOut io.Writer) int {
 	}
 	oldFP, newFP, err := hub.RenewCert(filepath.Join(*dataDir, "tls"))
 	if err != nil {
-		reportCertError(errOut, "cert renew", err)
+		reportRefusal(errOut, "cert renew", err)
 		return exitCodeFor(err)
 	}
 	if oldFP == "" {
@@ -104,14 +102,4 @@ func confirmRenew(in io.Reader, out io.Writer) bool {
 		return false
 	}
 	return strings.TrimRight(line, "\r\n") == confirmWord
-}
-
-// reportCertError prints the refusal and, for a certificate refusal, emits the one structured
-// line the case table asks for. The line carries the reason and nothing else: no path, no
-// fingerprint, no key material. ("exit" joins it once logx allowlists the key, in Task 3a.9.)
-func reportCertError(errOut io.Writer, prefix string, err error) {
-	if r := certReason(err); r != "" {
-		logx.New(errOut).Error("cert refused", slog.String("reason", r))
-	}
-	_, _ = fmt.Fprintln(errOut, prefix+":", logx.Redact(err.Error()))
 }

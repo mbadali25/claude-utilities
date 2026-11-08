@@ -82,11 +82,11 @@ func TestCrossMagicStillErrCorrupt(t *testing.T) {
 	t.Setenv(keyEnv, "pw")
 	dir := t.TempDir()
 	kp := writeFixture(t, dir, "keyring-bytes-in-a-vault-path.bin", withMagic(t, newerKeyringMagic))
-	if _, err := Open(kp, keyEnv); !errors.Is(err, errCorrupt) || errors.Is(err, ErrNewerFormat) {
+	if _, err := Open(kp, keyEnv); !errors.Is(err, errCorrupt) {
 		t.Fatalf("CSK2 opened as a vault: want errCorrupt, got %v", err)
 	}
 	vp := writeFixture(t, dir, "vault-bytes-in-a-keyring-path.bin", v2Fixture(t))
-	if _, err := OpenKeyring(vp, keyEnv); !errors.Is(err, errCorrupt) || errors.Is(err, ErrNewerFormat) {
+	if _, err := OpenKeyring(vp, keyEnv); !errors.Is(err, errCorrupt) {
 		t.Fatalf("CSV2 opened as a keyring: want errCorrupt, got %v", err)
 	}
 }
@@ -94,7 +94,7 @@ func TestCrossMagicStillErrCorrupt(t *testing.T) {
 func TestUnknownMagicStillErrCorrupt(t *testing.T) {
 	p := writeFixture(t, t.TempDir(), "vault.bin", withMagic(t, "CSV9"))
 	_, err := open(t, p, "pw")
-	if !errors.Is(err, errCorrupt) || errors.Is(err, ErrNewerFormat) {
+	if !errors.Is(err, errCorrupt) {
 		t.Fatalf("want errCorrupt, got %v", err)
 	}
 }
@@ -103,8 +103,58 @@ func TestShortFileStillErrCorrupt(t *testing.T) {
 	// Three bytes cannot hold a four-byte magic: the prefix test must not index past the end.
 	p := writeFixture(t, t.TempDir(), "vault.bin", []byte("CSV"))
 	_, err := open(t, p, "pw")
-	if !errors.Is(err, errCorrupt) || errors.Is(err, ErrNewerFormat) {
+	if !errors.Is(err, errCorrupt) {
 		t.Fatalf("want errCorrupt, got %v", err)
+	}
+}
+
+// --- the order of the passphrase check against the magic check ---
+//
+// Reading the magic needs no passphrase, so the one answer a v2 file must never produce is "set
+// environment variable": the operator would go and set a key for a file no key can open, and the
+// temptation after that is to rotate the passphrase. The three tests below pin the whole ordering,
+// not just the case that changed: the two that assert ErrNoKey are the regression pins for it.
+
+func TestOpenV2VaultWithNoKeyStillReportsNewerFormat(t *testing.T) {
+	p := writeFixture(t, t.TempDir(), "vault.bin", v2Fixture(t))
+	_, err := open(t, p, "")
+	if !errors.Is(err, ErrNewerFormat) {
+		t.Fatalf("want ErrNewerFormat, got %v - that answer sends the operator to set a key for "+
+			"a file no key opens", err)
+	}
+}
+
+func TestOpenV2KeyringWithNoKeyStillReportsNewerFormat(t *testing.T) {
+	t.Setenv(keyEnv, "")
+	p := writeFixture(t, t.TempDir(), KeyringFileName, withMagic(t, newerKeyringMagic))
+	_, err := OpenKeyring(p, keyEnv)
+	if !errors.Is(err, ErrNewerFormat) {
+		t.Fatalf("want ErrNewerFormat, got %v - that answer sends the operator to set a key for "+
+			"a file no key opens", err)
+	}
+}
+
+// A v1 file still asks for the passphrase first: that one IS openable once the key is set.
+func TestOpenV1VaultWithNoKeyStillReportsNoKey(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "vault.bin")
+	v, err := open(t, p, "pw")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := v.Put(acct("a")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := open(t, p, ""); !errors.Is(err, ErrNoKey) {
+		t.Fatalf("want ErrNoKey, got %v", err)
+	}
+}
+
+// An unknown magic with no key answers ErrNoKey, as it did before the reorder: this binary cannot
+// say whether the file is damaged or merely sealed with a key it has not been given.
+func TestOpenCorruptVaultWithNoKeyStillReportsNoKey(t *testing.T) {
+	p := writeFixture(t, t.TempDir(), "vault.bin", withMagic(t, "CSV9"))
+	if _, err := open(t, p, ""); !errors.Is(err, ErrNoKey) {
+		t.Fatalf("want ErrNoKey, got %v - the corrupt row moved ahead of the key check", err)
 	}
 }
 
