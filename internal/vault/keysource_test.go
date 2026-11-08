@@ -339,24 +339,25 @@ func TestOpenKeyringUsesTheKeySource(t *testing.T) {
 	}
 }
 
-// A file written by a newer server is recognised from four bytes of magic, which needs no key, so
-// no key may be asked for. newerformat_test.go pins the error an operator gets; this pins that
-// nothing was asked to produce it. It matters more now than it did with an env var name: a
+// A v2 file is answered from its own bytes - the magic, the header length and the header - and none
+// of that needs a key, so no key may be asked for. The fixture's header is malformed, so the answer
+// is errCorrupt since Task 3a.2 made CSV2 readable; newerformat_test.go pins that error, and this
+// pins that nothing was asked to produce it. It matters more than it did with an env var name: a
 // PromptKey would stop the run dead on a prompt that cannot open the file whatever is typed, and
 // telling an operator to set CLAUDESWAP_KEY for an unopenable file is how a correct passphrase
 // gets rotated out of confusion. Both magics, because each reader recognises only its own.
 func TestOpenV2DoesNotAskForThePassphrase(t *testing.T) {
 	dir := t.TempDir()
 	vp := writeFixture(t, dir, "vault.bin", v2Fixture(t))
-	kp := writeFixture(t, dir, KeyringFileName, withMagic(t, newerKeyringMagic))
+	kp := writeFixture(t, dir, KeyringFileName, withMagic(t, v2KeyringMagic))
 
 	vks := &recordingKeySource{pass: "pw"}
-	if _, err := Open(vp, vks); !errors.Is(err, ErrNewerFormat) {
-		t.Fatalf("Open: want ErrNewerFormat, got %v", err)
+	if _, err := Open(vp, vks); !errors.Is(err, errCorrupt) {
+		t.Fatalf("Open: want errCorrupt, got %v", err)
 	}
 	kks := &recordingKeySource{pass: "pw"}
-	if _, err := OpenKeyring(kp, kks); !errors.Is(err, ErrNewerFormat) {
-		t.Fatalf("OpenKeyring: want ErrNewerFormat, got %v", err)
+	if _, err := OpenKeyring(kp, kks); !errors.Is(err, errCorrupt) {
+		t.Fatalf("OpenKeyring: want errCorrupt, got %v", err)
 	}
 	for _, tc := range []struct {
 		what string

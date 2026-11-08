@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -381,27 +382,71 @@ func TestCertRefusedLogLineCarriesTheReason(t *testing.T) {
 	}
 }
 
-// --- Task 1.2: exit 4 and a reason for a vault a newer server wrote ---
+// --- Task 1.2, as Task 3a.2 left it: exit 4 for a vault this binary cannot read ---
+//
+// Two causes now share the code. A header written by a newer server is ErrNewerFormat; a header
+// this binary can parse but not believe - every out-of-bounds number in a v2 header included - is
+// ErrMalformed. Since CSV2 became the current format the committed 40-byte fixture is the second
+// kind, not the first, so each cause gets a test of its own below rather than one test that passes
+// for whichever reason happens to fire.
 
-// newerFormatVault makes a data dir whose vault.bin is slice 1's synthetic 40-byte v2 header. It
-// reads the committed fixture rather than rebuilding those bytes here, so this test and the deploy
-// gate (which copies the same file to the server host) cannot disagree about what produces exit 4.
+// unreadableVault makes a data dir whose vault.bin is the committed 40-byte CSV2 fixture: a
+// malformed v2 header, whose 24-byte header claim leaves the file short of the minimum. It reads
+// the committed fixture rather than rebuilding those bytes here, so this test and the deploy gate
+// (which copies the same file to the server host) cannot disagree about what produces exit 4.
 //
 // It also sets the passphrase in the real environment: run's injected getenv gates the flag check,
 // but internal/vault reads os.Getenv itself, so the env map alone never reaches vault.Open.
-func newerFormatVault(t *testing.T) (dir, vaultFile string) {
+func unreadableVault(t *testing.T) (dir, vaultFile string) {
+	t.Helper()
+	return vaultDirWith(t, readFixture(t, "newer-v2-header.bin"))
+}
+
+// readFixture reads one of internal/vault's committed test fixtures.
+func readFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "internal", "vault", "testdata", name))
+	if err != nil {
+		t.Fatalf("fixture %s: %v", name, err)
+	}
+	return data
+}
+
+// vaultDirWith drops data in a fresh data dir as vault.bin.
+func vaultDirWith(t *testing.T, data []byte) (dir, vaultFile string) {
 	t.Helper()
 	t.Setenv(keyEnv, "a-test-passphrase")
-	data, err := os.ReadFile(filepath.Join("..", "..", "internal", "vault", "testdata", "newer-v2-header.bin"))
-	if err != nil {
-		t.Fatalf("fixture: %v", err)
-	}
 	dir = t.TempDir()
 	vaultFile = filepath.Join(dir, "vault.bin")
 	if err := os.WriteFile(vaultFile, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return dir, vaultFile
+}
+
+// vThreeVault builds a v2 file whose header differs from the committed golden header in `v` alone:
+// the same magic, the same header length arithmetic, every member present and in bounds, a nonce
+// and a tag-sized payload after it. Isolating `v` is the whole point - a header carrying `"v":3`
+// and nothing else would be both a wrong version and a malformed header, and since both exit 4 it
+// would pass whichever branch ran first and prove nothing.
+//
+// Built here rather than committed as a fixture: it is a few hundred bytes derived from a file that
+// is already committed, and a second fixture would be one more thing to keep in step with it.
+func vThreeVault(t *testing.T) (dir, vaultFile string) {
+	t.Helper()
+	golden := bytes.TrimSuffix(readFixture(t, "header-golden.json"), []byte("\n"))
+	hdr := bytes.Replace(golden, []byte(`{"v":2,`), []byte(`{"v":3,`), 1)
+	if bytes.Equal(hdr, golden) {
+		t.Fatal("the golden header no longer starts with the version member")
+	}
+	var buf bytes.Buffer
+	buf.WriteString("CSV2")
+	var n [4]byte
+	binary.BigEndian.PutUint32(n[:], uint32(len(hdr)))
+	buf.Write(n[:])
+	buf.Write(hdr)
+	buf.Write(make([]byte, 12+16)) // nonce, then a tag-sized payload
+	return vaultDirWith(t, buf.Bytes())
 }
 
 func TestVaultExitCodeIsFourForNewerFormat(t *testing.T) {
@@ -411,6 +456,22 @@ func TestVaultExitCodeIsFourForNewerFormat(t *testing.T) {
 	}
 	if got := exitCodeFor(newer); got != 4 {
 		t.Errorf("exitCodeFor %d, want 4", got)
+	}
+}
+
+// A malformed vault is the same 4 and for the same reason - a restart cannot make it readable - and
+// it must not be 3: pushing an operator towards rotating a correct passphrase over a crafted header
+// is the one answer the format's bounds exist to prevent.
+func TestVaultExitCodeIsFourForAMalformedVault(t *testing.T) {
+	bad := fmt.Errorf("serve: %w", vault.ErrMalformed)
+	if got := vaultExitCode(bad); got != 4 {
+		t.Errorf("vaultExitCode %d, want 4", got)
+	}
+	if got := exitCodeFor(bad); got != 4 {
+		t.Errorf("exitCodeFor %d, want 4", got)
+	}
+	if got := vaultReason(bad); got != "malformed" {
+		t.Errorf("vaultReason %q, want malformed", got)
 	}
 }
 
@@ -425,8 +486,11 @@ func TestVaultExitCodeIsOneForAnUnrelatedError(t *testing.T) {
 	}
 }
 
-func TestServeOnANewerFormatVaultExitsFourAndWritesNothing(t *testing.T) {
-	dir, vaultFile := newerFormatVault(t)
+// serveRefusedOnVault runs the server against dir, insists on the exit code, and insists that
+// nothing in the data dir was written: not vault.bin, not a half-finished replacement. One helper
+// for both causes, so neither can quietly stop checking the write half.
+func serveRefusedOnVault(t *testing.T, dir, vaultFile string, want int) string {
+	t.Helper()
 	before, err := os.ReadFile(vaultFile)
 	if err != nil {
 		t.Fatal(err)
@@ -434,17 +498,13 @@ func TestServeOnANewerFormatVaultExitsFourAndWritesNothing(t *testing.T) {
 	var out bytes.Buffer
 	args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
 	code := run(context.Background(), args, env(map[string]string{keyEnv: "a-test-passphrase", passwordEnv: "a-long-enough-password"}), noStdin(), &out)
-	if code != 4 {
-		t.Fatalf("code %d, want 4: %s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "newer server") || strings.Contains(out.String(), "malformed") {
-		t.Fatalf("the operator is not told who wrote the file: %s", out.String())
+	if code != want {
+		t.Fatalf("code %d, want %d: %s", code, want, out.String())
 	}
 	after, err := os.ReadFile(vaultFile)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("vault.bin was rewritten: %v", err)
 	}
-	// A refused open must leave no half-written replacement behind either.
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -454,18 +514,43 @@ func TestServeOnANewerFormatVaultExitsFourAndWritesNothing(t *testing.T) {
 			t.Fatalf("temp file left behind: %s", e.Name())
 		}
 	}
+	return out.String()
 }
 
-func TestNewerFormatLogLineCarriesTheReason(t *testing.T) {
-	dir, _ := newerFormatVault(t)
-	var out bytes.Buffer
-	args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
-	if code := run(context.Background(), args, env(map[string]string{keyEnv: "a-test-passphrase", passwordEnv: "a-long-enough-password"}), noStdin(), &out); code != 4 {
-		t.Fatalf("code %d: %s", code, out.String())
+// The fixture is a malformed v2 header since CSV2 became readable, so this is the malformed cause
+// of exit 4, not the newer-server one. Renamed from TestServeOnANewerFormatVaultExitsFourAndWrites-
+// Nothing so the name says which cause it covers; the newer-server cause is the v=3 test below.
+func TestServeOnAnUnreadableVaultExitsFourAndWritesNothing(t *testing.T) {
+	dir, vaultFile := unreadableVault(t)
+	out := serveRefusedOnVault(t, dir, vaultFile, 4)
+	if !strings.Contains(out, "malformed") {
+		t.Fatalf("the operator is not told the file is unreadable: %s", out)
 	}
+	if strings.Contains(out, "newer server") {
+		t.Fatalf("a malformed header is reported as a newer format: %s", out)
+	}
+}
+
+// The newer-server cause keeps a test of its own, through the one header that differs from the
+// golden in `v` alone, so Task 1.2's ErrNewerFormat -> 4 wiring is still pinned by a real run.
+func TestServeOnAVThreeHeaderExitsFourAndWritesNothing(t *testing.T) {
+	dir, vaultFile := vThreeVault(t)
+	out := serveRefusedOnVault(t, dir, vaultFile, 4)
+	if !strings.Contains(out, "newer server") || !strings.Contains(out, "server vault downgrade") {
+		t.Fatalf("the operator is not told who wrote the file: %s", out)
+	}
+	if strings.Contains(out, "malformed") {
+		t.Fatalf("a newer format is also reported as malformed: %s", out)
+	}
+}
+
+// formatLine insists on exactly one `format` log line and returns it, having scanned the whole
+// line for anything it may not carry: no path, no passphrase, no file bytes, in any field.
+func formatLine(t *testing.T, out string, leaks []string) map[string]any {
+	t.Helper()
 	var line map[string]any
 	var found int
-	for _, l := range strings.Split(out.String(), "\n") {
+	for _, l := range strings.Split(out, "\n") {
 		// Matched on the message field, not a bare `"format"` token: a later log line that merely
 		// mentions the word must not be counted as this one.
 		if !strings.Contains(l, `"msg":"format"`) {
@@ -475,17 +560,31 @@ func TestNewerFormatLogLineCarriesTheReason(t *testing.T) {
 		if err := json.Unmarshal([]byte(l), &line); err != nil {
 			t.Fatalf("not a JSON log line: %q: %v", l, err)
 		}
-		// The reason is the only detail the line may carry, so the whole line is scanned, not just
-		// the field it is expected in: no path, no passphrase, no file bytes, in any field.
-		for _, leak := range []string{dir, "vault.bin", "CSV2", "a-test-passphrase"} {
+		for _, leak := range leaks {
 			if strings.Contains(l, leak) {
 				t.Fatalf("log line %q carries %q", l, leak)
 			}
 		}
 	}
 	if found != 1 {
-		t.Fatalf("want exactly one `format` line, got %d:\n%s", found, out.String())
+		t.Fatalf("want exactly one `format` line, got %d:\n%s", found, out)
 	}
+	return line
+}
+
+func TestMalformedVaultLogLineCarriesTheReason(t *testing.T) {
+	dir, vaultFile := unreadableVault(t)
+	out := serveRefusedOnVault(t, dir, vaultFile, 4)
+	line := formatLine(t, out, []string{dir, "vault.bin", "CSV2", "a-test-passphrase"})
+	if line["reason"] != "malformed" {
+		t.Fatalf("reason = %v, want malformed", line["reason"])
+	}
+}
+
+func TestNewerFormatLogLineCarriesTheReason(t *testing.T) {
+	dir, vaultFile := vThreeVault(t)
+	out := serveRefusedOnVault(t, dir, vaultFile, 4)
+	line := formatLine(t, out, []string{dir, "vault.bin", "CSV2", "a-test-passphrase"})
 	if line["reason"] != "newer-format" {
 		t.Fatalf("reason = %v, want newer-format", line["reason"])
 	}

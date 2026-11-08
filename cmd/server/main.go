@@ -79,8 +79,9 @@ func defaultDataDir() string {
 	return "claude-swap-server"
 }
 
-// Exit codes. 0 clean stop, 1 runtime failure, 2 bad usage or missing input, 4 the vault was
-// written in a format this binary cannot read, 5 certificate refused. 3 (vault locked) arrives
+// Exit codes. 0 clean stop, 1 runtime failure, 2 bad usage or missing input, 4 the vault is in a
+// format this binary cannot read - written by a newer server, or malformed - and 5 certificate
+// refused. 3 (vault locked) arrives
 // with a later slice of the cert-vault plan, and 4 gains its other two causes there too (a v1
 // vault with no passphrase, and no vault and no passphrase).
 //
@@ -171,13 +172,17 @@ func exitCodeFor(err error) int {
 	return vaultExitCode(err)
 }
 
-// vaultExitCode is 4 when the vault was written by a newer server and 1 for anything else. A
-// restart cannot make this binary read that format, so 4 is one of the codes the service units
-// of slices 4 and 8 must keep out of their restart loop - see the exit-code block above for why
-// that is a contract and not yet a behaviour. A later slice adds 3 (no slot could unwrap) and
-// 4's other two causes.
+// vaultExitCode is 4 when this binary cannot read the vault's format and 1 for anything else.
+// Two causes share the code: a header written by a newer server, and a header that is malformed -
+// which since the v2 parser landed includes every out-of-bounds number in a v2 header. A restart
+// cannot make either readable, so 4 is one of the codes the service units of slices 4 and 8 must
+// keep out of their restart loop; see the exit-code block above for why that is a contract and not
+// yet a behaviour. A later slice adds 3 (no slot could unwrap) and 4's other two causes.
+//
+// Malformed is deliberately not 3 and deliberately not ErrBadKey's code: a crafted header must
+// never push an operator towards rotating a correct passphrase.
 func vaultExitCode(err error) int {
-	if errors.Is(err, vault.ErrNewerFormat) {
+	if errors.Is(err, vault.ErrNewerFormat) || errors.Is(err, vault.ErrMalformed) {
 		return exitNewerFormat
 	}
 	return exitRuntime
@@ -185,9 +190,14 @@ func vaultExitCode(err error) int {
 
 // vaultReason is the half of the case table an exit code cannot carry, and it is a fixed string:
 // the error text names a file this process could not read, so quoting it could quote file content.
+// The two reasons are distinct because the operator's next step differs - downgrade on the newer
+// binary, against restore from a copy.
 func vaultReason(err error) string {
-	if errors.Is(err, vault.ErrNewerFormat) {
+	switch {
+	case errors.Is(err, vault.ErrNewerFormat):
 		return "newer-format"
+	case errors.Is(err, vault.ErrMalformed):
+		return "malformed"
 	}
 	return ""
 }
