@@ -33,6 +33,10 @@ const vaultUsage = `usage: server vault <subcommand> [--data-dir DIR]
                                 safe while the service is up. By default only the machine slots are
                                 tried; --all-slots also asks for the passphrase and opens with every
                                 slot in turn. Never prints payload.
+  init [--dry-run]              create vault.bin and tunnelkeys.bin as v2, each with a passphrase
+       [--plain-kek]            slot and this host's machine slot. Only for a data dir with neither
+                                file: a v1 file belongs to migrate, a v2 file needs nothing.
+                                --dry-run prints the plan and writes nothing at all.
   add-slot --type TYPE          add a key slot wrapping the CURRENT data key: passphrase, dpapi or
           [--plain-kek]         kek-file. Every existing key keeps working.
   remove-slot --id SLOTID       remove one slot AND rotate the data key, so the removed key opens
@@ -100,6 +104,14 @@ func vaultCmd(args []string, stdin io.Reader, out, errOut io.Writer) int {
 			fs.BoolVar(&allSlots, "all-slots", false, "also ask for the passphrase and open with every slot in turn")
 		}, out, errOut, func(dataDir string, _ *flag.FlagSet) int {
 			return vaultVerify(dataDir, allSlots, stdin, out)
+		})
+	case "init":
+		var dryRun, plainKEK bool
+		return withDataDir(sub, rest, func(fs *flag.FlagSet) {
+			fs.BoolVar(&dryRun, "dry-run", false, "print what would be created and write nothing at all")
+			fs.BoolVar(&plainKEK, "plain-kek", false, "on Linux, select the plain root-owned credstore file rather than an encrypted credential")
+		}, out, errOut, func(dataDir string, _ *flag.FlagSet) int {
+			return vaultInit(dataDir, dryRun, plainKEK, stdin, out)
 		})
 	case "add-slot":
 		var slotType string

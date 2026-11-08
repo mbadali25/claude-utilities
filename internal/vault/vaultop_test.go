@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,12 +14,16 @@ import (
 
 const fakeDEKID = "AAECAwQFBgcICQoLDA0ODw==" // 16 bytes, the length a dek.id must decode to
 
+// rotateOp is a journal for `rotate`, which draws a new data key and therefore IS one of the two
+// operations that deal with the recovery copy: ResealsBak is true for it and for `remove-slot`, and
+// false for every other operation that writes a journal.
 func rotateOp(stage string) VaultOp {
 	return VaultOp{
-		Op:       "rotate",
-		Files:    []string{vaultFileName, KeyringFileName},
-		NewDEKID: fakeDEKID,
-		Stage:    stage,
+		Op:         "rotate",
+		Files:      []string{vaultFileName, KeyringFileName},
+		NewDEKID:   fakeDEKID,
+		Stage:      stage,
+		ResealsBak: true,
 	}
 }
 
@@ -145,7 +150,8 @@ func TestSettleCompletesAnInterruptedBakReseal(t *testing.T) {
 func TestSettleRemovesABakItCannotReseal(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, vaultFileName, vaultFileName+bakSuffix)
-	op := VaultOp{Op: "remove-slot", Files: []string{vaultFileName}, NewDEKID: fakeDEKID, Stage: StageRenamed}
+	op := VaultOp{Op: "remove-slot", Files: []string{vaultFileName}, NewDEKID: fakeDEKID,
+		Stage: StageRenamed, ResealsBak: true}
 	if err := WriteVaultOp(dir, op); err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +318,8 @@ func TestCrashAfterBakResealBeforeRenameLeavesTheOldVault(t *testing.T) {
 func TestSettleFailsWhenTheResealFails(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, vaultFileName, vaultFileName+bakSuffix)
-	op := VaultOp{Op: "rotate", Files: []string{vaultFileName}, NewDEKID: fakeDEKID, Stage: StageRenamed}
+	op := VaultOp{Op: "rotate", Files: []string{vaultFileName}, NewDEKID: fakeDEKID,
+		Stage: StageRenamed, ResealsBak: true}
 	if err := WriteVaultOp(dir, op); err != nil {
 		t.Fatal(err)
 	}
@@ -437,15 +444,16 @@ func TestMixedPairIsDetectedAndReported(t *testing.T) {
 }
 
 // The journal is a plain file beside the vault, so what it may hold is as important as what it
-// does: an operation name, file names, the base64 dek.id and a stage, and nothing else. The dek.id
-// is the HKDF salt and part of every slot's AAD, so it is public by construction.
+// does: an operation name, file names, the base64 dek.id, a stage and the recovery-copy flag, and
+// nothing else. The dek.id is the HKDF salt and part of every slot's AAD, so it is public by
+// construction, and the flag is a boolean about what settle may touch.
 //
 // The assertion is on the field set, because that is the thing that can change. The version this
 // replaces looked for a DEK and a passphrase that were never handed to WriteVaultOp in the first
 // place - two string constants compared against a file they could not reach - so it would have
 // passed whatever the writer did. A field added to VaultOp that carried a wrap or a DEK would land
 // in this file, and this is what sees it.
-func TestVaultOpJournalCarriesOnlyItsFourPublicFields(t *testing.T) {
+func TestVaultOpJournalCarriesOnlyItsFivePublicFields(t *testing.T) {
 	dir := t.TempDir()
 	if err := WriteVaultOp(dir, rotateOp(StageBak)); err != nil {
 		t.Fatal(err)
@@ -458,7 +466,7 @@ func TestVaultOpJournalCarriesOnlyItsFourPublicFields(t *testing.T) {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"op": true, "files": true, "newDekId": true, "stage": true}
+	want := map[string]bool{"op": true, "files": true, "newDekId": true, "stage": true, "resealsBak": true}
 	for k := range fields {
 		if !want[k] {
 			t.Errorf("the journal carries a field this test has not vetted, %q: %s", k, data)
@@ -491,7 +499,8 @@ func TestSettleWritesNoPassphraseIntoTheDataDir(t *testing.T) {
 
 	dir := t.TempDir()
 	writeFiles(t, dir, vaultFileName, vaultFileName+bakSuffix)
-	op := VaultOp{Op: "rotate", Files: []string{vaultFileName}, NewDEKID: fakeDEKID, Stage: StageRenamed}
+	op := VaultOp{Op: "rotate", Files: []string{vaultFileName}, NewDEKID: fakeDEKID,
+		Stage: StageRenamed, ResealsBak: true}
 	if err := WriteVaultOp(dir, op); err != nil {
 		t.Fatal(err)
 	}
@@ -517,5 +526,104 @@ func TestSettleWritesNoPassphraseIntoTheDataDir(t *testing.T) {
 		if strings.Contains(string(body), fakePassphrase) {
 			t.Errorf("%s carries the passphrase", e.Name())
 		}
+	}
+}
+
+// --- the recovery-copy flag ---
+
+// The PR 23 review finding, pinned: an operation that never touched a recovery copy must not have
+// its .bak re-sealed or DELETED by the settle, whatever stage the journal reached. `add-slot` and
+// `change-passphrase` leave every existing key working, so the copy beside the file still opens
+// under keys that are all still current - and `init` created the file in the first place. For all
+// three the copy is a recovery copy nobody asked this command to touch.
+func TestSettleNeverTouchesTheBakOfAnOperationThatDoesNotResealIt(t *testing.T) {
+	for _, name := range []string{"add-slot", "change-passphrase", "init"} {
+		for _, stage := range []string{StageStarted, StageBak, StageRenamed} {
+			t.Run(name+"/"+stage, func(t *testing.T) {
+				dir := t.TempDir()
+				writeFiles(t, dir, vaultFileName, vaultFileName+bakSuffix)
+				before := bytesOf(t, filepath.Join(dir, vaultFileName+bakSuffix))
+				op := VaultOp{Op: name, Files: []string{vaultFileName}, Stage: stage}
+
+				called := false
+				restore := resealBak
+				resealBak = func(string, VaultOp, KeySource) (string, error) {
+					called = true
+					return bakRemoved, nil
+				}
+				t.Cleanup(func() { resealBak = restore })
+
+				result, err := SettleVaultOp(dir, op, EnvKey(keyEnv))
+				if err != nil {
+					t.Fatalf("SettleVaultOp: %v", err)
+				}
+				if called {
+					t.Fatal("settle reached the re-seal step for an operation that does not deal with the .bak")
+				}
+				if result != settledNoBak {
+					t.Fatalf("result = %q, want %q", result, settledNoBak)
+				}
+				if strings.Contains(result, "revert") {
+					t.Fatalf("result claims an undo that did not happen: %q", result)
+				}
+				if !exists(t, filepath.Join(dir, vaultFileName+bakSuffix)) {
+					t.Fatal("the recovery copy was deleted")
+				}
+				if got := bytesOf(t, filepath.Join(dir, vaultFileName+bakSuffix)); !bytes.Equal(got, before) {
+					t.Fatal("the recovery copy was rewritten")
+				}
+				if _, ok, _ := ReadVaultOp(dir); ok {
+					t.Fatal("the journal was not cleared")
+				}
+			})
+		}
+	}
+}
+
+// The polarity, asserted on its own because it is the safety property. A journal this binary did not
+// write - forged in a data dir anyone with write access can reach, or torn and then re-formed -
+// unmarshals with every absent field at its zero value. The dangerous branch has to be the one that
+// needs a field explicitly set, so a journal with no resealsBak member deletes nothing.
+func TestAJournalWithNoResealsBakMemberDeletesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, vaultFileName, vaultFileName+bakSuffix)
+	raw := `{"op":"rotate","files":["` + vaultFileName + `"],"newDekId":"` + fakeDEKID + `","stage":"renamed"}`
+	if err := os.WriteFile(VaultOpPath(dir), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	op, ok, err := ReadVaultOp(dir)
+	if err != nil || !ok {
+		t.Fatalf("ReadVaultOp = ok %v err %v", ok, err)
+	}
+	if op.ResealsBak {
+		t.Fatal("an absent resealsBak member read as true, which is the unsafe default")
+	}
+	if _, err := SettleVaultOp(dir, op, EnvKey(keyEnv)); err != nil {
+		t.Fatalf("SettleVaultOp: %v", err)
+	}
+	if !exists(t, filepath.Join(dir, vaultFileName+bakSuffix)) {
+		t.Fatal("settle deleted a recovery copy on the strength of a journal that did not ask it to")
+	}
+}
+
+// A mixed pair still wins over everything, including the no-bak shortcut: `init` spans both files,
+// so one landed and one did not, and neither "settled" nor "reverted" is true of that.
+func TestSettleStillRefusesAMixedPairForANoBakOperation(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, vaultFileName), []byte(v2VaultMagic+"rest"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, KeyringFileName), []byte(keyringMagic+"rest"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	op := VaultOp{Op: "init", Files: []string{vaultFileName, KeyringFileName}, Stage: StageRenamed}
+	if err := WriteVaultOp(dir, op); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SettleVaultOp(dir, op, EnvKey(keyEnv)); !errors.Is(err, ErrVaultOpMixedPair) {
+		t.Fatalf("SettleVaultOp on a mixed pair = %v, want ErrVaultOpMixedPair", err)
+	}
+	if _, ok, _ := ReadVaultOp(dir); !ok {
+		t.Fatal("a refused settle cleared the journal")
 	}
 }

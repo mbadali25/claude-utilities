@@ -61,6 +61,14 @@ const (
 	bakRemoved  = "bak removed"
 	bakAbsent   = "no bak"
 
+	// settledNoBak is what settle reports for an operation whose ResealsBak is false. It is
+	// deliberately not "reverted": nothing was undone, and nothing had to be. Such an operation
+	// writes one file at a time through replaceFile, which is atomic, so whichever generation is on
+	// disk is a whole one - and it never touched the recovery copy beside it, so there is no step
+	// left to finish either. The only thing the journal was still owed is its own removal.
+	settledNoBak = "nothing to settle: it touches no recovery copy, and each file it named is whole " +
+		"at whichever generation was written last"
+
 	// maxVaultOpField bounds the two free-text fields, so a crafted journal cannot put a screenful
 	// into an operator's terminal.
 	maxVaultOpField = 32
@@ -120,6 +128,19 @@ type VaultOp struct {
 	Files    []string `json:"files"`
 	NewDEKID string   `json:"newDekId"`
 	Stage    string   `json:"stage"`
+	// ResealsBak says whether settle may touch the recovery copy beside each named file. Only an
+	// operation that invalidates a key - `remove-slot` and `rotate`, which draw a new data key - deals
+	// with the .bak at all, and for those a copy left openable by the key just removed is the hole
+	// step (ii) of the ordering exists to close.
+	//
+	// The polarity is the safety property and it is this way round deliberately: false means "do not
+	// touch it". A journal this binary did not write - forged in a data dir anyone with write access
+	// can reach, or torn mid-write and then re-formed - unmarshals with every absent field at its zero
+	// value, so the dangerous branch is the one that needs a field to be explicitly set. The settle
+	// for `add-slot`, `change-passphrase` and `init` therefore removes nothing: those three never
+	// invalidate a key, so the copy beside the file still opens under keys that are all still current,
+	// and deleting it would destroy a recovery copy no operator asked this command to touch.
+	ResealsBak bool `json:"resealsBak"`
 }
 
 // VaultOpPath is the journal's path for a data dir.
@@ -205,6 +226,17 @@ func SettleVaultOp(dataDir string, op VaultOp, ks KeySource) (string, error) {
 	// hands a mixed pair to.
 	if line, mixed := MixedPair(dataDir); mixed {
 		return "", fmt.Errorf("%w: %s", ErrVaultOpMixedPair, line)
+	}
+	// Before the stage test, because for an operation that never touched a recovery copy the stage
+	// decides nothing: there was no (ii) to finish, and each file it named went through one atomic
+	// replaceFile, so the bytes on disk are a whole generation either way. Reporting "reverted" here
+	// would claim an undo that did not happen, and taking the StageRenamed branch would hand a .bak
+	// nobody asked about to settleReseal's delete fallback. See ResealsBak for the polarity.
+	if !op.ResealsBak {
+		if err := ClearVaultOp(dataDir); err != nil {
+			return "", err
+		}
+		return settledNoBak, nil
 	}
 	if op.Stage != StageRenamed {
 		// (i) or (ii): the new generation never became visible, so the old file is intact and
