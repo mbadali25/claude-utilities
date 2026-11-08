@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,8 +34,24 @@ func kekFixture(t *testing.T) string {
 	if err := os.MkdirAll(credstoreEncryptedDir, 0o700); err != nil {
 		t.Fatalf("mkdir credstore.encrypted: %v", err)
 	}
-	t.Cleanup(func() { credstoreDir, credstoreEncryptedDir = plainPrev, encPrev })
+	// The fixture's files are owned by whoever runs the tests, never root, so the credstore routes
+	// would refuse them all on their ownership. The seam says "root owns it" and each test that
+	// cares about ownership says otherwise for itself, the same way asUID pins the effective uid.
+	ownerPrev := fileOwnerUIDFn
+	fileOwnerUIDFn = func(fs.FileInfo) (int, bool) { return 0, true }
+	t.Cleanup(func() {
+		credstoreDir, credstoreEncryptedDir = plainPrev, encPrev
+		fileOwnerUIDFn = ownerPrev
+	})
 	return dir
+}
+
+// asFileOwner pins the uid the resolver believes owns every file it stats.
+func asFileOwner(t *testing.T, uid int) {
+	t.Helper()
+	prev := fileOwnerUIDFn
+	fileOwnerUIDFn = func(fs.FileInfo) (int, bool) { return uid, true }
+	t.Cleanup(func() { fileOwnerUIDFn = prev })
 }
 
 // asUID pins the effective uid the resolver sees.
@@ -297,6 +314,95 @@ func TestResolveKEKRefusesAPlainFileOthersCanRead(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "0644") && !strings.Contains(err.Error(), "644") {
 		t.Fatalf("error does not name the mode it found: %v", err)
+	}
+}
+
+func TestResolveKEKRefusesACredstoreFileNotOwnedByRoot(t *testing.T) {
+	// 0600 says "only the owner can read it". It is the slot's whole claim only when the owner is
+	// root: /etc/credstore is root-owned 0700, so a file inside it owned by someone else was put
+	// there by root on that account's behalf, and that account is exactly who the machine slot is
+	// supposed to be keeping the KEK away from. The directory's mode is not the file's owner.
+	if runtime.GOOS == "windows" {
+		t.Skip("a Windows file is owned by a SID, not a uid; the credstore routes are uid-0 only and os.Geteuid is -1 here")
+	}
+	kekFixture(t)
+	path := filepath.Join(credstoreDir, kekCredstoreFile)
+	writeKEK(t, path, keyLen, 0o600)
+	asUID(t, 0)
+	asFileOwner(t, 1000)
+
+	kek, route, err := resolveKEK(HostKeyOptions{CredentialName: "vault-kek", AllowRootCredsDecrypt: true})
+	if err == nil {
+		t.Fatal("resolveKEK read a credstore KEK owned by a non-root uid")
+	}
+	if kek != nil || route != kekRouteUnreachable {
+		t.Fatalf("kek = %d bytes, route = %q", len(kek), route)
+	}
+	if !errors.Is(err, ErrKEKUnreachable) {
+		t.Fatalf("err = %v, want ErrKEKUnreachable", err)
+	}
+	if !strings.Contains(err.Error(), "1000") {
+		t.Fatalf("error does not name the uid it found: %v", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error does not name the file: %v", err)
+	}
+	// And a root-owned one on the same path is read, so the check is about the owner and not about
+	// the route being broken.
+	asFileOwner(t, 0)
+	if _, route, err := resolveKEK(HostKeyOptions{CredentialName: "vault-kek", AllowRootCredsDecrypt: true}); err != nil || route != kekRoutePlainFile {
+		t.Fatalf("a root-owned 0600 KEK gave route %q, err %v", route, err)
+	}
+}
+
+func TestReadKEKFileRefusesAnythingThatIsNotARegularFile(t *testing.T) {
+	// A key file is 32 bytes on disk. A directory, a device or a FIFO at that path is a
+	// misconfiguration, and the dangerous one is the FIFO: os.ReadFile on a FIFO with no writer
+	// blocks forever, so a server start would hang with no error and no log line. The mode is
+	// checked before anything is opened, which is the only order that cannot block.
+	dir := kekFixture(t)
+	notAFile := filepath.Join(dir, "a-directory")
+	if err := os.MkdirAll(notAFile, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	asUID(t, 1000)
+
+	kek, route, err := resolveKEK(HostKeyOptions{CredentialName: "vault-kek", KEKFile: notAFile})
+	if err == nil {
+		t.Fatal("resolveKEK accepted a directory as --kek-file")
+	}
+	if kek != nil || route != kekRouteUnreachable {
+		t.Fatalf("kek = %d bytes, route = %q", len(kek), route)
+	}
+	if !errors.Is(err, ErrKEKUnreachable) {
+		t.Fatalf("err = %v, want ErrKEKUnreachable", err)
+	}
+	if !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("error does not say what it refused: %v", err)
+	}
+}
+
+func TestReadKEKFileBoundsTheRead(t *testing.T) {
+	// The length check is what makes a KEK a KEK, and it used to happen after the whole file was in
+	// memory: a 1 GiB file at a path the operator named was read in full and then rejected for its
+	// length. The read is bounded at keyLen+1 - one byte past, so "exactly 32" is still provable -
+	// and the refusal names what it saw.
+	dir := kekFixture(t)
+	path := filepath.Join(dir, "big.kek")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{0xbe}, 1<<20), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	asUID(t, 1000)
+
+	kek, route, err := resolveKEK(HostKeyOptions{CredentialName: "vault-kek", KEKFile: path})
+	if err == nil {
+		t.Fatal("resolveKEK accepted a 1 MiB --kek-file")
+	}
+	if kek != nil || route != kekRouteUnreachable {
+		t.Fatalf("kek = %d bytes, route = %q", len(kek), route)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(keyLen+1)) {
+		t.Fatalf("error does not name the bound it stopped at: %v", err)
 	}
 }
 

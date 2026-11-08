@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,6 +88,11 @@ var geteuidFn = os.Geteuid
 // seam exists so the whole route can be tested without systemd, root, or a real credential.
 var credsDecryptFn = systemdCredsDecrypt
 
+// fileOwnerUIDFn is fileOwnerUID unless a test replaces it. It is a seam for the same reason
+// geteuidFn is: a test cannot chown a file to root, so the only way to exercise both sides of the
+// root-ownership check is to say what the owner is.
+var fileOwnerUIDFn = fileOwnerUID
+
 // ErrKEKUnreachable is the exit-2 class: a kek-file slot is configured and this process cannot
 // reach its KEK - not root, the child exited non-zero, the plaintext was the wrong length, or the
 // key file is readable by more than its owner.
@@ -112,17 +119,27 @@ func resolveKEK(opts HostKeyOptions) (kek []byte, route string, err error) {
 	}
 
 	// 1. The credential systemd handed us. Wins outright.
+	//
+	// Three outcomes from the stat, and only one of them is a fall-through. ENOENT is: a unit may
+	// have been handed some other credential and no KEK, and that is a console-equivalent run. Any
+	// other error is not - a credential directory this process cannot read is a KEK that is there
+	// and out of reach, and reading that as "absent" is the exit-2 case reported as a passphrase
+	// prompt.
 	if dir := os.Getenv(credentialsDirEnv); dir != "" {
 		path := filepath.Join(dir, name)
 		//nolint:gosec // G703: the path is systemd's own credential directory joined with the
 		// credential name this process was configured with. Naming the KEK's location is the
 		// feature; there is no untrusted traversal to prevent, and filepath.Join already cleans.
-		if _, statErr := os.Stat(path); statErr == nil {
+		_, statErr := os.Stat(path)
+		switch {
+		case statErr == nil:
 			b, rerr := readKEKFile(path, false)
 			if rerr != nil {
 				return nil, kekRouteUnreachable, rerr
 			}
 			return b, kekRouteCredentialsDir, nil
+		case !errors.Is(statErr, fs.ErrNotExist):
+			return nil, kekRouteUnreachable, fmt.Errorf("%w: %s: %w", ErrKEKUnreachable, path, statErr)
 		}
 	}
 
@@ -131,8 +148,30 @@ func resolveKEK(opts HostKeyOptions) (kek []byte, route string, err error) {
 	if opts.AllowRootCredsDecrypt {
 		encPath := filepath.Join(credstoreEncryptedDir, kekCredstoreFile)
 		plainPath := filepath.Join(credstoreDir, kekCredstoreFile)
-		encExists := fileExists(encPath)
-		plainExists := fileExists(plainPath)
+		encExists, encErr := credstoreEntryExists(encPath)
+		plainExists, plainErr := credstoreEntryExists(plainPath)
+		// A credstore entry this process could not even stat is the case that matters, and it is the
+		// normal one off root: /etc/credstore and /etc/credstore.encrypted are root:root 0700, so a
+		// non-root CLI gets EACCES on the entry inside and learns nothing about whether it is there.
+		// Treated as absent - which is what an `err == nil` existence check does - the uid-0 refusal
+		// below becomes unreachable and the open falls through to the passphrase, which is exactly
+		// the wrong diagnosis to hand an operator who asked for the machine slot.
+		//
+		// The cost is named rather than hidden: a non-root run with AllowRootCredsDecrypt set now
+		// refuses on a host whose credstore directory exists and is empty, because it cannot tell
+		// that from a host whose KEK is sitting right there. That is the direction to fail in, and
+		// the spec's own answer for a slot that cannot be reached is the passphrase plus
+		// remove-slot, not a silent fall-through.
+		if encErr != nil || plainErr != nil {
+			which, perr := encPath, encErr
+			if encErr == nil {
+				which, perr = plainPath, plainErr
+			}
+			if geteuidFn() != 0 {
+				return nil, kekRouteUnreachable, fmt.Errorf("%w: %s needs root; re-run as root (sudo)", ErrKEKUnreachable, which)
+			}
+			return nil, kekRouteUnreachable, fmt.Errorf("%w: %s: %w", ErrKEKUnreachable, which, perr)
+		}
 		if (encExists || plainExists) && geteuidFn() != 0 {
 			// Names the file, because that is what the operator acts on. The log line carries the
 			// route and never this string.
@@ -183,42 +222,88 @@ func resolveKEK(opts HostKeyOptions) (kek []byte, route string, err error) {
 	return nil, kekRouteUnreachable, nil
 }
 
-// readKEKFile reads exactly a 32-byte KEK. checkMode is set for the credstore's own file, where the
-// 0600 is part of what the slot is claiming: a key file the vault's own attackers can read is not a
-// secret outside the copy, and reading it anyway would make the slot look like protection it is not
-// giving. The explicit --kek-file path is the operator's choice and is not second-guessed.
+// readKEKFile reads exactly a 32-byte KEK. credstore is set for the credstore's own file, where the
+// 0600 and the root ownership are part of what the slot is claiming: a key file the vault's own
+// attackers can read is not a secret outside the copy, and reading it anyway would make the slot
+// look like protection it is not giving. The explicit --kek-file path is the operator's choice and
+// is not second-guessed on either.
 //
-// The mode check is skipped on Windows, where os.FileMode's permission bits are synthesized from
-// the read-only attribute and say nothing about who may read the file. That costs nothing: the
-// credstore routes are reachable only as uid 0, and os.Geteuid is -1 on Windows.
-func readKEKFile(path string, checkMode bool) ([]byte, error) {
+// Those two checks are skipped on Windows, where os.FileMode's permission bits are synthesized from
+// the read-only attribute and a file is owned by a SID, not a uid, so neither says anything about
+// who may read it. That costs nothing: the credstore routes are reachable only as uid 0, and
+// os.Geteuid is -1 on Windows.
+// The stat is unconditional and comes before any open, which is the only order that cannot hang: a
+// FIFO at this path blocks os.Open in open(2) until something writes to it, so a readKEKFile that
+// opened first and asked questions later would turn a misconfigured path into a server start that
+// hangs with no error and no log line. Lstat and not Stat, which gives O_NOFOLLOW's useful half for
+// free: a symlink is not a regular file, so a symlink pointed at a FIFO is refused on the link
+// itself and the FIFO is never touched. A KEK is 32 bytes on disk at the path the operator named,
+// and the loss - a symlinked --kek-file - is worth not having that shape to reason about.
+//
+// The read is bounded at keyLen+1. One byte past, so "exactly 32" is still provable, and a 1 GiB
+// file at the named path is refused on its length without being pulled into memory first.
+func readKEKFile(path string, credstore bool) ([]byte, error) {
 	path = filepath.Clean(path)
-	if checkMode && runtime.GOOS != "windows" {
-		//nolint:gosec // G703: see resolveKEK - the operator names this file on purpose, by flag,
-		// by environment variable or by being systemd's credstore. Cleaned on the line above.
-		fi, err := os.Stat(path)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %s: %w", ErrKEKUnreachable, path, err)
-		}
-		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-			return nil, fmt.Errorf("%w: %s is mode %#o; it must be 0600 so only its owner can read it", ErrKEKUnreachable, path, perm)
-		}
-	}
-	//nolint:gosec // G703: same path, cleaned above; reading the file the operator named is the job.
-	b, err := os.ReadFile(path)
+	//nolint:gosec // G703: see resolveKEK - the operator names this file on purpose, by flag, by
+	// environment variable or by being systemd's credstore. Cleaned on the line above.
+	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s: %w", ErrKEKUnreachable, path, err)
 	}
-	if len(b) != keyLen {
-		zero(b)
-		return nil, fmt.Errorf("%w: %s holds %d bytes, want a %d-byte key", ErrKEKUnreachable, path, len(b), keyLen)
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s is not a regular file (mode %s); a key file is %d bytes on disk", ErrKEKUnreachable, path, fi.Mode().Type(), keyLen)
 	}
-	return b, nil
+	if credstore && runtime.GOOS != "windows" {
+		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+			return nil, fmt.Errorf("%w: %s is mode %#o; it must be 0600 so only its owner can read it", ErrKEKUnreachable, path, perm)
+		}
+		// 0600 is the slot's claim only when root is the owner: a root-owned 0700 directory holding
+		// a file some other account owns is still a 0600 file, and that account is who the machine
+		// slot is keeping the key away from. The directory's mode is not the file's owner.
+		if uid, known := fileOwnerUIDFn(fi); known && uid != 0 {
+			return nil, fmt.Errorf("%w: %s is owned by uid %d, not root; a credstore KEK must be root-owned", ErrKEKUnreachable, path, uid)
+		}
+	}
+	//nolint:gosec // G703: same path, cleaned above; reading the file the operator named is the job.
+	// It is a regular file, checked on the Lstat above, so this open cannot block.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrKEKUnreachable, path, err)
+	}
+	defer func() { _ = f.Close() }()
+	b := make([]byte, keyLen+1)
+	n, rerr := io.ReadFull(f, b)
+	if rerr != nil && !errors.Is(rerr, io.EOF) && !errors.Is(rerr, io.ErrUnexpectedEOF) {
+		zero(b)
+		return nil, fmt.Errorf("%w: %s: %w", ErrKEKUnreachable, path, rerr)
+	}
+	if n > keyLen {
+		zero(b)
+		return nil, fmt.Errorf("%w: %s holds at least %d bytes, want a %d-byte key", ErrKEKUnreachable, path, n, keyLen)
+	}
+	if n != keyLen {
+		zero(b)
+		return nil, fmt.Errorf("%w: %s holds %d bytes, want a %d-byte key", ErrKEKUnreachable, path, n, keyLen)
+	}
+	return b[:keyLen:keyLen], nil
 }
 
-func fileExists(path string) bool {
+// credstoreEntryExists says whether a credstore entry is there to be used. The three-way answer is
+// the point, and a two-way one is the bug it replaces:
+//   - true, nil: a non-directory is at that path.
+//   - false, nil: nothing is, and the caller moves to the next route. The only fall-through.
+//   - false, an error: this process could not tell. EACCES is the live case - the credstore
+//     directories are root:root 0700 - and "could not tell" must never collapse into "absent".
+func credstoreEntryExists(path string) (bool, error) {
 	fi, err := os.Stat(filepath.Clean(path))
-	return err == nil && !fi.IsDir()
+	switch {
+	case err == nil:
+		return !fi.IsDir(), nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // credsDecryptArgs is the child's argv, as its own function so a test can assert the shape without
