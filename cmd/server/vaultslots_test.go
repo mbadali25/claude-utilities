@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,8 +183,12 @@ func TestARefusedMutatorLeavesNoJournal(t *testing.T) {
 func TestAMutatorSettlesALeftoverJournalFirst(t *testing.T) {
 	dir := twoSlotDir(t)
 	withPassphraseEnv(t)
+	// ResealsBak is what a real `rotate` writes: it draws a new data key, so it is one of the two
+	// operations whose settle may touch the recovery copy. At `started` nothing became visible, so the
+	// settle reverts.
 	if err := vault.WriteVaultOp(dir, vault.VaultOp{
-		Op: "rotate", Files: []string{"vault.bin"}, Stage: vault.StageStarted}); err != nil {
+		Op: "rotate", Files: []string{"vault.bin"}, Stage: vault.StageStarted,
+		ResealsBak: true}); err != nil {
 		t.Fatalf("WriteVaultOp: %v", err)
 	}
 	var out bytes.Buffer
@@ -513,4 +518,145 @@ func TestAMutatorLogsOneLinePerRun(t *testing.T) {
 	if strings.Contains(out.String(), base64.StdEncoding.EncodeToString(fixtureKEK())) {
 		t.Fatalf("the output carries the KEK: %s", out.String())
 	}
+}
+
+// --- the journal stage ladder ---
+
+// The PR 23 review finding, fixed and pinned: runMutation wrote the journal at `started` and never
+// advanced it, so the window between the write landing and the journal being removed held a journal
+// saying nothing had happened beside a file that had already changed - and the next command's settle
+// reported "reverted" for an operation that in fact completed. The journal is now advanced to
+// `renamed` after the mutation and before it is cleared.
+//
+// StageBak has no writer here on purpose: the `.bak` step runs INSIDE internal/vault, between the
+// two writes this test brackets, so emitting it would need a progress seam through RemoveSlot and
+// Rotate. Nothing is lost by its absence - the package deals with the copy before the rename, so by
+// the time the journal reaches `renamed` there is no recovery-copy work left to finish.
+func TestEveryMutatorAdvancesTheJournalBeforeClearingIt(t *testing.T) {
+	for _, m := range mutators() {
+		t.Run(m.name, func(t *testing.T) {
+			dir := twoSlotDir(t)
+			withPassphraseEnv(t)
+			var atClear vault.VaultOp
+			var sawClear bool
+			restore := watchJournalAtClear(t, &atClear, &sawClear)
+			defer restore()
+
+			var out bytes.Buffer
+			if code := m.run(dir, "a-new-passphrase\n", &out); code != 0 {
+				t.Fatalf("exit %d, want 0: %s", code, out.String())
+			}
+			if !sawClear {
+				t.Fatal("the journal was never cleared, so the ladder cannot be read")
+			}
+			if atClear.Stage != vault.StageRenamed {
+				t.Fatalf("the journal was at stage %q when it was cleared, want %q",
+					atClear.Stage, vault.StageRenamed)
+			}
+			if atClear.Op != m.name {
+				t.Fatalf("the journal names op %q, want %q", atClear.Op, m.name)
+			}
+			if _, ok, err := vault.ReadVaultOp(dir); ok || err != nil {
+				t.Fatalf("the journal survived a finished mutation: ok %v err %v", ok, err)
+			}
+		})
+	}
+}
+
+// The journal reads `started` while the mutation is in flight, which is the half of the ladder that
+// already worked and must keep working: a crash there leaves the file the command started with.
+func TestTheJournalReadsStartedWhileTheMutationIsInFlight(t *testing.T) {
+	dir := twoSlotDir(t)
+	withPassphraseEnv(t)
+	var inFlight vault.VaultOp
+	var out bytes.Buffer
+	code := runMutation(dir, mutation{op: "rotate", files: []string{"vault.bin"}, resealsBak: true,
+		reader: newPassphraseReader(strings.NewReader(""), &out),
+		apply: func(v *vault.Vault, ks vault.KeySource) (string, error) {
+			inFlight, _, _ = vault.ReadVaultOp(dir)
+			return "", v.Rotate(ks)
+		}}, &out)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0: %s", code, out.String())
+	}
+	if inFlight.Stage != vault.StageStarted {
+		t.Fatalf("the journal read %q during the mutation, want %q", inFlight.Stage, vault.StageStarted)
+	}
+	if !inFlight.ResealsBak {
+		t.Fatal("a rotate's journal does not claim the recovery copy")
+	}
+}
+
+// Only the two operations that invalidate a key claim the recovery copy. add-slot and
+// change-passphrase leave every existing key working, so the .bak beside the file still opens under
+// keys that are all current, and a settle that re-sealed or DELETED it would destroy a recovery copy
+// nobody asked this command to touch. The flag is what the settle reads, so it is asserted on the
+// journal the command wrote.
+func TestOnlyAKeyInvalidatingMutatorClaimsTheRecoveryCopy(t *testing.T) {
+	want := map[string]bool{
+		"add-slot": false, "remove-slot": true, "rotate": true, "change-passphrase": false,
+	}
+	for _, m := range mutators() {
+		t.Run(m.name, func(t *testing.T) {
+			dir := twoSlotDir(t)
+			withPassphraseEnv(t)
+			var atClear vault.VaultOp
+			var sawClear bool
+			restore := watchJournalAtClear(t, &atClear, &sawClear)
+			defer restore()
+
+			var out bytes.Buffer
+			if code := m.run(dir, "a-new-passphrase\n", &out); code != 0 {
+				t.Fatalf("exit %d, want 0: %s", code, out.String())
+			}
+			if !sawClear {
+				t.Fatal("the journal was never cleared, so the flag cannot be read")
+			}
+			if atClear.ResealsBak != want[m.name] {
+				t.Fatalf("%s wrote resealsBak %v, want %v", m.name, atClear.ResealsBak, want[m.name])
+			}
+		})
+	}
+}
+
+// And the property the flag exists for, end to end through the command and asserted on the file
+// rather than on the journal: a recovery copy beside the vault survives add-slot and
+// change-passphrase byte for byte.
+func TestAddSlotAndChangePassphraseLeaveTheRecoveryCopyAlone(t *testing.T) {
+	for _, m := range mutators() {
+		if m.name != "add-slot" && m.name != "change-passphrase" {
+			continue
+		}
+		t.Run(m.name, func(t *testing.T) {
+			dir := twoSlotDir(t)
+			withPassphraseEnv(t)
+			bak := vaultPath(dir) + ".bak"
+			if err := os.WriteFile(bak, mustRead(t, vaultPath(dir)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := mustRead(t, bak)
+			var out bytes.Buffer
+			if code := m.run(dir, "a-new-passphrase\n", &out); code != 0 {
+				t.Fatalf("exit %d, want 0: %s", code, out.String())
+			}
+			if !bytes.Equal(before, mustRead(t, bak)) {
+				t.Fatalf("%s changed the recovery copy", m.name)
+			}
+		})
+	}
+}
+
+// watchJournalAtClear reads the journal at the moment runMutation removes it, which is the only
+// moment the generation written at (iii) is observable: the write and the clear are consecutive
+// statements. It then clears it for real, so the command's own behaviour is unchanged.
+func watchJournalAtClear(t *testing.T, got *vault.VaultOp, saw *bool) func() {
+	t.Helper()
+	prev := clearJournalFn
+	clearJournalFn = func(dataDir, op string, out io.Writer) {
+		if cur, ok, err := vault.ReadVaultOp(dataDir); ok && err == nil {
+			*got, *saw = cur, true
+		}
+		prev(dataDir, op, out)
+	}
+	return func() { clearJournalFn = prev }
 }

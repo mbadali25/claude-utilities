@@ -138,6 +138,14 @@ func readNewPassphrase(r *passphraseReader) (string, error) {
 type mutation struct {
 	op    string
 	files []string
+	// resealsBak says whether this operation deals with the recovery copy beside each file, which
+	// goes straight into the journal and decides what a settle may touch. Only `remove-slot` and
+	// `rotate` do: they draw a new data key, so a .bak left as it was still opens with the key the
+	// command just took away. `add-slot` and `change-passphrase` leave every existing key working, so
+	// the copy beside the file is still openable by keys that are all current - and a settle that
+	// re-sealed or DELETED it would destroy a recovery copy nobody asked this command to touch.
+	// False is the safe value and the zero value; see vault.VaultOp.ResealsBak.
+	resealsBak bool
 	// reader is the command's one stdin reader, shared so the existing passphrase is read once and
 	// a second passphrase comes from the next line rather than from a drained pipe. A nil reader is
 	// a command with nothing to read: the passphrase then has to be in CLAUDESWAP_KEY.
@@ -205,8 +213,9 @@ func runMutation(dataDir string, m mutation, out io.Writer) int {
 		_, _ = fmt.Fprintf(out, "vault %s: %s\n", m.op, logx.Redact(err.Error()))
 		return mutatorExitCode(err)
 	}
-	if err := vault.WriteVaultOp(dataDir, vault.VaultOp{
-		Op: m.op, Files: m.files, Stage: vault.StageStarted}); err != nil {
+	started := vault.VaultOp{Op: m.op, Files: m.files, Stage: vault.StageStarted,
+		ResealsBak: m.resealsBak}
+	if err := vault.WriteVaultOp(dataDir, started); err != nil {
 		_, _ = fmt.Fprintf(out, "vault %s: %s\n", m.op, logx.Redact(err.Error()))
 		return exitRuntime
 	}
@@ -227,7 +236,22 @@ func runMutation(dataDir string, m mutation, out io.Writer) int {
 		auditLine(out, m.op, "", "", "refused", code)
 		return code
 	}
-	clearJournal(dataDir, m.op, out)
+	// (iii) The new generation is in place and only the journal is left. It is advanced rather than
+	// cleared straight away because the gap between the write landing and the journal going is a real
+	// window, and a journal still reading `started` in it is a lie about the file on disk: the next
+	// command's settle would report "reverted" for an operation that in fact completed. A
+	// `remove-slot` settled that way would also skip the recovery copy its own ordering had already
+	// dealt with. The stage between these two - vault.StageBak - has no writer here on purpose: the
+	// `.bak` step happens INSIDE internal/vault, between the step this line follows and the one it
+	// precedes, so emitting it would need a progress seam through RemoveSlot and Rotate. Nothing is
+	// lost by its absence: the package deals with the copy BEFORE the rename, so by the time this
+	// line runs there is no recovery-copy work left to finish.
+	advanced := started
+	advanced.Stage = vault.StageRenamed
+	if jerr := vault.WriteVaultOp(dataDir, advanced); jerr != nil {
+		_, _ = fmt.Fprintf(out, "vault %s: the journal could not be advanced: %s\n", m.op, logx.Redact(jerr.Error()))
+	}
+	clearJournalFn(dataDir, m.op, out)
 	if result != "" {
 		_, _ = fmt.Fprintf(out, "vault %s: %s\n", m.op, result)
 	}
@@ -257,6 +281,13 @@ func settleJournal(dataDir, op string, ks vault.KeySource, out io.Writer) int {
 	_, _ = fmt.Fprintf(out, "vault %s: an interrupted %s was settled: %s\n", op, prev.Op, line)
 	return 0
 }
+
+// clearJournalFn is clearJournal unless a test replaces it. It is the one seam over the journal's
+// last step, and it exists because the generation runMutation writes at (iii) is removed in the very
+// next statement: without a seam here the only way to observe the stage ladder from outside would be
+// to hook internal/vault's own rename, which would mean exporting a test seam out of the package
+// that owns the format. See TestEveryMutatorAdvancesTheJournalBeforeClearingIt.
+var clearJournalFn = clearJournal
 
 // clearJournal removes the journal and says so if it could not. A journal that outlives its
 // operation makes the next command settle one that already finished, so a failure here is worth a
@@ -411,7 +442,7 @@ func vaultRemoveSlot(dataDir, slotID string, stdin io.Reader, out io.Writer) int
 	}
 	var slotType string
 	code := runMutation(dataDir, mutation{op: "remove-slot", files: []string{vaultFileName},
-		reader: newPassphraseReader(stdin, out),
+		resealsBak: true, reader: newPassphraseReader(stdin, out),
 		apply: func(v *vault.Vault, ks vault.KeySource) (string, error) {
 			if info, err := vault.Inspect(filepath.Join(dataDir, vaultFileName)); err == nil {
 				for _, s := range info.Slots {
@@ -445,7 +476,7 @@ func vaultRemoveSlot(dataDir, slotID string, stdin io.Reader, out io.Writer) int
 // `remove-slot`, by that name, with its own recovery-copy handling.
 func vaultRotate(dataDir string, stdin io.Reader, out io.Writer) int {
 	code := runMutation(dataDir, mutation{op: "rotate", files: []string{vaultFileName},
-		reader: newPassphraseReader(stdin, out),
+		resealsBak: true, reader: newPassphraseReader(stdin, out),
 		apply: func(v *vault.Vault, ks vault.KeySource) (string, error) {
 			if err := v.Rotate(ks); err != nil {
 				return "", err
