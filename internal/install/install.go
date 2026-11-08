@@ -84,10 +84,34 @@ func SchtasksCreateArgs(exe, user string) []string {
 	return []string{"/Create", "/SC", "ONLOGON", "/TN", taskName, "/RU", user, "/TR", tr}
 }
 
-// IcaclsLockdownArgs returns the icacls arguments that remove inherited
-// permissions from dir and grant user full control (the Windows form of 0700).
-func IcaclsLockdownArgs(dir, user string) []string {
-	return []string{dir, "/inheritance:r", "/grant:r", user + ":(OI)(CI)F"}
+// IcaclsLockdownArgs returns the icacls arguments that remove inherited permissions from dir
+// and grant each principal full control, inheritable (the Windows form of 0700 when there is
+// one of them). One /grant:r term per principal, in the order given.
+//
+// /T is appended only for more than one principal. That is the server's service case, where
+// the grant has to reach files the data dir already holds — a data dir written before the
+// service was registered keeps no useful inherited ACE once a save runs /inheritance:r on it.
+// The agent's single-user call therefore keeps the argument list it has today, byte for byte.
+//
+// An empty principal list returns nil: a lockdown that removes inheritance and grants nobody
+// locks the owner out of their own state dir.
+func IcaclsLockdownArgs(dir string, principals ...string) []string {
+	var terms []string
+	named := 0
+	for _, p := range principals {
+		if p = strings.TrimSpace(p); p != "" {
+			terms = append(terms, "/grant:r", p+":(OI)(CI)F")
+			named++
+		}
+	}
+	if named == 0 {
+		return nil
+	}
+	args := append([]string{dir, "/inheritance:r"}, terms...)
+	if named > 1 {
+		args = append(args, "/T")
+	}
+	return args
 }
 
 // checkExe requires an absolute path to an existing regular file without line

@@ -5,10 +5,57 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+// The agent's lockdown grants one principal and is the argument list the logon-task install
+// has shipped with; the server's service install grants two and needs /T so the grant reaches
+// files the data dir already holds. Exact slice equality, not a prefix check: an appended /T
+// is exactly the regression a prefix check cannot see.
+func TestIcaclsArgsForOneUserAreUnchanged(t *testing.T) {
+	got := IcaclsLockdownArgs(`C:\state`, `CORP\bob`)
+	want := []string{`C:\state`, "/inheritance:r", "/grant:r", `CORP\bob:(OI)(CI)F`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("one principal:\n got %q\nwant %q", got, want)
+	}
+	for _, a := range got {
+		if a == "/T" {
+			t.Fatalf("a single-principal lockdown must not recurse: %q", got)
+		}
+	}
+}
+
+func TestIcaclsArgsForServiceAndAdministrators(t *testing.T) {
+	got := IcaclsLockdownArgs(`C:\data`, `NT SERVICE\ClaudeSwapServer`, `BUILTIN\Administrators`)
+	want := []string{`C:\data`, "/inheritance:r",
+		"/grant:r", `NT SERVICE\ClaudeSwapServer:(OI)(CI)F`,
+		"/grant:r", `BUILTIN\Administrators:(OI)(CI)F`,
+		"/T"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("service and administrators:\n got %q\nwant %q", got, want)
+	}
+}
+
+// The dir stays one argument, verbatim: exec quotes each argument for the command line, so a
+// quote added here would reach icacls as part of the path.
+func TestIcaclsArgsQuoteADirWithSpaces(t *testing.T) {
+	const dir = `C:\Program Files\claude swap\data`
+	got := IcaclsLockdownArgs(dir, `CORP\bob`)
+	if len(got) == 0 || got[0] != dir {
+		t.Fatalf("want the dir as one verbatim argument, got %q", got)
+	}
+}
+
+func TestIcaclsArgsRejectEmptyPrincipalList(t *testing.T) {
+	for _, principals := range [][]string{nil, {""}, {"  ", ""}} {
+		if got := IcaclsLockdownArgs(`C:\data`, principals...); got != nil {
+			t.Fatalf("principals %q: want nil rather than a lockdown that grants nobody, got %q", principals, got)
+		}
+	}
+}
 
 // fakeExe creates a real file so checkExe accepts it.
 func fakeExe(t *testing.T) string {
