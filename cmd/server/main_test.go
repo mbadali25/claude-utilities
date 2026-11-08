@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"claude-utilities/internal/adminpw"
+	"claude-utilities/internal/hub"
 	"claude-utilities/internal/logx"
 	"claude-utilities/internal/usage"
 	"claude-utilities/internal/vault"
@@ -266,6 +268,116 @@ func TestServerStartsWithAStoredHashAndNoEnvPassword(t *testing.T) {
 	}
 	if strings.Contains(out.String(), passwordEnv) {
 		t.Fatalf("still demands %s with a hash stored: %q", passwordEnv, out.String())
+	}
+}
+
+// --- Task 2.2: exit 5 and a reason for a refused certificate ---
+
+// certErrors is the exported refusal set of internal/hub; exit 5 covers all of it.
+func certErrors() []error {
+	return []error{
+		hub.ErrCertPairIncomplete, hub.ErrCertUnreadable, hub.ErrCertCorrupt,
+		hub.ErrCertMismatch, hub.ErrCertExpired,
+	}
+}
+
+func TestCertExitCodeIsFiveForEveryCertError(t *testing.T) {
+	for _, e := range certErrors() {
+		if got := certExitCode(fmt.Errorf("serve: %w", e)); got != 5 {
+			t.Errorf("%v: exit %d, want 5", e, got)
+		}
+	}
+}
+
+func TestCertExitCodeIsOneForAnUnrelatedError(t *testing.T) {
+	if got := certExitCode(io.ErrUnexpectedEOF); got != 1 {
+		t.Fatalf("exit %d, want 1", got)
+	}
+	if got := exitCodeFor(io.ErrUnexpectedEOF); got != 1 {
+		t.Fatalf("exitCodeFor %d, want 1", got)
+	}
+}
+
+func TestCertReasonCarriesAReasonForEveryCertError(t *testing.T) {
+	for _, e := range certErrors() {
+		if got := certReason(fmt.Errorf("serve: %w", e)); got == "" {
+			t.Errorf("%v: no reason", e)
+		}
+	}
+}
+
+func TestCertReasonIsEmptyForAnUnrelatedError(t *testing.T) {
+	if got := certReason(io.ErrUnexpectedEOF); got != "" {
+		t.Fatalf("reason %q invented for a non-certificate error", got)
+	}
+}
+
+// halfPairDataDir makes a data dir whose tls/ holds only the certificate, which is the crash or
+// half-copy case: the pin must not change.
+func halfPairDataDir(t *testing.T) (dir, certFile string) {
+	t.Helper()
+	dir = t.TempDir()
+	tls := filepath.Join(dir, "tls")
+	if err := os.MkdirAll(tls, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	certFile = filepath.Join(tls, "server-cert.pem")
+	if err := os.WriteFile(certFile, []byte("-----BEGIN CERTIFICATE-----\nnot-parsed-before-the-pair-check\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir, certFile
+}
+
+func TestServeRefusesWithFiveOnIncompletePair(t *testing.T) {
+	dir, certFile := halfPairDataDir(t)
+	before, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
+	code := run(context.Background(), args, env(map[string]string{keyEnv: "k", passwordEnv: "a-long-enough-password"}), noStdin(), &out)
+	if code != 5 {
+		t.Fatalf("code %d, want 5: %s", code, out.String())
+	}
+	after, err := os.ReadFile(certFile)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("the certificate was rewritten: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tls", "server-key.pem")); !os.IsNotExist(err) {
+		t.Fatalf("a new pair was written: %v", err)
+	}
+}
+
+func TestCertRefusedLogLineCarriesTheReason(t *testing.T) {
+	dir, _ := halfPairDataDir(t)
+	var out bytes.Buffer
+	args := []string{"--listen", "127.0.0.1:0", "--data-dir", dir}
+	if code := run(context.Background(), args, env(map[string]string{keyEnv: "k", passwordEnv: "a-long-enough-password"}), noStdin(), &out); code != 5 {
+		t.Fatalf("code %d: %s", code, out.String())
+	}
+	var line map[string]any
+	var found int
+	for _, l := range strings.Split(out.String(), "\n") {
+		if !strings.Contains(l, `"cert refused"`) {
+			continue
+		}
+		found++
+		if err := json.Unmarshal([]byte(l), &line); err != nil {
+			t.Fatalf("not a JSON log line: %q: %v", l, err)
+		}
+		// The reason is the only cert detail a log line may carry: no path, no fingerprint, no key.
+		for _, leak := range []string{dir, "server-cert.pem", "server-key.pem", "BEGIN"} {
+			if strings.Contains(l, leak) {
+				t.Fatalf("log line %q carries %q", l, leak)
+			}
+		}
+	}
+	if found != 1 {
+		t.Fatalf("want exactly one `cert refused` line, got %d:\n%s", found, out.String())
+	}
+	if line["reason"] != "incomplete" {
+		t.Fatalf("reason = %v, want incomplete", line["reason"])
 	}
 }
 

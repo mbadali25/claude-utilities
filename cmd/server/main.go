@@ -40,7 +40,7 @@ const (
 )
 
 // usageText is the command summary; the name avoids the internal/usage import.
-const usageText = `usage: server <flags> | server set-password [--data-dir DIR]
+const usageText = `usage: server <flags> | server set-password [--data-dir DIR] | server cert renew [--data-dir DIR]
   --listen host:port     run the hub and admin UI (required, no default)
   --data-dir DIR         vault, host list, TLS certificate and admin password hash
   --tunnels              supervise the reverse SSH tunnels to the Linux hosts, and
@@ -60,7 +60,10 @@ const usageText = `usage: server <flags> | server set-password [--data-dir DIR]
                          last about 8h). A flagged login still swaps, with a warning.
   set-password           replace the admin UI password; it is read from a no-echo
                          prompt when stdin is a terminal, else one line of stdin.
-                         There is no flag for it, by design.`
+                         There is no flag for it, by design.
+  cert renew             write a new TLS pair. This is the ONLY command that changes the
+                         certificate: the fingerprint every agent pins changes with it, so
+                         every agent must re-enrol. It asks for a typed confirmation.`
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -76,10 +79,25 @@ func defaultDataDir() string {
 	return "claude-swap-server"
 }
 
-// run returns the process exit code: 0 clean stop, 1 runtime failure, 2 bad usage or missing secrets.
+// Exit codes. 0 clean stop, 1 runtime failure, 2 bad usage or missing input, 5 certificate
+// refused. 3 (vault locked) and 4 (format) arrive with later slices of the cert-vault plan.
+const (
+	exitRuntime     = 1
+	exitCertRefused = 5
+)
+
+// run returns the process exit code: 0 clean stop, 1 runtime failure, 2 bad usage or missing
+// secrets, 5 a refused certificate.
 func run(ctx context.Context, args []string, getenv func(string) string, in io.Reader, errOut io.Writer) int {
-	if len(args) > 0 && args[0] == "set-password" {
-		return setPasswordCmd(args[1:], in, errOut)
+	// The fixed subcommand name set. Anything else, a leading "-" included, goes to the flag
+	// parser below, so a bare `server --listen ...` keeps working for scripts/start-server.ps1.
+	if len(args) > 0 {
+		switch args[0] {
+		case "set-password":
+			return setPasswordCmd(args[1:], in, errOut)
+		case "cert":
+			return certCmd(args[1:], in, errOut, errOut)
+		}
 	}
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	fs.SetOutput(errOut)
@@ -120,12 +138,37 @@ func run(ctx context.Context, args []string, getenv func(string) string, in io.R
 		_, _ = fmt.Fprintf(errOut, "server: set %s (admin UI password) or run `server set-password` first\n", passwordEnv)
 		return 2
 	}
+	// This is the one place a serve error becomes an exit code, so it is the one place the
+	// `cert refused` line can carry both the reason and the code.
 	if err := serve(ctx, *listen, *dataDir, pw, *tunnels, *refreshTokens, parseRefreshAccounts(*refreshAccounts), *staleAfter, errOut); err != nil && !errors.Is(err, context.Canceled) {
-		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
-		return 1
+		reportCertError(errOut, "server", err)
+		return exitCodeFor(err)
 	}
 	return 0
 }
+
+// exitCodeFor maps a serve error to a process exit code. Later slices of the cert-vault plan
+// extend it (3 vault locked, 4 format); today only the certificate refusals leave exit 1.
+func exitCodeFor(err error) int { return certExitCode(err) }
+
+// certExitCode is 5 for any of internal/hub's certificate refusals and 1 for anything else. A
+// restart cannot fix a refused certificate, so 5 sits outside the restart loop on both OSes.
+func certExitCode(err error) int {
+	for _, e := range []error{
+		hub.ErrCertPairIncomplete, hub.ErrCertUnreadable, hub.ErrCertCorrupt,
+		hub.ErrCertMismatch, hub.ErrCertExpired,
+	} {
+		if errors.Is(err, e) {
+			return exitCertRefused
+		}
+	}
+	return exitRuntime
+}
+
+// certReason is the half of the case table an exit code cannot carry. The mapping lives in
+// internal/hub, which owns the two unexported causes of ErrCertUnreadable (a denied read and a
+// failed re-ACL) that a log reason has to tell apart.
+func certReason(err error) string { return hub.CertReason(err) }
 
 // passwordPath is where the argon2id admin password hash lives inside a data dir.
 func passwordPath(dataDir string) string { return filepath.Join(dataDir, adminpw.FileName) }
@@ -242,6 +285,17 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 		return err
 	}
 	log := logx.New(errOut)
+	// Once per start, for both levels. The once-a-day (case-table row 6) and hourly (row 7)
+	// repeats need a ticker in the run loop, which arrives with Task 4.3 of the cert-vault plan;
+	// row 7's admin-UI notice is Task 8.7. Until then an expiring pair is visible here, in the
+	// journal and in the Windows event log, and nowhere else.
+	if level, text, ok := hub.CertExpiryWarning(certFile, time.Now()); ok {
+		if level == "warn" {
+			log.Warn(text, "reason", "cert-expiry")
+		} else {
+			log.Info(text, "reason", "cert-expiry")
+		}
+	}
 	reg := ownership.New()
 	h := hub.New(v, reg, filepath.Join(dataDir, "hosts.json"), log)
 	// Without --refresh-tokens an expired token shows as "unauthorized" in the UI.
