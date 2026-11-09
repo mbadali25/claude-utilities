@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -332,5 +333,140 @@ func TestMarkerIsSafeUnderConcurrentWritesAndReads(t *testing.T) {
 		t.Fatalf("ReadDir: %v", err)
 	} else if len(entries) > 1 {
 		t.Fatalf("%d files left in the data dir: a temp file leaked", len(entries))
+	}
+}
+
+// --- Task 4.2: readiness (folded in here, as the plan's file budget says) ---
+
+// notifyListener is a temp AF_UNIX datagram socket standing in for systemd's.
+func notifyListener(t *testing.T) (*net.UnixConn, string) {
+	t.Helper()
+	// Short path: sun_path is about 108 bytes, and a long TMPDIR silently truncates.
+	sock := filepath.Join(t.TempDir(), "n.sock")
+	c, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: sock, Net: "unixgram"})
+	if err != nil {
+		t.Skipf("no unixgram socket here: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c, sock
+}
+
+func readOne(t *testing.T, c *net.UnixConn) string {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, 512)
+	n, err := c.Read(buf)
+	if err != nil {
+		t.Fatalf("read from the notify socket: %v", err)
+	}
+	return string(buf[:n])
+}
+
+func TestNotifyReadyWritesReadyOneToTheSocket(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("sd_notify is the Linux half; the other half is a no-op and has its own test")
+	}
+	c, sock := notifyListener(t)
+	t.Setenv("NOTIFY_SOCKET", sock)
+	if err := NotifyReady(); err != nil {
+		t.Fatalf("NotifyReady: %v", err)
+	}
+	if got := readOne(t, c); got != "READY=1\n" {
+		t.Fatalf("socket got %q, want %q", got, "READY=1\n")
+	}
+}
+
+func TestNotifyStoppingWritesStoppingOne(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("sd_notify is the Linux half")
+	}
+	c, sock := notifyListener(t)
+	t.Setenv("NOTIFY_SOCKET", sock)
+	if err := NotifyStopping(); err != nil {
+		t.Fatalf("NotifyStopping: %v", err)
+	}
+	if got := readOne(t, c); got != "STOPPING=1\n" {
+		t.Fatalf("socket got %q, want %q", got, "STOPPING=1\n")
+	}
+}
+
+// TestNotifySendsNoMainPID: the unit uses NotifyAccess=main, so MAINPID is neither needed nor sent.
+// Sending one from a process that is not the main pid is how a notify unit ends up refused.
+func TestNotifySendsNoMainPID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("sd_notify is the Linux half")
+	}
+	c, sock := notifyListener(t)
+	t.Setenv("NOTIFY_SOCKET", sock)
+	if err := NotifyReady(); err != nil {
+		t.Fatalf("NotifyReady: %v", err)
+	}
+	if got := readOne(t, c); strings.Contains(got, "MAINPID") {
+		t.Fatalf("the datagram carries MAINPID: %q", got)
+	}
+}
+
+// TestNotifyIsANoOpWithNoSocket is the console case: `server run` from a shell has no
+// NOTIFY_SOCKET, and readiness must not become an error path there.
+func TestNotifyIsANoOpWithNoSocket(t *testing.T) {
+	t.Setenv("NOTIFY_SOCKET", "")
+	if notifySocket() != "" {
+		t.Fatalf("notifySocket() = %q with the variable empty", notifySocket())
+	}
+	if err := NotifyReady(); err != nil {
+		t.Fatalf("NotifyReady with no socket: %v", err)
+	}
+	if err := NotifyStopping(); err != nil {
+		t.Fatalf("NotifyStopping with no socket: %v", err)
+	}
+}
+
+// TestNotifyOnNonLinuxIsANoOp: the !linux build sends nothing even when something that looks like a
+// notify socket is in the environment.
+func TestNotifyOnNonLinuxIsANoOp(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("this is the other build's behaviour")
+	}
+	t.Setenv("NOTIFY_SOCKET", filepath.Join(t.TempDir(), "n.sock"))
+	if got := notifySocket(); got != "" {
+		t.Fatalf("notifySocket() = %q off linux, want empty", got)
+	}
+	if err := NotifyReady(); err != nil {
+		t.Fatalf("NotifyReady: %v", err)
+	}
+	if err := NotifyStopping(); err != nil {
+		t.Fatalf("NotifyStopping: %v", err)
+	}
+	if JournalStream() {
+		t.Fatal("JournalStream is true off linux")
+	}
+}
+
+// TestJournalStreamComparesTheValueNotJustPresence: the systemd page requires the value to be
+// compared against fstat of the stream, because a child that inherited the variable without the
+// stream would otherwise switch its log format on a lie.
+func TestJournalStreamComparesTheValueNotJustPresence(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("JOURNAL_STREAM is a Linux variable")
+	}
+	t.Setenv("JOURNAL_STREAM", "1:2")
+	if JournalStream() {
+		t.Fatal("a JOURNAL_STREAM naming another device and inode read as the journal")
+	}
+	for _, v := range []string{"", "nonsense", "1", "1:", ":2", "a:b", "1:2:3"} {
+		t.Setenv("JOURNAL_STREAM", v)
+		if JournalStream() {
+			t.Fatalf("JOURNAL_STREAM=%q read as the journal", v)
+		}
+	}
+	dev, ino, ok := stderrDevIno()
+	if !ok {
+		t.Skip("cannot fstat fd 2 here")
+	}
+	t.Setenv("JOURNAL_STREAM", formatDevIno(dev, ino))
+	if !JournalStream() {
+		t.Fatalf("JOURNAL_STREAM set to fd 2's own %d:%d did not match", dev, ino)
 	}
 }
