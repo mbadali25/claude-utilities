@@ -3,6 +3,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -40,14 +41,21 @@ func notify(state string) error {
 	if addr == "" {
 		return nil
 	}
-	// An abstract socket arrives as "@name" and is addressed with a leading NUL.
+	// An abstract socket arrives as "@name" and is addressed with a leading NUL. Go's own
+	// syscall.SockaddrUnix already maps a leading "@" to the abstract namespace, so deleting these
+	// three lines does not change the behaviour (a mutation confirmed it: the abstract-socket test
+	// below passes either way). They stay because that mapping is a lightly documented detail of
+	// net/syscall rather than part of net's contract, and because the explicit form is what the
+	// sd_notify protocol is written in.
 	if strings.HasPrefix(addr, "@") {
 		addr = "\x00" + addr[1:]
 	}
 	c, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: addr, Net: "unixgram"})
 	if err != nil {
 		// The socket path is not a secret, but it is a path: the message names the variable instead.
-		return fmt.Errorf("sd_notify: dial the socket named by NOTIFY_SOCKET: %w", err)
+		// net.OpError renders the address it was given, so the cause is unwrapped out of it rather
+		// than wrapped whole - otherwise this line says the opposite of what the comment promises.
+		return fmt.Errorf("sd_notify: dial the socket named by NOTIFY_SOCKET: %w", withoutAddr(err))
 	}
 	defer func() { _ = c.Close() }()
 	if err := c.SetWriteDeadline(time.Now().Add(notifyTimeout)); err != nil {
@@ -57,6 +65,16 @@ func notify(state string) error {
 		return fmt.Errorf("sd_notify: write %s: %w", state, err)
 	}
 	return nil
+}
+
+// withoutAddr strips the address a net.OpError renders, keeping the cause so errors.Is still finds
+// the syscall error underneath. Anything that is not a net.OpError is returned as it came.
+func withoutAddr(err error) error {
+	var oe *net.OpError
+	if errors.As(err, &oe) && oe.Err != nil {
+		return oe.Err
+	}
+	return err
 }
 
 // JournalStream reports whether this process's standard error IS the journal, which is when the

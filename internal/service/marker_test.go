@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -389,6 +390,58 @@ func TestNotifyStoppingWritesStoppingOne(t *testing.T) {
 	}
 	if got := readOne(t, c); got != "STOPPING=1\n" {
 		t.Fatalf("socket got %q, want %q", got, "STOPPING=1\n")
+	}
+}
+
+// TestNotifyReachesAnAbstractSocket: systemd may hand over an abstract socket, which arrives as
+// "@name" and is addressed with a leading NUL. Nothing else in the suite took that branch, so
+// deleting the translation left every notify test green.
+func TestNotifyReachesAnAbstractSocket(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("abstract sockets are a Linux thing")
+	}
+	// Abstract names share one namespace per network namespace, so the pid keeps parallel runs apart.
+	name := "@claude-swap-notify-test-" + strconv.Itoa(os.Getpid())
+	c, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: name, Net: "unixgram"})
+	if err != nil {
+		t.Skipf("no abstract unixgram socket here: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	t.Setenv("NOTIFY_SOCKET", name)
+	if err := NotifyReady(); err != nil {
+		t.Fatalf("NotifyReady to an abstract socket: %v", err)
+	}
+	if got := readOne(t, c); got != "READY=1\n" {
+		t.Fatalf("abstract socket got %q, want %q", got, "READY=1\n")
+	}
+}
+
+// TestNotifyReportsAnUnusableSocketAndDoesNotHang: a NOTIFY_SOCKET that cannot be dialled - nothing
+// listening, or a path past the ~108-byte sun_path limit - is an error the caller logs and carries
+// on from. It must never be a startup that blocks, and the message must not quote the path.
+func TestNotifyReportsAnUnusableSocketAndDoesNotHang(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("sd_notify is the Linux half")
+	}
+	dir := t.TempDir()
+	for _, sock := range []string{
+		filepath.Join(dir, "nobody-is-listening.sock"),
+		filepath.Join(dir, strings.Repeat("l", 200)+".sock"),
+	} {
+		t.Setenv("NOTIFY_SOCKET", sock)
+		done := make(chan error, 1)
+		go func() { done <- NotifyReady() }()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatalf("NotifyReady to %.30q reported success", sock)
+			}
+			if strings.Contains(err.Error(), dir) {
+				t.Fatalf("the error quotes the socket path: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("NotifyReady blocked on %.30q", sock)
+		}
 	}
 }
 
