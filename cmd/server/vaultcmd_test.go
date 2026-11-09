@@ -197,14 +197,21 @@ func fixtureKEK() []byte { return bytes.Repeat([]byte{0x7e}, 32) }
 
 // A bare flag run is not a subcommand. scripts/start-server.ps1 and the e2e start script pass
 // --listen with no subcommand, and they must keep working exactly as written.
+//
+// The missing input these two assert on is the admin password, not the passphrase: slice 4's entry
+// point no longer requires CLAUDESWAP_KEY (a service has no passphrase at all - it opens the vault
+// with this host's machine slot), so the first thing a run with an empty environment is short of is
+// the admin password hash. The data dir is a temp dir for the same change: the run now goes on to
+// take the data-dir lock, and a test with no --data-dir would take it in the developer's own
+// %AppData%\claude-swap-server.
 func TestBareFlagsStillReachTheFlagParser(t *testing.T) {
 	var out bytes.Buffer
-	code := run(context.Background(), []string{"--listen", "127.0.0.1:1"},
+	code := run(context.Background(), []string{"--listen", "127.0.0.1:1", "--data-dir", t.TempDir()},
 		func(string) string { return "" }, strings.NewReader(""), &out)
 	if code != 2 {
 		t.Fatalf("exit %d, want 2", code)
 	}
-	if !strings.Contains(out.String(), keyEnv) {
+	if !strings.Contains(out.String(), passwordEnv) {
 		t.Fatalf("a bare flag run did not reach the flag parser: %q", out.String())
 	}
 }
@@ -214,12 +221,12 @@ func TestBareFlagsStillReachTheFlagParser(t *testing.T) {
 // invisible everywhere else.
 func TestRunSubcommandReachesTheSameFlagParser(t *testing.T) {
 	var out bytes.Buffer
-	code := run(context.Background(), []string{"run", "--listen", "127.0.0.1:1"},
+	code := run(context.Background(), []string{"run", "--listen", "127.0.0.1:1", "--data-dir", t.TempDir()},
 		func(string) string { return "" }, strings.NewReader(""), &out)
 	if code != 2 {
 		t.Fatalf("exit %d, want 2", code)
 	}
-	if !strings.Contains(out.String(), keyEnv) {
+	if !strings.Contains(out.String(), passwordEnv) {
 		t.Fatalf("`run --listen` did not reach the flag parser: %q", out.String())
 	}
 	// And its flags are the console run's, not a subset: an unknown one fails in the parser.

@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -666,5 +668,447 @@ func TestServerRefusesACorruptPasswordFile(t *testing.T) {
 	code := run(context.Background(), args, env(map[string]string{keyEnv: "k", passwordEnv: "p"}), noStdin(), &out)
 	if code == 0 || !strings.Contains(out.String(), "admin password file") {
 		t.Fatalf("code %d out %q", code, out.String())
+	}
+}
+
+// --- Task 4.3: `server run` holds the lock, refuses an interrupted vaultop, and reports readiness ---
+
+// storeAdminPassword gives dir an admin password hash, so a run's only remaining input is the vault.
+func storeAdminPassword(t *testing.T, dir string) {
+	t.Helper()
+	if code, out := setPassword(t, dir, "a-long-enough-password\n"); code != 0 {
+		t.Fatalf("set-password code %d out %q", code, out)
+	}
+}
+
+// seams swaps the entry point's seams for a recording set and restores them after the test. It
+// returns the recorded order and the buffer the run logged into.
+type seamRecorder struct {
+	mu    sync.Mutex
+	order []string
+}
+
+func (r *seamRecorder) note(step string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.order = append(r.order, step)
+}
+
+func (r *seamRecorder) steps() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.order))
+	copy(out, r.order)
+	return out
+}
+
+// recordedRun runs a console server that stops the moment it reports readiness, and returns the
+// exit code, everything it logged, and the order its seams fired in. Readiness is the right place
+// to stop: it is sent after the last thing that can fail, so a run that reaches it has done
+// everything the entry point does.
+func recordedRun(t *testing.T, args []string, envm map[string]string) (int, string, []string) {
+	t.Helper()
+	// vault.EnvKey reads the process environment, not the injected getenv, so a run that is meant
+	// to have a passphrase needs it in both places - and a run that is meant to have none needs the
+	// real variable empty whatever the developer's shell holds.
+	t.Setenv(keyEnv, envm[keyEnv])
+	rec := &seamRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	origLock, origCert, origListen, origReady, origStopping := acquireLock, ensureCert, listenTCP, notifyReady, notifyStopping
+	t.Cleanup(func() {
+		acquireLock, ensureCert, listenTCP, notifyReady, notifyStopping = origLock, origCert, origListen, origReady, origStopping
+	})
+	acquireLock = func(dataDir, cmd string) (*vault.Lock, error) {
+		rec.note("lock")
+		return origLock(dataDir, cmd)
+	}
+	ensureCert = func(dir string) (string, string, string, error) {
+		rec.note("cert")
+		return origCert(dir)
+	}
+	listenTCP = func(network, address string) (net.Listener, error) {
+		rec.note("listen")
+		return origListen(network, address)
+	}
+	notifyReady = func() error {
+		rec.note("ready")
+		cancel() // the server is up; stop it so the test is not a long-running process
+		return nil
+	}
+	notifyStopping = func() error {
+		rec.note("stopping")
+		return nil
+	}
+	var out bytes.Buffer
+	code := run(ctx, args, env(envm), noStdin(), &out)
+	return code, out.String(), rec.steps()
+}
+
+// workingDir is a data dir a console run can serve from: an admin password hash, and a passphrase
+// in the environment for the vault the run creates.
+func workingDir(t *testing.T) (string, map[string]string) {
+	t.Helper()
+	dir := t.TempDir()
+	storeAdminPassword(t, dir)
+	return dir, map[string]string{keyEnv: "a-test-passphrase"}
+}
+
+func TestRunAcquiresTheLockBeforeEnsureCert(t *testing.T) {
+	dir, envm := workingDir(t)
+	code, out, order := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, envm)
+	if code != 0 {
+		t.Fatalf("code %d out %q", code, out)
+	}
+	if len(order) < 2 || order[0] != "lock" || order[1] != "cert" {
+		t.Fatalf("order %v: the data-dir lock is taken before EnsureCert, so a second server never writes a certificate", order)
+	}
+	if _, err := os.Stat(vault.LockPath(dir)); err != nil {
+		t.Fatalf("no lock file in the data dir: %v", err)
+	}
+}
+
+func TestRunSendsReadyAfterTheListenerIsBound(t *testing.T) {
+	dir, envm := workingDir(t)
+	code, out, order := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, envm)
+	if code != 0 {
+		t.Fatalf("code %d out %q", code, out)
+	}
+	li, ri := indexOf(order, "listen"), indexOf(order, "ready")
+	if li < 0 || ri < 0 || li > ri {
+		t.Fatalf("order %v: READY=1 goes out after the listener is bound, or systemctl start reports a server that is about to exit", order)
+	}
+	if ci := indexOf(order, "cert"); ci < 0 || ci > li {
+		t.Fatalf("order %v: the certificate is settled before the listener binds", order)
+	}
+	if si := indexOf(order, "stopping"); si < 0 || si < ri {
+		t.Fatalf("order %v: STOPPING=1 goes out on the clean stop, after readiness", order)
+	}
+}
+
+func indexOf(steps []string, want string) int {
+	for i, s := range steps {
+		if s == want {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestBareFlagsStillRunTheConsoleServer(t *testing.T) {
+	dir, envm := workingDir(t)
+	// No subcommand: exactly what scripts/start-server.ps1 and the e2e start script pass.
+	code, out, order := recordedRun(t, []string{"--listen", "127.0.0.1:0", "--data-dir", dir}, envm)
+	if code != 0 {
+		t.Fatalf("code %d out %q", code, out)
+	}
+	for _, want := range []string{"lock", "cert", "listen", "ready"} {
+		if indexOf(order, want) < 0 {
+			t.Fatalf("the bare flag form skipped %s: %v", want, order)
+		}
+	}
+	if !strings.Contains(out, "listening on https://") {
+		t.Fatalf("no listening line: %q", out)
+	}
+}
+
+func TestRunExitsTwoWhenTheLockIsHeld(t *testing.T) {
+	dir, envm := workingDir(t)
+	held, err := vault.AcquireLock(dir, "run")
+	if err != nil {
+		t.Fatalf("AcquireLock: %v", err)
+	}
+	defer func() { _ = held.Release() }()
+	code, out, order := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, envm)
+	if code != exitUsage {
+		t.Fatalf("code %d, want %d: %s", code, exitUsage, out)
+	}
+	if !strings.Contains(out, "pid") {
+		t.Fatalf("the refusal does not name the holder's pid: %q", out)
+	}
+	if indexOf(order, "cert") >= 0 {
+		t.Fatalf("EnsureCert ran while another process held the lock: %v", order)
+	}
+}
+
+func TestRunRefusesWithExitThreeOnAnInterruptedVaultOp(t *testing.T) {
+	dir, envm := workingDir(t)
+	if err := vault.WriteVaultOp(dir, vault.VaultOp{
+		Op: "rotate", Files: []string{"vault.bin", "tunnelkeys.bin"}, Stage: vault.StageBak,
+	}); err != nil {
+		t.Fatalf("WriteVaultOp: %v", err)
+	}
+	code, out, order := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, envm)
+	if code != exitVaultLocked {
+		t.Fatalf("code %d, want %d: %s", code, exitVaultLocked, out)
+	}
+	if !strings.Contains(out, "server vault verify --all-slots") {
+		t.Fatalf("the refusal does not name the verify to run: %q", out)
+	}
+	if indexOf(order, "cert") >= 0 || indexOf(order, "listen") >= 0 {
+		t.Fatalf("the run carried on past an interrupted vaultop: %v", order)
+	}
+	// It settles nothing: the journal is still there for the mutator that owns it.
+	if _, ok, err := vault.ReadVaultOp(dir); !ok || err != nil {
+		t.Fatalf("the journal was consumed by a run: ok=%v err=%v", ok, err)
+	}
+	if lines := reasonLines(t, out, "vaultop interrupted"); len(lines) != 1 {
+		t.Fatalf("%d structured lines for the interrupted vaultop, want one: %q", len(lines), out)
+	}
+}
+
+func TestRunExitsTwoWithNoAdminHashAndNoBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	code, out, order := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir},
+		map[string]string{keyEnv: "a-test-passphrase"})
+	if code != exitUsage {
+		t.Fatalf("code %d, want %d: %s", code, exitUsage, out)
+	}
+	if !strings.Contains(out, "server set-password") {
+		t.Fatalf("the refusal does not name set-password: %q", out)
+	}
+	// Nothing is taken and nothing is written for an input this process will never have.
+	if indexOf(order, "lock") >= 0 {
+		t.Fatalf("the lock was taken for a run that cannot start: %v", order)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("data dir holds %d entries (err %v), want none", len(entries), err)
+	}
+}
+
+// --- the service entry point: no passphrase, machine slots only ---
+
+func TestRunExitsFourWithNoVaultAndNoPassphrase(t *testing.T) {
+	dir := t.TempDir()
+	storeAdminPassword(t, dir)
+	code, out, order := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, nil)
+	if code != exitNewerFormat {
+		t.Fatalf("code %d, want %d: %s", code, exitNewerFormat, out)
+	}
+	for _, want := range []string{"no vault at", "server vault init"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the refusal does not say %q: %s", want, out)
+		}
+	}
+	if indexOf(order, "cert") >= 0 || indexOf(order, "listen") >= 0 {
+		t.Fatalf("a run with no vault and no passphrase got past the refusal: %v", order)
+	}
+	// Nothing written: no vault created under a key this process does not have, and no TLS pair.
+	for _, name := range []string{"vault.bin", "tunnelkeys.bin", "tls"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s exists after the refusal (stat err %v)", name, err)
+		}
+	}
+}
+
+func TestRunExitsFourOnAV1VaultWithNoPassphrase(t *testing.T) {
+	dir := t.TempDir()
+	storeAdminPassword(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "vault.bin"), readFixture(t, "vault-v1.bin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, nil)
+	if code != exitNewerFormat {
+		t.Fatalf("code %d, want %d: %s", code, exitNewerFormat, out)
+	}
+	if !strings.Contains(out, "server vault migrate") {
+		t.Fatalf("the refusal does not name the migrate to run: %s", out)
+	}
+}
+
+func TestRunExitsFourOnAV2VaultWithAV1Keyring(t *testing.T) {
+	dir := t.TempDir()
+	storeAdminPassword(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "vault.bin"), readFixture(t, "vault-v2.bin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A v1 keyring beside a v2 vault: what a crash between the two writes leaves.
+	if err := os.WriteFile(filepath.Join(dir, vault.KeyringFileName), []byte("CSK1 not a real keyring"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, order := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir, "--tunnels"},
+		map[string]string{keyEnv: "a-test-passphrase"})
+	if code != exitNewerFormat {
+		t.Fatalf("code %d, want %d: %s", code, exitNewerFormat, out)
+	}
+	if !strings.Contains(out, vault.KeyringFileName) {
+		t.Fatalf("the refusal does not name the keyring: %s", out)
+	}
+	if indexOf(order, "listen") >= 0 {
+		t.Fatalf("a --tunnels run started half-open: %v", order)
+	}
+}
+
+// TestRunWithNoPassphraseOpensAV2VaultThroughTheMachineSlot pins the behaviour this slice changes
+// on the console path, which is the same command as the service's. CLAUDESWAP_KEY is no longer
+// required to start: a v2 vault whose machine slot this host can reach now opens with no passphrase
+// in the environment, where before the run exited 2 asking for one. That is the service entry point
+// by design - a service has no passphrase at all - and the three states it cannot act on are the
+// exit-4 refusals above, so this is the one case that newly succeeds and it gets its own test.
+func TestRunWithNoPassphraseOpensAV2VaultThroughTheMachineSlot(t *testing.T) {
+	dir := t.TempDir()
+	storeAdminPassword(t, dir)
+	// A machine key this host resolves: the KEK file rung, which both OSes can take in a test.
+	kek := filepath.Join(t.TempDir(), "kek")
+	if err := os.WriteFile(kek, bytes.Repeat([]byte{0x7e}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDESWAP_KEK_FILE", kek)
+	t.Setenv(keyEnv, "a-test-passphrase")
+	var initOut bytes.Buffer
+	// Not a skip: `vault init` takes the dpapi rung on windows-latest and the kek-file rung on
+	// ubuntu-latest, and both CI runners were checked. A skip here would let the one test that pins
+	// this slice's headline behaviour change go quietly green the day either rung stops working.
+	if code := run(context.Background(), []string{"vault", "init", "--data-dir", dir},
+		env(map[string]string{keyEnv: "a-test-passphrase"}), noStdin(), &initOut); code != 0 {
+		t.Fatalf("no v2 vault to serve: `vault init` exited %d here: %s", code, initOut.String())
+	}
+
+	code, out, order := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, nil)
+	if code != 0 {
+		t.Fatalf("code %d, want 0: a v2 vault with a reachable machine slot serves with no passphrase: %s", code, out)
+	}
+	if indexOf(order, "ready") < 0 {
+		t.Fatalf("the run never reported readiness: %v", order)
+	}
+	if strings.Contains(out, "set "+keyEnv) {
+		t.Fatalf("the run still demands a passphrase: %s", out)
+	}
+}
+
+// TestRunExitsThreeWhenNoSlotCanUnwrapWithNoPassphrase is the spec's exit-3 row - "vault locked: no
+// slot could unwrap" - on the entry point this slice adds, and it is the failure half of the test
+// above. The fixture's machine slot is a kek-file one and the KEK this host resolves holds the wrong
+// key, so the slot is reachable, is tried, and does not unwrap: ErrBadKey, not ErrKEKUnreachable.
+//
+// With no passphrase there is no second way in, which is exactly "vault locked", so it must be 3 and
+// out of the restart loop. Exit 1 here would be a restart storm on the one case the spec names by
+// name - a restored data dir or a cleared machine key - because 1 is the only retried code.
+func TestRunExitsThreeWhenNoSlotCanUnwrapWithNoPassphrase(t *testing.T) {
+	dir := t.TempDir()
+	storeAdminPassword(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "vault.bin"), readFixture(t, "vault-v2.bin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kek := filepath.Join(t.TempDir(), "kek")
+	if err := os.WriteFile(kek, bytes.Repeat([]byte{0x11}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDESWAP_KEK_FILE", kek)
+	code, out, order := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, nil)
+	if code != exitVaultLocked {
+		t.Fatalf("code %d, want %d (vault locked: no slot could unwrap, and 1 would be retried): %s",
+			code, exitVaultLocked, out)
+	}
+	if indexOf(order, "listen") >= 0 {
+		t.Fatalf("a run that could not open the vault bound a listener: %v", order)
+	}
+}
+
+// TestServiceExitCodeLocksTheVaultOnlyWithoutAPassphrase pins both sides of the one row that depends
+// on the entry point. With a passphrase in the environment ErrBadKey is a wrong CLAUDESWAP_KEY - an
+// operator's typo at a console, exit 1 - and with none it is the locked vault, exit 3. ErrNoKey goes
+// the same way: with no passphrase it is the answer recoverDEK gives when the only slots are ones
+// this host has no opener for, which is a restored data dir and not a retryable fault.
+func TestServiceExitCodeLocksTheVaultOnlyWithoutAPassphrase(t *testing.T) {
+	for _, err := range []error{vault.ErrBadKey, vault.ErrNoKey,
+		fmt.Errorf("no slot could unwrap the data key: %w", vault.ErrBadKey)} {
+		if got := exitCodeForRun(err, false); got != exitVaultLocked {
+			t.Fatalf("%v with no passphrase: exit %d, want %d", err, got, exitVaultLocked)
+		}
+		if got := exitCodeForRun(err, true); got != exitRuntime {
+			t.Fatalf("%v with a passphrase: exit %d, want %d", err, got, exitRuntime)
+		}
+	}
+	// The rows that do not depend on the entry point keep their codes either way.
+	for _, c := range []struct {
+		err  error
+		want int
+	}{
+		{vault.ErrKEKUnreachable, exitVaultLocked},
+		{vault.ErrNewerFormat, exitNewerFormat},
+		{vault.ErrMalformed, exitNewerFormat},
+		{hub.ErrCertExpired, exitCertRefused},
+		{os.ErrPermission, exitRuntime},
+	} {
+		for _, hasPass := range []bool{false, true} {
+			if got := exitCodeForRun(c.err, hasPass); got != c.want {
+				t.Fatalf("%v (passphrase=%v): exit %d, want %d", c.err, hasPass, got, c.want)
+			}
+		}
+	}
+}
+
+// --- Decision 10: one data dir, and a warning when two disagree ---
+
+func TestRunLogsDataDirThroughTildePathOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir := filepath.Join(home, "data")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	storeAdminPassword(t, dir)
+	code, out, _ := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir},
+		map[string]string{keyEnv: "a-test-passphrase"})
+	if code != 0 {
+		t.Fatalf("code %d out %q", code, out)
+	}
+	var seen []string
+	for _, l := range strings.Split(out, "\n") {
+		if !strings.Contains(l, `"datadir"`) {
+			continue
+		}
+		var line map[string]any
+		if err := json.Unmarshal([]byte(l), &line); err != nil {
+			t.Fatalf("not a JSON log line: %q: %v", l, err)
+		}
+		seen = append(seen, fmt.Sprint(line["datadir"]))
+	}
+	if len(seen) != 1 {
+		t.Fatalf("%d datadir lines (%v), want exactly one", len(seen), seen)
+	}
+	if want := logx.TildePath(dir); seen[0] != want {
+		t.Fatalf("logged %q, want %q: the path goes through TildePath, so a home directory never carries a username into a log", seen[0], want)
+	}
+	if strings.Contains(seen[0], home) {
+		t.Fatalf("the logged path still holds the home directory: %q", seen[0])
+	}
+}
+
+func TestRunWarnsWhenAServiceIsRegisteredWithAnotherDataDir(t *testing.T) {
+	dir, envm := workingDir(t)
+	other := t.TempDir()
+	orig := registeredDataDir
+	t.Cleanup(func() { registeredDataDir = orig })
+
+	registeredDataDir = func() (string, bool) { return other, true }
+	code, out, _ := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, envm)
+	if code != 0 {
+		t.Fatalf("code %d out %q", code, out)
+	}
+	warn := reasonLines(t, out, "a service is registered with a different data dir")
+	if len(warn) != 1 {
+		t.Fatalf("%d warnings, want one: %q", len(warn), out)
+	}
+	if got := fmt.Sprint(warn[0]["datadir"]); got != logx.TildePath(other) {
+		t.Fatalf("the warning names %q, want the registered dir %q", got, logx.TildePath(other))
+	}
+
+	// The same dir is not a disagreement, and neither is a host with no service registered.
+	for _, reg := range []func() (string, bool){
+		func() (string, bool) { return dir, true },
+		func() (string, bool) { return "", false },
+	} {
+		registeredDataDir = reg
+		code, out, _ := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, envm)
+		if code != 0 {
+			t.Fatalf("code %d out %q", code, out)
+		}
+		if n := len(reasonLines(t, out, "a service is registered with a different data dir")); n != 0 {
+			t.Fatalf("%d warnings for a dir that agrees: %q", n, out)
+		}
 	}
 }
