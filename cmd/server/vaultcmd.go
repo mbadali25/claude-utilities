@@ -37,6 +37,17 @@ const vaultUsage = `usage: server vault <subcommand> [--data-dir DIR]
        [--plain-kek]            slot and this host's machine slot. Only for a data dir with neither
                                 file: a v1 file belongs to migrate, a v2 file needs nothing.
                                 --dry-run prints the plan and writes nothing at all.
+  migrate [--dry-run]           rewrite a v1 vault.bin and tunnelkeys.bin as v2, keeping a verified
+          [--add TYPE]          byte copy of each as <name>.v1.<ts> first. The passphrase is
+          [--plain-kek]          re-wrapped, never changed. Already v2 exits 0 with nothing done.
+                                --dry-run prints the plan and writes nothing at all; --add picks the
+                                machine slot type (dpapi or kek-file) instead of this host's default.
+  downgrade                     write v1 files again with the passphrase, keeping each v2 file's
+                                bytes as <name>.v2.<ts>. The rollback the passphrase slot exists for.
+  finalize-migration            delete the v1 copies a migration left, after proving BOTH the machine
+                                slot and the passphrase open every live file. Advisable after 14 days.
+  purge-backups [--keep-bak]    delete every stored generation of both files, v1 and v2, and the
+                                .bak unless --keep-bak. Same both-keys gate as finalize-migration.
   add-slot --type TYPE          add a key slot wrapping the CURRENT data key: passphrase, dpapi or
           [--plain-kek]         kek-file. Every existing key keeps working.
   remove-slot --id SLOTID       remove one slot AND rotate the data key, so the removed key opens
@@ -112,6 +123,31 @@ func vaultCmd(args []string, stdin io.Reader, out, errOut io.Writer) int {
 			fs.BoolVar(&plainKEK, "plain-kek", false, "on Linux, select the plain root-owned credstore file rather than an encrypted credential")
 		}, out, errOut, func(dataDir string, _ *flag.FlagSet) int {
 			return vaultInit(dataDir, dryRun, plainKEK, stdin, out)
+		})
+	case "migrate":
+		var dryRun, plainKEK bool
+		var add string
+		return withDataDir(sub, rest, func(fs *flag.FlagSet) {
+			fs.BoolVar(&dryRun, "dry-run", false, "print what would be migrated and write nothing at all")
+			fs.StringVar(&add, "add", "", "the machine slot type to add: dpapi or kek-file (default: this host's)")
+			fs.BoolVar(&plainKEK, "plain-kek", false, "on Linux, select the plain root-owned credstore file rather than an encrypted credential")
+		}, out, errOut, func(dataDir string, _ *flag.FlagSet) int {
+			return vaultMigrate(dataDir, dryRun, add, plainKEK, stdin, out)
+		})
+	case "downgrade":
+		return withDataDir(sub, rest, nil, out, errOut, func(dataDir string, _ *flag.FlagSet) int {
+			return vaultDowngrade(dataDir, stdin, out)
+		})
+	case "finalize-migration":
+		return withDataDir(sub, rest, nil, out, errOut, func(dataDir string, _ *flag.FlagSet) int {
+			return vaultFinalizeMigration(dataDir, stdin, out)
+		})
+	case "purge-backups":
+		var keepBak bool
+		return withDataDir(sub, rest, func(fs *flag.FlagSet) {
+			fs.BoolVar(&keepBak, "keep-bak", false, "keep the .bak beside each live file")
+		}, out, errOut, func(dataDir string, _ *flag.FlagSet) int {
+			return vaultPurgeBackups(dataDir, keepBak, stdin, out)
 		})
 	case "add-slot":
 		var slotType string
@@ -230,10 +266,20 @@ func slotNote(s vault.SlotInfo) string {
 	}
 }
 
-// v1ArtefactSuffixes are the two shapes a v1 leftover takes in a data dir: a `migrate` copy and a
-// recovery copy written by a binary that predates v2.
+// isV1ArtefactName reports the two shapes a v1 leftover takes in a data dir: a `migrate` copy
+// (`<name>.v1.<ts>`, which also covers the renamed `<name>.bak.v1.<ts>`) and a recovery copy written
+// by a binary that predates v2. The caller filters by the file's actual magic, so a `.bak` that is
+// already v2 is not reported here.
+//
+// It requires the name to be a generation of one of the two live files, which is the same guard
+// isVaultGenerationName (vaultretention.go) applies - and there it is load-bearing, because that
+// predicate feeds a delete. The two are kept in step deliberately: the set `status` shows an
+// operator and the set `finalize-migration` removes must be the same set.
 func isV1ArtefactName(name string) bool {
 	if name == vaultFileName || name == vault.KeyringFileName {
+		return false
+	}
+	if !strings.HasPrefix(name, vaultFileName) && !strings.HasPrefix(name, vault.KeyringFileName) {
 		return false
 	}
 	return strings.Contains(name, ".v1.") || strings.HasSuffix(name, ".bak")

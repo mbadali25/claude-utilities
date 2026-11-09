@@ -57,12 +57,21 @@ func vaultInit(dataDir string, dryRun, plainKEK bool, stdin io.Reader, out io.Wr
 	}
 	defer func() { _ = lock.Release() }()
 
+	// Before the settle, deliberately, and it is the one place in this binary where a refusal comes
+	// before an interrupted operation is dealt with. `init` is for a data dir with NEITHER file, so a
+	// file being there means this command is the wrong one whatever a journal says - and settling
+	// first would mean a command that is about to refuse had already changed the directory. The
+	// journal is not lost by it: the message sends the operator to `vault status`, which reports it,
+	// and the mutator that actually owns the state (`migrate`, or a slot operation) settles it.
 	if code := refuseAnExistingFile(dataDir, op, out); code != 0 {
 		return code
 	}
 	machine, note, merr := machineSlotForHost()
 	if merr != nil {
 		_, _ = fmt.Fprintf(out, "vault %s: %s\n", op, logx.Redact(merr.Error()))
+		// ErrKEKUnreachable is exit 2 here and exit 3 in `vault verify`, on purpose: see
+		// mutatorExitCode's comment (vaultslots.go). An operator running `init` has a setup step to
+		// take (2); a `verify` reporting the same state is reporting a vault nothing can open (3).
 		return mutatorExitCode(merr)
 	}
 	if plainKEK {
