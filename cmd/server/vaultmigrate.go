@@ -102,8 +102,17 @@ func vaultMigrate(dataDir string, dryRun bool, add string, plainKEK bool, stdin 
 		return code
 	}
 	todo, code := migrateWorkList(dataDir, op, out)
-	if code != 0 || len(todo) == 0 {
+	if code != 0 {
 		return code
+	}
+	if len(todo) == 0 {
+		// Already v2, and the one return in this command that must still look at the journal. A
+		// migrate interrupted between its last rename and the journal's removal leaves exactly this
+		// state - a correct v2 pair with a journal in it - and `migrate` is the command an operator
+		// re-runs. A return here that did not look would hand that journal to every other mutator
+		// to refuse, and would pass over a journal this binary cannot read at all - which this same
+		// command refuses when the files happen to be v1.
+		return settleOnAnAlreadyV2Dir(dataDir, op, out)
 	}
 	// The pin before the passphrase, because a data dir with no tls/ cannot pass the continuity
 	// check whatever is typed, and because the fingerprint is the one public value an operator
@@ -389,6 +398,51 @@ func settleJournalForMigrate(dataDir, op string, ks vault.KeySource, out io.Writ
 	return exitUsage
 }
 
+// settleOnAnAlreadyV2Dir is the already-v2 return's journal step. It asks for no passphrase, and
+// that constraint is what decides its three answers: already-v2 is exit 0 so an installer can call
+// `migrate` on every run (revision 8 item 8), and a command that prompted when it had nothing to
+// migrate would hang that script.
+//
+//   - No journal: nothing to do, exit 0, which is all this path ever did.
+//   - A journal whose operation touches no recovery copy (ResealsBak false - migrate, init,
+//     add-slot, change-passphrase): SettleVaultOp's own no-key branch clears it. Cleared, exit 0.
+//     This is the crash-at-the-last-step case, and it needs no key because there is nothing to
+//     re-seal: each file the operation named went through one atomic replaceFile.
+//   - Anything else: REFUSED with exit 2 and nothing changed. A `rotate` or `remove-slot` journal
+//     has a `.bak` that is still openable by the key being removed, and re-sealing it needs a key
+//     this command has not asked for - an installer reading exit 0 here would start the service
+//     over that hole. A journal this binary cannot read is refused for the reason it is refused on
+//     a v1 dir: a journal says which files to touch, and the format of the files beside it is no
+//     reason to believe one.
+func settleOnAnAlreadyV2Dir(dataDir, op string, out io.Writer) int {
+	prev, ok, err := vault.ReadVaultOp(dataDir)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "vault %s: %s\n", op, logx.Redact(err.Error()))
+		_, _ = fmt.Fprintf(out, "vault %s: nothing was changed; run `server vault verify --all-slots`\n", op)
+		return exitUsage
+	}
+	if !ok {
+		return 0
+	}
+	if prev.ResealsBak {
+		_, _ = fmt.Fprintf(out, "vault %s: an interrupted %s (stage %s) left a recovery copy to re-seal, "+
+			"which needs a key this command does not ask for when it has nothing to migrate: the copy may "+
+			"still open with a key that operation was taking away\n", op, prev.Op, prev.Stage)
+		_, _ = fmt.Fprintf(out, "vault %s: nothing was changed; run `server vault verify --all-slots`, then "+
+			"`server vault rotate`, which settles it\n", op)
+		return exitUsage
+	}
+	line, serr := vault.SettleVaultOp(dataDir, prev, nil)
+	if serr != nil {
+		_, _ = fmt.Fprintf(out, "vault %s: an interrupted %s could not be settled: %s\n",
+			op, prev.Op, logx.Redact(serr.Error()))
+		_, _ = fmt.Fprintf(out, "vault %s: nothing was changed; run `server vault verify --all-slots`\n", op)
+		return exitUsage
+	}
+	_, _ = fmt.Fprintf(out, "vault %s: an interrupted %s was settled: %s\n", op, prev.Op, line)
+	return 0
+}
+
 func fileNames(todo []migrateFile) []string {
 	out := make([]string, 0, len(todo))
 	for _, f := range todo {
@@ -398,6 +452,15 @@ func fileNames(todo []migrateFile) []string {
 }
 
 // --- the v1 copies ---
+
+// proveCopyOpens is keepAndProveV1Copy's open, and it is a seam because that refusal is otherwise
+// unassertable. refuseAWrongPassphrase has already opened the original with this passphrase, and
+// the copy is compared byte for byte against those same bytes, so every copy a test can construct
+// opens trivially. What is left for the real open to catch is an environment's answer rather than a
+// value's - a handle another process changed under the lock, bytes the file system acknowledged and
+// did not keep - and without a seam the one line that turns a byte copy into a rollback could be
+// deleted with the whole suite still green.
+var proveCopyOpens = openV1
 
 // keepAndProveV1Copy writes `<name>.v1.<stamp>` beside the file, reads it back, and OPENS it with
 // the passphrase. All three, in that order, before any file is replaced.
@@ -422,7 +485,7 @@ func keepAndProveV1Copy(f *migrateFile, stamp, pass string) (string, error) {
 		return "", fmt.Errorf("%s does not read back as the file it copied, so it is not a rollback: "+
 			"nothing was replaced", filepath.Base(copyAt))
 	}
-	if err := openV1(copyAt, f.keyring, pass); err != nil {
+	if err := proveCopyOpens(copyAt, f.keyring, pass); err != nil {
 		return "", fmt.Errorf("%s does not open with the passphrase, so it is not a rollback: %w",
 			filepath.Base(copyAt), err)
 	}
@@ -453,16 +516,41 @@ func inventoryAV1Bak(path, stamp string) string {
 		filepath.Base(bak), filepath.Base(dst))
 }
 
-// writeOwnerOnly writes data to a new file, owner-only, with the same two mechanisms every write in
+// writeOwnerOnly writes data to a NEW file, owner-only, with the same two mechanisms every write in
 // internal/vault uses: the 0600 mode and, on Windows where the mode bits say nothing, an owner-only
 // ACL. A v1 copy is a passphrase-only envelope holding every account, so it is exactly as sensitive
 // as the file it was copied from.
+//
+// O_EXCL, not a truncate. The name carries a one-second stamp, so a file already at this path is a
+// kept generation of this very file, and writing over a kept generation - even with bytes that
+// ought to be identical - is the one thing the function that keeps the rollback must not do. The
+// caller turns the refusal into "no file was replaced", which is the right answer: a second's wait
+// costs nothing and a clobbered copy cannot be got back.
+//
+// And fsync before the mode is applied, because the copy's whole job is to survive the crash that
+// happens while the file beside it is being replaced. os.WriteFile leaves the bytes acknowledged
+// and not necessarily on the disk, which would make "proved it opens" a statement about the page
+// cache. The directory entry is not synced here - cmd/server has no portable helper for that and
+// internal/vault's is unexported - so a crash in the same instant can still lose the name; that is
+// narrower than losing the content and it is written down rather than implied.
 func writeOwnerOnly(path string, data []byte) error {
 	//nolint:gosec // G703: path is <data-dir>/<one of two literal file names>.v1.<stamp>, where the
 	// stamp is nowStamp's own digits-and-Z format and the only caller-supplied component is the data
 	// dir the operator named with --data-dir. Writing beside the file is the command's job.
-	if err := os.WriteFile(filepath.Clean(path), data, 0o600); err != nil {
+	f, err := os.OpenFile(filepath.Clean(path), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		return err
+	}
+	if _, werr := f.Write(data); werr != nil {
+		_ = f.Close()
+		return werr
+	}
+	if serr := f.Sync(); serr != nil {
+		_ = f.Close()
+		return serr
+	}
+	if cerr := f.Close(); cerr != nil {
+		return cerr
 	}
 	return credfile.RestrictFile(path)
 }
@@ -544,8 +632,16 @@ func fullDiskEncryptionStatus() (bool, string, error) {
 // so a dry run on a host an operator cannot afford to guess about costs them nothing.
 func printMigratePlan(dataDir string, todo []migrateFile, machine vault.Slot, note, fingerprint string,
 	out io.Writer) {
+	// The enumeration is the claim, and the lock file is named in it rather than left out. Every
+	// vault command takes the data-dir lock before it knows whether it will refuse, and the lock file
+	// is deliberately never deleted (an O_EXCL lock file's reclaim race is what the OS lock avoids),
+	// so a dry run on a dir that had none leaves one behind. Saying "nothing was written" and then
+	// leaving a file is the sort of small untruth that makes an operator distrust the rest of the
+	// line.
 	_, _ = fmt.Fprintf(out, "vault migrate: dry run, nothing was written to %s - no file, no copy, no "+
-		"key material, no journal, no daemon-reload\n", dataDir)
+		"key material, no journal, no daemon-reload. The one exception is %s, which every vault "+
+		"command takes before it knows whether it will refuse and none of them ever deletes\n",
+		dataDir, vault.LockFileName)
 	for _, f := range todo {
 		_, _ = fmt.Fprintf(out, "  %s is %s and would become %s\n", f.name, vault.FormatV1, vault.FormatV2)
 		_, _ = fmt.Fprintf(out, "    a byte copy would be kept as %s.v1.<ts>, read back and opened with the "+

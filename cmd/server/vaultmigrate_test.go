@@ -418,6 +418,9 @@ func TestMigrateDryRunPrintsThePlanAndTheEncryptionStatus(t *testing.T) {
 	_, out := migrateRun(t, dir, true)
 	for _, want := range []string{
 		"dry run, nothing was written",
+		// The lock file is named in the enumeration, because the dry run does leave one on a dir
+		// that had none and a claim that omits it is a claim an operator can catch out.
+		"The one exception is " + vault.LockFileName,
 		"vault.bin is v1 and would become v2",
 		"read back and opened with the passphrase before anything is replaced",
 		"machine slot ",
@@ -537,6 +540,66 @@ func TestMigrateWrongPassphraseStopsWithNothingWritten(t *testing.T) {
 	}
 }
 
+// The line that turns a byte copy into a rollback: the copy is OPENED, and a copy that does not
+// open stops the run before anything is replaced.
+//
+// The open has to be injected for this to be assertable at all. refuseAWrongPassphrase has already
+// opened the original with this passphrase, and the copy is compared byte for byte against those
+// same bytes, so every copy a test can construct opens trivially - which means that without this
+// test the open could be deleted with the whole suite still green.
+func TestMigrateRefusesAV1CopyThatDoesNotOpen(t *testing.T) {
+	dir, _ := migrateFixture(t, true)
+	prev := proveCopyOpens
+	proveCopyOpens = func(string, bool, string) error { return errors.New("injected: the copy will not open") }
+	t.Cleanup(func() { proveCopyOpens = prev })
+
+	code, out := migrateRun(t, dir, false)
+	if code == 0 {
+		t.Fatalf("exit 0 after a copy that does not open: %s", out)
+	}
+	if !strings.Contains(out, "does not open with the passphrase, so it is not a rollback") {
+		t.Fatalf("the refusal does not say the copy is not a rollback: %s", out)
+	}
+	// Nothing was replaced: both live files are still v1 and no v2 file exists anywhere.
+	for _, name := range []string{"vault.bin", vault.KeyringFileName} {
+		info, err := vault.Inspect(filepath.Join(dir, name))
+		if err != nil || info.Format != vault.FormatV1 {
+			t.Fatalf("%s is %s (err %v), want v1 - a file was replaced behind a failed proof",
+				name, info.Format, err)
+		}
+	}
+	// And the journal is left for the next command, which is what the message promises.
+	if _, ok, err := vault.ReadVaultOp(dir); !ok || err != nil {
+		t.Fatalf("the journal was not left behind: ok %v err %v", ok, err)
+	}
+}
+
+// A kept v1 generation is never written over. The name carries a one-second stamp, so a collision
+// means a copy of this file is already on disk under this name; overwriting it - even with bytes
+// that ought to be the same - is the one thing the function that keeps the rollback must not do.
+func TestMigrateNeverWritesOverAnExistingV1Copy(t *testing.T) {
+	dir, _ := migrateFixture(t, false)
+	prev := nowStamp
+	nowStamp = func() string { return "20260101T000000Z" }
+	t.Cleanup(func() { nowStamp = prev })
+
+	squatter := filepath.Join(dir, "vault.bin.v1.20260101T000000Z")
+	const held = "a kept generation this run must not touch"
+	if err := os.WriteFile(squatter, []byte(held), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out := migrateRun(t, dir, false)
+	if code == 0 {
+		t.Fatalf("exit 0 over an existing v1 copy: %s", out)
+	}
+	if got := mustRead(t, squatter); string(got) != held {
+		t.Fatalf("the existing copy was overwritten: %q", got)
+	}
+	if info, err := vault.Inspect(filepath.Join(dir, "vault.bin")); err != nil || info.Format != vault.FormatV1 {
+		t.Fatalf("vault.bin is %s (err %v), want v1", info.Format, err)
+	}
+}
+
 // Already v2 is exit 0, not 2: the installer calls migrate idempotently and a non-zero exit there
 // would fail an install that is in fact correct.
 func TestMigrateOnAnAlreadyV2FileExitsZero(t *testing.T) {
@@ -553,6 +616,79 @@ func TestMigrateOnAnAlreadyV2FileExitsZero(t *testing.T) {
 		t.Fatalf("the output does not say it was already v2: %s", out)
 	}
 	assertSnapshotUnchanged(t, dir, before)
+}
+
+// Already v2 is exit 0, and it is the ONE return in this command that used to skip the journal
+// step. A migrate that crashed between its last rename and the journal's removal leaves exactly
+// this state - a correct v2 pair with a journal in it - and `migrate` is the command an operator
+// re-runs. A journal that touches no recovery copy needs no key to settle, so it is settled here
+// and the data dir is left with nothing for the next command to do.
+func TestMigrateSettlesAJournalOnAnAlreadyV2Dir(t *testing.T) {
+	dir := migratedFixture(t, true)
+	left := vault.VaultOp{Op: "migrate", Files: []string{"vault.bin", vault.KeyringFileName},
+		Stage: vault.StageRenamed}
+	if err := vault.WriteVaultOp(dir, left); err != nil {
+		t.Fatalf("write the journal: %v", err)
+	}
+	code, out := migrateRun(t, dir, false)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0: %s", code, out)
+	}
+	if !strings.Contains(out, "already v2") || !strings.Contains(out, "was settled") {
+		t.Fatalf("the output does not report settling the journal: %s", out)
+	}
+	if _, ok, err := vault.ReadVaultOp(dir); ok || err != nil {
+		t.Fatalf("the journal survived a migrate on an already-v2 dir: ok %v err %v", ok, err)
+	}
+}
+
+// And the two journals it must NOT exit 0 over. One is a journal this binary cannot read at all,
+// which is refused on a v1 dir already (TestMigrateRefusesAnUnreadableJournal) and must not become
+// a silent success just because the files happen to be v2. The other is a `rotate` or
+// `remove-slot` journal: its .bak is still openable by the key that operation was removing, the
+// re-seal needs a key this command does not ask for when it has nothing to migrate, and an
+// installer that read exit 0 here would start the service over that hole.
+func TestMigrateOnAnAlreadyV2DirRefusesAJournalItCannotSettle(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		write func(t *testing.T, dir string)
+		says  string
+	}{
+		{
+			name: "unreadable",
+			write: func(t *testing.T, dir string) {
+				if err := os.WriteFile(vault.VaultOpPath(dir), []byte("{not json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			says: "unreadable",
+		},
+		{
+			name: "re-seals a bak",
+			write: func(t *testing.T, dir string) {
+				op := vault.VaultOp{Op: "remove-slot", Files: []string{"vault.bin"},
+					Stage: vault.StageRenamed, ResealsBak: true}
+				if err := vault.WriteVaultOp(dir, op); err != nil {
+					t.Fatal(err)
+				}
+			},
+			says: "recovery copy",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := migratedFixture(t, true)
+			c.write(t, dir)
+			before := dirSnapshot(t, dir)
+			code, out := migrateRun(t, dir, false)
+			if code != exitUsage {
+				t.Fatalf("exit %d, want %d: %s", code, exitUsage, out)
+			}
+			if !strings.Contains(out, c.says) {
+				t.Fatalf("the refusal does not say %q: %s", c.says, out)
+			}
+			assertSnapshotUnchanged(t, dir, before)
+		})
+	}
 }
 
 // --- the mixed pair, and the one repair migrate is allowed to make ---

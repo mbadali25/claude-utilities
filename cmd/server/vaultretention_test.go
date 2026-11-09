@@ -346,6 +346,34 @@ func TestRetentionNeverTouchesTheRestOfTheDataDir(t *testing.T) {
 	}
 }
 
+// A symlink is never followed and never deleted, even when its NAME is a perfect generation name.
+// os.ReadDir reports the link's own type rather than its target's, and retentionVictims takes
+// regular files only - so a `vault.bin.v1.<ts>` pointing at something else in the operator's home
+// is left exactly where it is. Without this the delete would be a file-name-driven unlink of
+// whatever the link resolved to.
+func TestRetentionNeverFollowsASymlink(t *testing.T) {
+	dir := migratedFixture(t, false)
+	outside := filepath.Join(t.TempDir(), "do-not-delete-me")
+	const body = "a file outside the data dir"
+	if err := os.WriteFile(outside, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "vault.bin.v1.20260101T000000Z")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("this platform will not let the test create a symlink: %v", err)
+	}
+
+	if code, out := purgeRun(t, dir, false); code != 0 {
+		t.Fatalf("purge-backups exit %d: %s", code, out)
+	}
+	if got, err := os.ReadFile(filepath.Clean(outside)); err != nil || string(got) != body {
+		t.Fatalf("the symlink's target was deleted or rewritten: %q (err %v)", got, err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("the symlink itself was removed: %v", err)
+	}
+}
+
 // Both commands take the data-dir lock, because both delete the files a running server's next save
 // might be the only other copy of.
 func TestRetentionCommandsTakeTheLock(t *testing.T) {
