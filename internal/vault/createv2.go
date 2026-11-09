@@ -138,6 +138,9 @@ func InitV2(dataDir, pass string, machine Slot, ks KeySource) ([]FileInfo, error
 // indistinguishable from one - so a format test could not have refused it, and creating over it
 // would destroy whatever a previous run was in the middle of writing.
 func refuseExisting(path string) error {
+	//nolint:gosec // G703: path is InitV2's own filepath.Join(dataDir, <one of two literal file
+	// names>); the only caller-supplied component is the data dir the operator named with
+	// --data-dir, and statting the file this call is about to refuse to clobber is the whole point.
 	_, err := os.Stat(filepath.Clean(path))
 	switch {
 	case err == nil:
