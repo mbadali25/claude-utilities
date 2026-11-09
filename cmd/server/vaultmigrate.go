@@ -623,6 +623,15 @@ func vaultDowngrade(dataDir string, stdin io.Reader, out io.Writer) int {
 	}
 	ks := vault.WithMachineKeys(typedKey{pass: pass}, hostKeyOptions())
 	if code := settleJournal(dataDir, op, ks, out); code != 0 {
+		// `downgrade` keeps the standard settle, and that means an interrupted migrate that left a
+		// mixed pair refuses here. It is not a dead end and the operator should not have to work that
+		// out: the copy-back is the documented route out of that state, and `migrate` is the other.
+		// Saying so matters because this is the command someone reaches for when they want OUT, and a
+		// refusal naming only `verify` reads as "you are stuck".
+		_, _ = fmt.Fprintf(out, "vault %s: if the two files disagree about their format, this command "+
+			"cannot settle it - copy the %s.v1.<ts> copy back over %s and start the old binary, or run "+
+			"`server vault migrate`, which is the one command that repairs a mixed pair\n",
+			op, vaultFileName, vaultFileName)
 		return code
 	}
 	journal := vault.VaultOp{Op: op, Files: fileNames(todo), Stage: vault.StageStarted}

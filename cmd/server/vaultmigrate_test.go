@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"claude-utilities/internal/hub"
 	"claude-utilities/internal/vault"
 )
 
@@ -92,6 +93,45 @@ func withTLSFixture(t *testing.T, dir string) string {
 	}
 	sum := sha256.Sum256(der)
 	return hex.EncodeToString(sum[:])
+}
+
+// The number migrate prints has to be the number agents pin, and migrate computes it itself rather
+// than through internal/hub (see certFingerprint for why: the only exported route CREATES a pair).
+// This is the assertion that makes that duplication safe rather than merely small - the two agree
+// on a pair hub generated.
+//
+// They could disagree: hub hashes cert.Raw from the pair it just wrote, and certFingerprint hashes
+// the DER it gets from a pem.Decode plus an x509 parse. For a well-formed single-certificate PEM
+// those are the same bytes; for a PEM with leading text or a chain they would not be, and the
+// failure mode of being wrong here is de-enrolling every agent.
+func TestCertFingerprintAgreesWithTheValueHubReports(t *testing.T) {
+	dir := t.TempDir()
+	_, _, hubFP, err := hub.EnsureCert(filepath.Join(dir, "tls"))
+	if err != nil {
+		t.Fatalf("hub.EnsureCert: %v", err)
+	}
+	ours, err := certFingerprint(dir)
+	if err != nil {
+		t.Fatalf("certFingerprint: %v", err)
+	}
+	if ours != hubFP {
+		t.Fatalf("certFingerprint = %s and hub reports %s: migrate would print a value no agent pins",
+			ours, hubFP)
+	}
+}
+
+// And the test fixture's own hash agrees too, so every assertion below that compares against
+// withTLSFixture's return value is comparing against the real pin.
+func TestCertFingerprintAgreesWithTheFixturesOwnHash(t *testing.T) {
+	dir := t.TempDir()
+	want := withTLSFixture(t, dir)
+	got, err := certFingerprint(dir)
+	if err != nil {
+		t.Fatalf("certFingerprint: %v", err)
+	}
+	if got != want {
+		t.Fatalf("certFingerprint = %s, the fixture's own sha256 of the DER = %s", got, want)
+	}
 }
 
 // migrateFixture is a data dir ready for a scripted migrate: a v1 vault (and keyring), a TLS pair,
@@ -610,6 +650,14 @@ func TestMigrateRepairsAMixedPairWithAJournalWhileOtherMutatorsRefuse(t *testing
 	if _, ok, err := vault.ReadVaultOp(dir); ok || err != nil {
 		t.Fatalf("the journal survived the repair: ok %v err %v", ok, err)
 	}
+	// And the state is resolved for the command that was blocked, not merely for Inspect: the
+	// mutator that refused above now runs. Without this the claim "the repair worked" would rest on
+	// a format test rather than on the thing the mixed pair was stopping.
+	var addAgain bytes.Buffer
+	if code := vaultAddSlot(dir, slotTypePassphrase, false, strings.NewReader("a-second-passphrase\n"),
+		&addAgain); code != 0 {
+		t.Fatalf("add-slot still refuses after the repair: exit %d: %s", code, addAgain.String())
+	}
 }
 
 // A journal this binary cannot read is never acted on, by migrate either: it says which files to
@@ -722,6 +770,9 @@ func TestTheFourNewSubcommandsAreReachable(t *testing.T) {
 		if strings.Contains(errOut.String(), "unknown subcommand") {
 			t.Fatalf("%s is in the usage text and not in the dispatch: %s", sub, errOut.String())
 		}
+		// downgrade is the exemption and it is by design: an empty data dir has nothing that is v2,
+		// which is "nothing to downgrade" and exit 0, for the reason a rollback script run twice must
+		// not fail the second time. The other three refuse something about an empty dir.
 		if code == 0 && sub != "downgrade" {
 			t.Fatalf("%s exit 0 against an empty data dir: %s%s", sub, out.String(), errOut.String())
 		}

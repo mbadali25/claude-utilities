@@ -35,6 +35,9 @@ func migratedFixture(t *testing.T, keyring bool) string {
 func migratedKEKFixture(t *testing.T) string {
 	t.Helper()
 	dir, _ := migrateFixture(t, false)
+	// This second withKEKFile is load-bearing on Windows and not a repeat: migrateFixture's
+	// withHostMachineKey is a no-op there (dpapi needs nothing), so without this there is no
+	// kek-file opener for --add kek-file to resolve.
 	withKEKFile(t, fixtureKEK())
 	var out bytes.Buffer
 	if code := vaultMigrate(dir, false, slotTypeKEKFile, false, strings.NewReader(""), &out); code != 0 {
