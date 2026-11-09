@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -27,10 +29,30 @@ import (
 	"claude-utilities/internal/hub"
 	"claude-utilities/internal/logx"
 	"claude-utilities/internal/ownership"
+	"claude-utilities/internal/service"
 	"claude-utilities/internal/tunnel"
 	"claude-utilities/internal/usage"
 	"claude-utilities/internal/vault"
 	"claude-utilities/internal/web"
+)
+
+// The entry point's seams. The order these fire in is the contract this slice adds - the lock
+// before the first writer, readiness after the last thing that can fail - and an ordering contract
+// that nothing can observe is one that breaks silently. They are variables so a test records the
+// order against the real implementations rather than against a mock of the whole entry point.
+//
+// registeredDataDir is the exception: it has no implementation yet. Reading the service's baked
+// --data-dir means the SCM on Windows (mgr.Service.Config().BinaryPathName) and the unit's
+// ExecStart= on Linux, which arrive with the service halves in slices 4b and 4c. Until then it
+// answers "no service registered", which is the truth on a host where none is.
+var (
+	acquireLock       = vault.AcquireLock
+	readVaultOp       = vault.ReadVaultOp
+	ensureCert        = hub.EnsureCert
+	listenTCP         = net.Listen
+	notifyReady       = service.NotifyReady
+	notifyStopping    = service.NotifyStopping
+	registeredDataDir = func() (string, bool) { return "", false }
 )
 
 const (
@@ -174,12 +196,10 @@ func serveCmd(ctx context.Context, args []string, getenv func(string) string, er
 		_, _ = fmt.Fprintln(errOut, "server: --listen must be host:port")
 		return 2
 	}
-	if getenv(keyEnv) == "" {
-		_, _ = fmt.Fprintf(errOut, "server: set %s (vault passphrase)\n", keyEnv)
-		return 2
-	}
 	// A stored hash wins over the environment variable, which is only the bootstrap for a data
-	// dir that has never had `server set-password` run against it.
+	// dir that has never had `server set-password` run against it. It is checked before the lock
+	// deliberately: an input this process will never have is no reason to create a data dir, take
+	// its lock, or make another server wait.
 	pw, err := adminpw.Open(passwordPath(*dataDir), getenv(passwordEnv))
 	if err != nil {
 		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
@@ -187,15 +207,146 @@ func serveCmd(ctx context.Context, args []string, getenv func(string) string, er
 	}
 	if !pw.Stored() && getenv(passwordEnv) == "" {
 		_, _ = fmt.Fprintf(errOut, "server: set %s (admin UI password) or run `server set-password` first\n", passwordEnv)
-		return 2
+		return exitUsage
 	}
+
+	log := logx.New(errOut)
+	// Decision 10: one data dir, named once, through TildePath so a developer's home never carries
+	// a username into a log line - and a warning when the registered service disagrees with it.
+	log.Info("data dir", "datadir", logx.TildePath(*dataDir))
+	warnOtherServiceDataDir(log, *dataDir)
+
+	// The lock before anything that writes. EnsureCert is the first writer, and two servers
+	// generating a pair into one tls/ is how every agent's pin stops matching.
+	lock, err := acquireLock(*dataDir, "run")
+	if err != nil {
+		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
+		return lockExitCode(err)
+	}
+	// Held for the process lifetime: the vault mutators take the same lock, so a `vault rotate`
+	// against a running server waits rather than racing it.
+	defer func() { _ = lock.Release() }()
+
+	if code := refuseInterruptedVaultOp(*dataDir, log, errOut); code != 0 {
+		return code
+	}
+
+	ks, code := entryKeySource(getenv, *dataDir, *tunnels, log, errOut)
+	if code != 0 {
+		return code
+	}
+
 	// This is the one place a serve error becomes an exit code, so it is the one place the
 	// `cert refused` line can carry both the reason and the code.
-	if err := serve(ctx, *listen, *dataDir, pw, *tunnels, *refreshTokens, parseRefreshAccounts(*refreshAccounts), *staleAfter, errOut); err != nil && !errors.Is(err, context.Canceled) {
+	if err := serve(ctx, *listen, *dataDir, pw, ks, *tunnels, *refreshTokens, parseRefreshAccounts(*refreshAccounts), *staleAfter, errOut); err != nil && !errors.Is(err, context.Canceled) {
 		reportRefusal(errOut, "server", err)
 		return exitCodeFor(err)
 	}
 	return 0
+}
+
+// lockExitCode is 2 when another process holds the data-dir lock and 1 when taking it failed for
+// any other reason. 2 is the non-restarting code on purpose: a lock a live server holds is still
+// held after a restart, so a supervisor that retried would only hide the message naming the holder.
+func lockExitCode(err error) int {
+	if errors.Is(err, vault.ErrLockHeld) {
+		return exitUsage
+	}
+	return exitRuntime
+}
+
+// warnOtherServiceDataDir is Decision 10's only guard: the installer bakes --data-dir into the
+// service command line, so the SCM is the single source of truth, and a console run against a
+// different dir is a second vault nobody meant to have. It warns rather than refuses, because
+// running a developer's vault beside a service is a thing an operator does deliberately.
+func warnOtherServiceDataDir(log *slog.Logger, inUse string) {
+	registered, ok := registeredDataDir()
+	if !ok || sameDir(registered, inUse) {
+		return
+	}
+	log.Warn("a service is registered with a different data dir",
+		"reason", "datadir-mismatch", "datadir", logx.TildePath(registered))
+}
+
+// sameDir compares two data-dir paths the way the filesystem does: case-insensitively on Windows.
+func sameDir(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// refuseInterruptedVaultOp refuses to start when a vaultop journal is present, with exit 3.
+//
+// The server never settles one. The settle re-runs or reverts a half-finished slot operation, and a
+// service doing that unattended - with the operator who ran the mutator gone, and the result in a
+// log nobody is reading - is how a recovery copy or a host's tunnel key is lost. 3 is non-restarting,
+// so the supervisor stops instead of looping, and the message names the read-only command that looks
+// at the state without changing it.
+func refuseInterruptedVaultOp(dataDir string, log *slog.Logger, errOut io.Writer) int {
+	op, ok, err := readVaultOp(dataDir)
+	switch {
+	case err != nil:
+		log.Error("vaultop interrupted", "reason", "unreadable", "op", "run")
+		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
+		return exitVaultLocked
+	case ok:
+		log.Error("vaultop interrupted", "reason", "present", "op", op.Op)
+		_, _ = fmt.Fprintf(errOut, "server: %s names an interrupted %s (stage %s): the next vault "+
+			"command settles it; to look first, run `server vault verify --all-slots`\n",
+			vault.VaultOpFileName, op.Op, op.Stage)
+		return exitVaultLocked
+	}
+	return 0
+}
+
+// entryKeySource picks the keys for this entry point and refuses, with the format code, the states a
+// process with no passphrase cannot do anything about.
+//
+// Two entry points, one command. With CLAUDESWAP_KEY set this is a console run and the passphrase is
+// the key, exactly as before. Without it this is the service: machine-held openers only, which is
+// why Open stopped taking the name of an environment variable - a name cannot express "this process
+// has no passphrase". The refusals below are the three states that reach exit 4 rather than a
+// confusing ErrNoKey from inside the opener.
+func entryKeySource(getenv func(string) string, dataDir string, tunnels bool, log *slog.Logger, errOut io.Writer) (vault.KeySource, int) {
+	// A v2 vault with a v1 keyring, or the reverse: what a crash between the two writes leaves.
+	// Only --tunnels opens the keyring, so only --tunnels refuses - and it refuses rather than
+	// starting half-open, with the vault serving accounts and the tunnels silently dead.
+	if tunnels {
+		if line, mixed := vault.MixedPair(dataDir); mixed {
+			log.Error("format", "reason", "mixed-pair", "op", "run")
+			_, _ = fmt.Fprintln(errOut, "server:", line)
+			return nil, exitNewerFormat
+		}
+	}
+	if getenv(keyEnv) != "" {
+		return vault.EnvKey(keyEnv), 0
+	}
+
+	info, err := vault.Inspect(filepath.Join(dataDir, vaultFileName))
+	if err != nil {
+		// A file this binary cannot even inspect is a format it cannot read, which is exit 4's own
+		// row; reportRefusal carries the reason when the error is one of the vault's sentinels.
+		reportRefusal(errOut, "server", err)
+		return nil, exitNewerFormat
+	}
+	switch info.Format {
+	case vault.FormatAbsent:
+		// Never created here: a vault needs a passphrase slot (it is the recovery key for every
+		// machine-key loss), so a process with no passphrase must not write one.
+		log.Error("format", "reason", "no-vault", "op", "run")
+		_, _ = fmt.Fprintf(errOut, "server: no vault at %s and no passphrase (%s is unset): "+
+			"run `server vault init`\n", logx.TildePath(dataDir), keyEnv)
+		return nil, exitNewerFormat
+	case vault.FormatV1:
+		log.Error("format", "reason", "v1-no-passphrase", "op", "run")
+		_, _ = fmt.Fprintf(errOut, "server: the vault at %s is v1, which has no key slots, and this "+
+			"process has no passphrase (%s is unset): run `server vault migrate`\n",
+			logx.TildePath(dataDir), keyEnv)
+		return nil, exitNewerFormat
+	}
+	return vault.WithMachineKeys(nil, hostKeyOptions()), 0
 }
 
 // exitCodeFor maps a serve error to a process exit code. It is the single mapping site: `serve`
@@ -401,8 +552,8 @@ func wireRefresher(p *usage.Poller, enabled bool, r usage.Refresher, log *slog.L
 	return true
 }
 
-func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunnels, refreshTokens bool, refreshAccounts []string, staleAfter time.Duration, errOut io.Writer) error {
-	certFile, keyFile, fp, err := hub.EnsureCert(filepath.Join(dataDir, "tls"))
+func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, ks vault.KeySource, tunnels, refreshTokens bool, refreshAccounts []string, staleAfter time.Duration, errOut io.Writer) error {
+	certFile, keyFile, fp, err := ensureCert(filepath.Join(dataDir, "tls"))
 	if err != nil {
 		return err
 	}
@@ -420,13 +571,10 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 			log.Info(text, "reason", "cert-expiry")
 		}
 	}
-	// The console entry point's keys: the passphrase from CLAUDESWAP_KEY, and no machine key slot.
-	// It is chosen here, once, and handed to both sealed files because the keyring is sealed with
-	// the same passphrase as the vault. The service entry point of slice 4 builds a different one
-	// (vault.HostKeys only, no passphrase) and that is the whole reason Open stopped taking the
-	// name of an environment variable - a name cannot express "this process has no passphrase".
-	ks := vault.EnvKey(keyEnv)
-	v, err := vault.Open(filepath.Join(dataDir, "vault.bin"), ks)
+	// The keys were chosen by entryKeySource, once, and are handed to both sealed files because the
+	// keyring is sealed with the same key material as the vault: the passphrase from CLAUDESWAP_KEY
+	// for a console run, this host's machine-held openers for the service.
+	v, err := vault.Open(filepath.Join(dataDir, vaultFileName), ks)
 	if err != nil {
 		return err
 	}
@@ -490,13 +638,36 @@ func serve(ctx context.Context, listen, dataDir string, pw web.PasswordAPI, tunn
 	mux.Handle("/", web.Handler(h, v, poller, pw, tm))
 	srv := &http.Server{Addr: listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
+	// READY=1 goes out after the LAST thing that can fail, which is what `Type=notify` buys: with
+	// Type=simple `systemctl start` returns as soon as the process exists, so a server about to
+	// exit 3 on a locked vault would be reported as started. So the pair is loaded here rather than
+	// inside ListenAndServeTLS, and the listener is bound here rather than in the goroutine: after
+	// these two there is nothing left between readiness and serving.
+	pair, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return err
+	}
+	srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
+	ln, err := listenTCP("tcp", listen)
+	if err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintf(errOut, "server: listening on https://%s  certificate sha256=%s\n", listen, fp)
+	if err := notifyReady(); err != nil {
+		// A readiness message that cannot be sent is not a reason to refuse service: the server is
+		// up, and on a console run there is no socket to send it to at all. It is logged so a unit
+		// that then times out has the cause in the journal rather than only "start timed out".
+		log.Warn("readiness notification failed", "reason", "notify", logx.Err(err))
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServeTLS(certFile, keyFile) }()
+	go func() { errc <- srv.ServeTLS(ln, "", "") }()
 	select {
 	case err := <-errc:
 		return err
 	case <-ctx.Done():
+		if err := notifyStopping(); err != nil {
+			log.Warn("stopping notification failed", "reason", "notify", logx.Err(err))
+		}
 		sctx, c := context.WithTimeout(context.Background(), shutdownWait)
 		defer c()
 		return errors.Join(srv.Shutdown(sctx), ctx.Err())
