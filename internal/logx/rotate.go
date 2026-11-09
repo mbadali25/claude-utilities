@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"claude-utilities/internal/credfile"
@@ -63,7 +65,30 @@ func NewRotatingWriter(path string, maxBytes int64, keep int) (io.WriteCloser, e
 	if err := w.open(); err != nil {
 		return nil, err
 	}
+	w.pruneAboveTheChain()
 	return w, nil
+}
+
+// pruneAboveTheChain deletes path.N for every N at or above keep. The rename chain only ever touches
+// .1 … keep-1, so a generation above it is never renamed over and never deleted - and a retention
+// that leaves a file behind for ever is not an explicit retention. The real source is a run with a
+// larger keep, or a keep this repo lowers later.
+//
+// A failure is not reported: it is housekeeping, and a stray file an operator holds open must not
+// stop a service from logging. A suffix that is not a generation number (server.log.old) is left
+// alone - this writer deletes only what it could have written.
+func (w *rotatingWriter) pruneAboveTheChain() {
+	matches, err := filepath.Glob(w.path + ".*")
+	if err != nil {
+		return
+	}
+	for _, m := range matches {
+		n, err := strconv.Atoi(strings.TrimPrefix(m, w.path+"."))
+		if err != nil || n < w.keep {
+			continue
+		}
+		_ = os.Remove(m)
+	}
 }
 
 // open attaches to the live file and reads its current size.
@@ -108,18 +133,33 @@ func (w *rotatingWriter) Write(p []byte) (int, error) {
 // rotate closes the live file, shifts the chain down by one, drops the oldest and opens a new live
 // file. It runs under the same lock as the write, so no goroutine can write to the file it closes.
 //
-// A missing generation is not an error: the chain is short-lived and a file an operator moved aside
-// must not stop the service from logging.
+// The live file is reopened whatever the shift did. A shift that returned early with the file closed
+// would break every later write for the lifetime of the process - the next one would try to rotate a
+// closed file and fail on the close - so one stray directory or one .1 another process holds open on
+// Windows would silence a service's log for good. Reopening instead leaves the size at the cap, so
+// the next write retries the whole rotation and the writer heals itself once the obstruction clears.
 func (w *rotatingWriter) rotate() error {
 	if err := w.f.Close(); err != nil {
 		return err
 	}
+	shifted := w.shift()
+	if err := w.open(); err != nil {
+		return errors.Join(shifted, err)
+	}
+	return shifted
+}
+
+// shift moves the chain down by one and drops the oldest generation.
+//
+// A missing generation is not an error: the chain is short-lived and a file an operator moved aside
+// must not stop the service from logging.
+func (w *rotatingWriter) shift() error {
 	if w.keep == 1 {
 		// The live file only: truncate by replacing it.
 		if err := os.Remove(w.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		return w.open()
+		return nil
 	}
 	oldest := w.generation(w.keep - 1)
 	if err := os.Remove(oldest); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -133,7 +173,7 @@ func (w *rotatingWriter) rotate() error {
 	if err := os.Rename(w.path, w.generation(1)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return w.open()
+	return nil
 }
 
 // generation names the nth rotation: server.log.1 … server.log.<keep-1>.

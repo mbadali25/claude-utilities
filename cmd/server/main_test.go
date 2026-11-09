@@ -957,9 +957,12 @@ func TestRunWithNoPassphraseOpensAV2VaultThroughTheMachineSlot(t *testing.T) {
 	t.Setenv("CLAUDESWAP_KEK_FILE", kek)
 	t.Setenv(keyEnv, "a-test-passphrase")
 	var initOut bytes.Buffer
+	// Not a skip: `vault init` takes the dpapi rung on windows-latest and the kek-file rung on
+	// ubuntu-latest, and both CI runners were checked. A skip here would let the one test that pins
+	// this slice's headline behaviour change go quietly green the day either rung stops working.
 	if code := run(context.Background(), []string{"vault", "init", "--data-dir", dir},
 		env(map[string]string{keyEnv: "a-test-passphrase"}), noStdin(), &initOut); code != 0 {
-		t.Skipf("no v2 vault to serve: `vault init` exited %d here: %s", code, initOut.String())
+		t.Fatalf("no v2 vault to serve: `vault init` exited %d here: %s", code, initOut.String())
 	}
 
 	code, out, order := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, nil)
@@ -971,6 +974,69 @@ func TestRunWithNoPassphraseOpensAV2VaultThroughTheMachineSlot(t *testing.T) {
 	}
 	if strings.Contains(out, "set "+keyEnv) {
 		t.Fatalf("the run still demands a passphrase: %s", out)
+	}
+}
+
+// TestRunExitsThreeWhenNoSlotCanUnwrapWithNoPassphrase is the spec's exit-3 row - "vault locked: no
+// slot could unwrap" - on the entry point this slice adds, and it is the failure half of the test
+// above. The fixture's machine slot is a kek-file one and the KEK this host resolves holds the wrong
+// key, so the slot is reachable, is tried, and does not unwrap: ErrBadKey, not ErrKEKUnreachable.
+//
+// With no passphrase there is no second way in, which is exactly "vault locked", so it must be 3 and
+// out of the restart loop. Exit 1 here would be a restart storm on the one case the spec names by
+// name - a restored data dir or a cleared machine key - because 1 is the only retried code.
+func TestRunExitsThreeWhenNoSlotCanUnwrapWithNoPassphrase(t *testing.T) {
+	dir := t.TempDir()
+	storeAdminPassword(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "vault.bin"), readFixture(t, "vault-v2.bin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kek := filepath.Join(t.TempDir(), "kek")
+	if err := os.WriteFile(kek, bytes.Repeat([]byte{0x11}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDESWAP_KEK_FILE", kek)
+	code, out, order := recordedRun(t, []string{"run", "--listen", "127.0.0.1:0", "--data-dir", dir}, nil)
+	if code != exitVaultLocked {
+		t.Fatalf("code %d, want %d (vault locked: no slot could unwrap, and 1 would be retried): %s",
+			code, exitVaultLocked, out)
+	}
+	if indexOf(order, "listen") >= 0 {
+		t.Fatalf("a run that could not open the vault bound a listener: %v", order)
+	}
+}
+
+// TestServiceExitCodeLocksTheVaultOnlyWithoutAPassphrase pins both sides of the one row that depends
+// on the entry point. With a passphrase in the environment ErrBadKey is a wrong CLAUDESWAP_KEY - an
+// operator's typo at a console, exit 1 - and with none it is the locked vault, exit 3. ErrNoKey goes
+// the same way: with no passphrase it is the answer recoverDEK gives when the only slots are ones
+// this host has no opener for, which is a restored data dir and not a retryable fault.
+func TestServiceExitCodeLocksTheVaultOnlyWithoutAPassphrase(t *testing.T) {
+	for _, err := range []error{vault.ErrBadKey, vault.ErrNoKey,
+		fmt.Errorf("no slot could unwrap the data key: %w", vault.ErrBadKey)} {
+		if got := exitCodeForRun(err, false); got != exitVaultLocked {
+			t.Fatalf("%v with no passphrase: exit %d, want %d", err, got, exitVaultLocked)
+		}
+		if got := exitCodeForRun(err, true); got != exitRuntime {
+			t.Fatalf("%v with a passphrase: exit %d, want %d", err, got, exitRuntime)
+		}
+	}
+	// The rows that do not depend on the entry point keep their codes either way.
+	for _, c := range []struct {
+		err  error
+		want int
+	}{
+		{vault.ErrKEKUnreachable, exitVaultLocked},
+		{vault.ErrNewerFormat, exitNewerFormat},
+		{vault.ErrMalformed, exitNewerFormat},
+		{hub.ErrCertExpired, exitCertRefused},
+		{os.ErrPermission, exitRuntime},
+	} {
+		for _, hasPass := range []bool{false, true} {
+			if got := exitCodeForRun(c.err, hasPass); got != c.want {
+				t.Fatalf("%v (passphrase=%v): exit %d, want %d", c.err, hasPass, got, c.want)
+			}
+		}
 	}
 }
 

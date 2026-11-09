@@ -240,7 +240,7 @@ func serveCmd(ctx context.Context, args []string, getenv func(string) string, er
 	// `cert refused` line can carry both the reason and the code.
 	if err := serve(ctx, *listen, *dataDir, pw, ks, *tunnels, *refreshTokens, parseRefreshAccounts(*refreshAccounts), *staleAfter, errOut); err != nil && !errors.Is(err, context.Canceled) {
 		reportRefusal(errOut, "server", err)
-		return exitCodeFor(err)
+		return exitCodeForRun(err, getenv(keyEnv) != "")
 	}
 	return 0
 }
@@ -349,6 +349,27 @@ func entryKeySource(getenv func(string) string, dataDir string, tunnels bool, lo
 	return vault.WithMachineKeys(nil, hostKeyOptions()), 0
 }
 
+// exitCodeForRun maps a serve error for `server run`, which is the one entry point that reaches
+// both the console's keys and the service's. It is exitCodeFor plus the single row whose code
+// depends on which of the two this process is.
+//
+// With a passphrase, ErrBadKey is a wrong CLAUDESWAP_KEY: an operator's typo at a console, exit 1,
+// and a retry is the right thing for a supervisor to do with it. With no passphrase there is no
+// second way in, so "no slot could unwrap" (ErrBadKey, or the ErrNoKey recoverDEK returns when the
+// only slots are kinds this host has no opener for) IS the spec's exit-3 row, "vault locked". That
+// is the restored-data-dir and cleared-machine-key case, and leaving it at 1 would make it the one
+// fatal a supervisor retries: ErrKEKUnreachable alone does not cover it, because a KEK file that
+// reads but holds the wrong key never reaches that sentinel.
+func exitCodeForRun(err error, hasPassphrase bool) int {
+	if code := exitCodeFor(err); code != exitRuntime {
+		return code
+	}
+	if !hasPassphrase && (errors.Is(err, vault.ErrBadKey) || errors.Is(err, vault.ErrNoKey)) {
+		return exitVaultLocked
+	}
+	return exitRuntime
+}
+
 // exitCodeFor maps a serve error to a process exit code. It is the single mapping site: `serve`
 // returns errors unchanged and `run` is the only place an error becomes an int.
 //
@@ -385,9 +406,9 @@ func vaultExitCode(err error) int {
 	// shell, a mode bit or `server vault add-slot`, never rotating a passphrase that is correct.
 	//
 	// ErrBadKey keeps exit 1 here deliberately: on the console path it is a wrong CLAUDESWAP_KEY,
-	// which is an operator's typo and not a locked vault. The service entry point of slice 4, which
-	// has no passphrase at all and for which "no slot could unwrap" IS the locked state, maps it
-	// with the rest of its own table.
+	// which is an operator's typo and not a locked vault. The no-passphrase entry point, for which
+	// "no slot could unwrap" IS the locked state, raises the same sentinel to 3 in exitCodeForRun -
+	// this function is also `cert renew`'s and the mutators', which all have a passphrase.
 	if errors.Is(err, vault.ErrKEKUnreachable) {
 		return exitVaultLocked
 	}

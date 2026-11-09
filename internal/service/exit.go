@@ -61,7 +61,7 @@ func ServerTable() Table {
 		Name: "server",
 		rows: []Row{
 			{Code: 2, Meaning: "usage, missing input (no admin password hash and no bootstrap), or the data-dir lock is held by another process"},
-			{Code: 3, Meaning: "vault locked: no slot could unwrap (vault.ErrKEKUnreachable), or an interrupted vaultop journal was found on start"},
+			{Code: 3, Meaning: "vault locked: no slot could unwrap (vault.ErrKEKUnreachable, or vault.ErrBadKey/ErrNoKey when this process has no passphrase), or an interrupted vaultop journal was found on start"},
 			{Code: 4, Meaning: "format: a vault written by a newer server or a malformed one, a v1 vault with no passphrase, no vault and no passphrase, or a v2 vault with a v1 keyring"},
 			{Code: 5, Meaning: "certificate refused: EnsureCert would have had to regenerate or re-ACL the TLS pair and did not"},
 		},

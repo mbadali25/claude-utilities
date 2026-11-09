@@ -104,11 +104,11 @@ func TestRotatingWriterKeepsFiveAndDeletesTheSixth(t *testing.T) {
 	}
 }
 
-// TestRotatingWriterDeletesAGenerationBeyondTheChain: the rename chain alone does not enforce the
-// retention. A stale server.log.4 with no server.log.3 to rename over it - a file an operator left,
-// or what a run with a larger keep wrote - would otherwise sit there for ever, outside the 50 MiB
-// the retention promises.
-func TestRotatingWriterDeletesAGenerationBeyondTheChain(t *testing.T) {
+// TestRotatingWriterDeletesTheChainsLastGeneration: the rename chain alone does not enforce the
+// retention. A stale server.log.4 with no server.log.3 to rename over it - a file an operator left
+// aside - would otherwise sit there for ever, outside the 50 MiB the retention promises. This is
+// keep-1, the chain's own tail; a generation ABOVE the chain is the test below.
+func TestRotatingWriterDeletesTheChainsLastGeneration(t *testing.T) {
 	path := logPath(t)
 	dir := filepath.Dir(path)
 	for _, name := range []string{"server.log.1", "server.log.4"} {
@@ -131,6 +131,83 @@ func TestRotatingWriterDeletesAGenerationBeyondTheChain(t *testing.T) {
 	}
 	if got := names(t, dir); len(got) != 3 {
 		t.Fatalf("%v, want server.log, .1 and .2", got)
+	}
+}
+
+// TestRotatingWriterPrunesGenerationsAboveTheChain: the rename chain only ever touches .1 … keep-1,
+// so a generation above it is never renamed over and never deleted - and a 50 MiB retention that
+// leaves a 10 MiB file behind for ever is not the explicit retention this promises. The real source
+// is a run with a larger keep (a developer's, or a keep this repo lowers later).
+func TestRotatingWriterPrunesGenerationsAboveTheChain(t *testing.T) {
+	path := logPath(t)
+	dir := filepath.Dir(path)
+	for _, name := range []string{"server.log.5", "server.log.9", "server.log.old", "unrelated.log"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("stale\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile %s: %v", name, err)
+		}
+	}
+	w, err := NewRotatingWriter(path, 10, 5)
+	if err != nil {
+		t.Fatalf("NewRotatingWriter: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+	for _, gone := range []string{"server.log.5", "server.log.9"} {
+		if _, err := os.Stat(filepath.Join(dir, gone)); !os.IsNotExist(err) {
+			t.Fatalf("%s survived (stat err %v): it is outside the retention and nothing else deletes it", gone, err)
+		}
+	}
+	// A name whose suffix is not a generation number is not this writer's to delete.
+	for _, kept := range []string{"server.log.old", "unrelated.log"} {
+		if _, err := os.Stat(filepath.Join(dir, kept)); err != nil {
+			t.Fatalf("%s was deleted: only numbered generations above the chain are pruned (%v)", kept, err)
+		}
+	}
+}
+
+// TestRotatingWriterSurvivesAFailedRotation: a rotation closes the live file before it shifts the
+// chain, so a shift that fails must still leave a writer that writes. Without that the first
+// transient failure - a .1 another process holds open on Windows, a directory in the way - breaks
+// every later line for the lifetime of the process, and a service's log goes quiet for good.
+func TestRotatingWriterSurvivesAFailedRotation(t *testing.T) {
+	path := logPath(t)
+	// keep=2 makes .1 the generation the rotation deletes first, and a non-empty directory there
+	// fails os.Remove on both OSes without being a missing file.
+	blocked := path + ".1"
+	if err := os.MkdirAll(filepath.Join(blocked, "inner"), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	w, err := NewRotatingWriter(path, 10, 2)
+	if err != nil {
+		t.Fatalf("NewRotatingWriter: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+	if _, err := w.Write([]byte("000000000\n")); err != nil {
+		t.Fatalf("the first write: %v", err)
+	}
+	if _, err := w.Write([]byte("111111111\n")); err == nil {
+		t.Fatal("the blocked rotation reported success")
+	}
+	// The obstruction clears, as a held file or a stray directory does.
+	if err := os.RemoveAll(blocked); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if _, err := w.Write([]byte("222222222\n")); err != nil {
+		t.Fatalf("the writer stayed broken after a failed rotation: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.TrimSpace(string(b)) != "222222222" {
+		t.Fatalf("live file holds %q, want the line written after the recovery", strings.TrimSpace(string(b)))
+	}
+	// The line that was live when the rotation failed is not lost: it rolled on the next one.
+	rolled, err := os.ReadFile(blocked)
+	if err != nil {
+		t.Fatalf("ReadFile .1: %v", err)
+	}
+	if !strings.Contains(string(rolled), "000000000") {
+		t.Fatalf(".1 holds %q, want the line that was live when the rotation failed", rolled)
 	}
 }
 
