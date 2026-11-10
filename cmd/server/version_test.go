@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -30,6 +31,13 @@ func TestVersionCmdIgnoresEverythingElse(t *testing.T) {
 		if out.Len() != 0 {
 			t.Fatalf("%v: wrote %q", args, out.String())
 		}
+	}
+}
+
+// The usage line must say --version works only as the sole argument, not beside the run flags.
+func TestUsageSaysVersionIsSoleArgument(t *testing.T) {
+	if !strings.Contains(usageText, "--version (alone)") {
+		t.Fatal("usageText must mark --version as usable only as the sole argument")
 	}
 }
 

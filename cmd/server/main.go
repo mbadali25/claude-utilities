@@ -92,7 +92,9 @@ const usageText = `usage: server run <flags> | server <flags> | server set-passw
                          since start.
   --stale-after DUR     flag a stored login older than this (default 6h; access tokens
                          last about 8h). A flagged login still swaps, with a warning.
-  --version              print the version and exit (needs no environment or data dir)
+  --version (alone)      print the version and exit. Only as the sole argument ("server --version",
+                         also "-version" or "version"); beside other flags it is not recognised.
+                         Needs no environment or data dir.
   set-password           replace the admin UI password; it is read from a no-echo
                          prompt when stdin is a terminal, else one line of stdin.
                          There is no flag for it, by design.

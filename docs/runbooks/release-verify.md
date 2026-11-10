@@ -39,6 +39,15 @@ You need `cosign` (v2 or later) and `gh` (logged in; `gh attestation verify` nee
 
    Expected: every line `OK`. On Windows PowerShell, compare `(Get-FileHash <file>).Hash` with the line in `SHA256SUMS`.
 
+5. Check the binary reports the tag you verified. Extract one archive of each kind into its own empty directory, then run it.
+
+   ```
+   ./agent --version
+   ./server --version
+   ```
+
+   Expected: `agent <tag>` and `server <tag>` (for example `agent v1.2.3`). `dev` means the binary was not built by the release workflow; do not run it. Both commands need no environment, data dir or network. On Windows use `.\agent.exe` and `.\server.exe`.
+
 ## Weaker fallback
 
 If neither `cosign` nor `gh` is present, the only check left is comparing one file's SHA-256 against a value you obtained over another channel (`CLAUDESWAP_SERVER_SHA256` in the server installer, once it exists). That proves the file matches the value you hold, not who built it. Use it only when you cannot install either tool, and say so in the ticket.
