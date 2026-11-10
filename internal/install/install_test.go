@@ -12,8 +12,8 @@ import (
 )
 
 // The agent's lockdown grants one principal and is the argument list the logon-task install
-// has shipped with; the server's service install grants two and needs /T so the grant reaches
-// files the data dir already holds. Exact slice equality, not a prefix check: an appended /T
+// has shipped with; the server's service install grants two and appends /T (which visits the
+// tree but does not put the grant on existing files; the server covers those per file). Exact slice equality, not a prefix check: an appended /T
 // is exactly the regression a prefix check cannot see.
 func TestIcaclsArgsForOneUserAreUnchanged(t *testing.T) {
 	got := IcaclsLockdownArgs(`C:\state`, `CORP\bob`)

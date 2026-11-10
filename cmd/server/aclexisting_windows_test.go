@@ -20,9 +20,12 @@ import (
 // localized the way `BUILTIN\Administrators` is.
 const standInServiceAccount = `NT SERVICE\TrustedInstaller`
 
-// TestInstallGrantReachesAFileWrittenBeforeTheService pins the claim IcaclsLockdownArgs makes in
-// its own comment - "/T reaches the files the data dir already holds ... which is what makes an
-// install after an init safe" - against what icacls does.
+// standInServiceSID is the SID of standInServiceAccount, in the form credfile.SetACLPolicy takes.
+const standInServiceSID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+
+// TestInstallGrantReachesAFileWrittenBeforeTheService pins that a file written before the service
+// existed ends up with an ACE for the service after the install steps. The icacls /T grant alone does
+// not do it (container-only flags land on directories); restrictExistingFiles does.
 //
 // The sequence is the one the Windows service-smoke leg runs and the one any real host runs:
 // `vault init` and `set-password` write into the data dir while no service is registered, so
@@ -63,6 +66,15 @@ func TestInstallGrantReachesAFileWrittenBeforeTheService(t *testing.T) {
 		t.Fatalf("icacls %v: %v: %s", args, err, strings.TrimSpace(string(out)))
 	}
 
+	// reapplyACLPolicy has run by now: the policy names the service SID. The stand-in is the
+	// TrustedInstaller SID, which every Windows install has.
+	if err := credfile.SetACLPolicy(service.AdministratorsSID, standInServiceSID); err != nil {
+		t.Fatalf("SetACLPolicy with the stand-in: %v", err)
+	}
+	if n, err := restrictExistingFiles(dir); err != nil || n != 1 {
+		t.Fatalf("restrictExistingFiles = %d, %v; want 1 file, nil", n, err)
+	}
+
 	// The directory is granted - that half has never been in doubt, and asserting it here keeps a
 	// failure from being read as "icacls refused the whole command".
 	if !daclNames(t, dir, "TrustedInstaller") {
@@ -95,4 +107,32 @@ func dacl(t *testing.T, path string) string {
 func daclNames(t *testing.T, path, leafName string) bool {
 	t.Helper()
 	return strings.Contains(dacl(t, path), leafName)
+}
+
+// TestRestrictExistingFilesNarrowedPolicyNeverWidens covers G17: when the service SID would not
+// resolve the policy is Administrators-only, and the per-file pass must not add the service, Users
+// or Everyone to a file.
+func TestRestrictExistingFilesNarrowedPolicyNeverWidens(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "vault.bin")
+	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := credfile.SetACLPolicy(service.AdministratorsSID); err != nil {
+		t.Fatalf("SetACLPolicy: %v", err)
+	}
+	t.Cleanup(func() { _ = credfile.SetACLPolicy() })
+	if _, err := restrictExistingFiles(dir); err != nil {
+		t.Fatalf("restrictExistingFiles: %v", err)
+	}
+	d := strings.ReplaceAll(dacl(t, f), f, "") // the temp path itself may contain "Users"
+	for _, bad := range []string{"TrustedInstaller", "Everyone", "Users", "Authenticated"} {
+		// "BUILTIN\Users" must not appear; "Administrators" legitimately contains no such word.
+		if strings.Contains(d, bad) {
+			t.Fatalf("narrowed policy widened the file with %q: %s", bad, d)
+		}
+	}
+	if !strings.Contains(d, "Administrators") {
+		t.Fatalf("Administrators missing from the DACL: %s", d)
+	}
 }

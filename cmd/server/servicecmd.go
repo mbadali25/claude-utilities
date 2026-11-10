@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -471,9 +472,10 @@ func serviceInstallCmd(args []string, out, errOut io.Writer) int {
 		return code
 	}
 
-	// icacls takes account NAMES, where the credfile policy takes SIDs. /T reaches the files the
-	// data dir already holds - a moved e2e dir, anything written before the service existed - which
-	// is what makes an install after an init safe.
+	// icacls takes account NAMES, where the credfile policy takes SIDs. The (OI)(CI) terms are
+	// inheritable, so they land on the directories (the data dir and tls/) and on files created from
+	// now on. They do NOT land on files that already exist: icacls visits those under /T but applies
+	// container-only flags to directories alone. The per-file pass below covers them.
 	icacls := install.IcaclsLockdownArgs(abs, service.WindowsServiceAccount, service.AdministratorsAccount)
 	if out2, err := runICacls(icacls); err != nil {
 		_, _ = fmt.Fprintln(errOut, "service install: icacls:", logx.Redact(err.Error()))
@@ -482,8 +484,20 @@ func serviceInstallCmd(args []string, out, errOut io.Writer) int {
 		}
 		return exitRuntime
 	}
-	_, _ = fmt.Fprintf(out, "service install: granted %s and %s full control of %s, inheritable and applied "+
-		"to the files already there\n", service.WindowsServiceAccount, service.AdministratorsAccount,
+	_, _ = fmt.Fprintf(out, "service install: granted %s and %s full control of %s, inheritable, so files "+
+		"created from now on carry it\n", service.WindowsServiceAccount, service.AdministratorsAccount,
+		logx.TildePath(abs))
+
+	// Files written before the service existed (admin-password.json, vault.bin, tunnelkeys.bin) hold
+	// an explicit DACL with inheritance removed, so the grant above never reached them. Re-apply the
+	// process policy to each one: owner plus the policy SIDs reapplyACLPolicy installed, nothing
+	// wider, so a narrowed policy (G17) leaves the service off the file rather than widening it.
+	n, err := restrictExistingFiles(abs)
+	if err != nil {
+		_, _ = fmt.Fprintln(errOut, "service install:", logx.Redact(err.Error()))
+		return exitRuntime
+	}
+	_, _ = fmt.Fprintf(out, "service install: re-applied the ACL policy to %d files already in %s\n", n,
 		logx.TildePath(abs))
 
 	after, afterOK := readCertFingerprint(abs)
@@ -941,6 +955,29 @@ func reapplyACLPolicy(out, errOut io.Writer) int {
 			service.WindowsServiceAccount, service.AdministratorsAccount)
 	}
 	return 0
+}
+
+// restrictExistingFiles runs credfile.RestrictFile over every regular file under dir, so a file
+// written under an earlier (Administrators-only) policy picks up the SIDs the policy names now. It
+// returns how many files it restricted. Symlinks and directories are skipped: the icacls grant
+// covers directories, and a link must not carry a grant to its target. The first failure stops the
+// walk and names the path, never the file's contents. On unix RestrictFile is a no-op.
+func restrictExistingFiles(dir string) (int, error) {
+	n := 0
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		if err := credfile.RestrictFile(path); err != nil {
+			return fmt.Errorf("restrict %s: %w", logx.TildePath(path), err)
+		}
+		n++
+		return nil
+	})
+	return n, err
 }
 
 // confirmTyped requires word to be typed. One line is read, so a deliberate `echo purge |` works

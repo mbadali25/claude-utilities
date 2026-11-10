@@ -355,7 +355,7 @@ func TestInstallRegistersGrantsAndPrintsTheFirewallLineWithoutRunningIt(t *testi
 		t.Fatalf("event sources %v, want exactly %q", sources, service.EventSourceName)
 	}
 
-	// The grant: both principals, inheritable, /T so it reaches the files already there, and the
+	// The grant: both principals, inheritable, /T so icacls visits the tree (files already there get the per-file pass), and the
 	// inheritance removal that makes it the only access. icacls takes account NAMES; the credfile
 	// policy takes SIDs, and crossing them is a silent failure.
 	if len(icacls) != 1 {
