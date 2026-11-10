@@ -135,7 +135,9 @@ $SUDO systemctl daemon-reload || { echo "FAIL daemon-reload"; exit 1; }
 $SUDO systemctl start --no-block "$MAIN" >/dev/null 2>&1
 
 prop() { $SUDO systemctl show -p "$1" --value "$MAIN" 2>/dev/null; }
-attempts() { $SUDO journalctl -u "$MAIN" -o cat --no-pager 2>/dev/null | grep -c 'Failed at step CREDENTIALS'; }
+journal() { $SUDO journalctl -u "$MAIN" -o cat --no-pager 2>/dev/null; }
+# One line per exec attempt: systemd 255 logs "Main process exited, code=exited, status=243/CREDENTIALS" each time.
+attempts() { journal | grep -c 'status=243/CREDENTIALS'; }
 
 # Wait for the unit to settle as failed: five attempts one second apart is a few seconds.
 state=""
@@ -146,7 +148,9 @@ for _ in $(seq 1 120); do
 done
 [ "$state" = "failed" ] || fail "the unit is '$state' after 60 s, want failed"
 
-[ "$(prop Result)" = "start-limit-hit" ] || fail "Result is '$(prop Result)', want start-limit-hit (five tries, then the limit)"
+# systemd 255 leaves Result=exit-code when the limit trips; the journal line is the evidence of the limit.
+limit="$(journal | grep -c 'Start request repeated too quickly')"
+[ "$limit" -eq 1 ] || fail "the start limit tripped $limit times, want exactly once (five tries, then the limit)"
 n="$(attempts)"
 [ "$n" -eq 5 ] || fail "$n attempts failed at the credential step, want exactly 5"
 [ "$(prop ExecMainStatus)" = "243" ] || fail "ExecMainStatus is '$(prop ExecMainStatus)', want 243 (credentials)"
@@ -177,5 +181,5 @@ if [ "$rc" -ne 0 ]; then
   diag="$($SUDO journalctl -u "$MAIN" -o cat --no-pager 2>/dev/null | tail -n 30 | cut -c1-110 | tr '\n' '|')"
   echo "FAIL diag: Result=$(prop Result) ExecMainStatus=$(prop ExecMainStatus) NRestarts=$(prop NRestarts) journal: $diag"
 fi
-[ "$rc" -eq 0 ] && echo "PASS service-credential-missing: 5 attempts, start-limit-hit, marker and notice name the credential, no restart after"
+[ "$rc" -eq 0 ] && echo "PASS service-credential-missing: 5 attempts, the start limit, marker and notice name the credential, no restart after"
 exit "$rc"
