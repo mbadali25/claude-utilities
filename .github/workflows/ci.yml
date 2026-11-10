@@ -73,9 +73,10 @@ jobs:
 
   # The service smoke: the real unit (Linux) or the real service (Windows), started, probed and torn
   # down on a disposable runner. Both legs passed on main (a925997: GET / answered, service stopped), so
-  # the job blocks. A ::warning:: does not fail a step, so a leg that cannot run says SKIPPED on the
-  # job summary as well as in a warning (the runner offers no skipped state mid-job), and a leg that ran
-  # and could not verify (Windows UNVERIFIED) fails: the repo rule is that a skip is not a pass.
+  # the job blocks. A step cannot end "skipped" or "neutral" mid-run and exit 0 shows green, so a leg that
+  # cannot run in CI fails (CI runners have systemd and service rights; a skip there is a regression), as
+  # does a leg that ran and could not verify (Windows UNVERIFIED): the repo rule is that a skip is not a
+  # pass. Local skips (no sudo) stay in _verify/*.sh as exit 77.
   service-smoke:
     name: service-smoke (${{ matrix.os }})
     strategy:
@@ -96,9 +97,11 @@ jobs:
           # This installs a unit, a user and a credential. It runs on a disposable CI runner and nowhere else.
           [ "${GITHUB_ACTIONS:-}" = true ] || { echo "refusing to run outside GitHub Actions"; exit 1; }
           if [ ! -d /run/systemd/system ]; then
-            echo "::warning::service-smoke SKIPPED: systemd is not PID 1 on this runner"
-            echo -e "### service-smoke (linux): SKIPPED\nsystemd is not PID 1 on this runner. Nothing was verified; this is a skip, not a pass." >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-            exit 0
+            # ubuntu-latest always has systemd as PID 1 and sudo. A skip here means the runner image changed,
+            # and a green job with nothing verified is a false pass, so it fails.
+            echo "::error::service-smoke: systemd is not PID 1 on this runner; nothing was verified, and a skip is not a pass"
+            echo -e "### service-smoke (linux): FAILED (unexpected skip)\nsystemd is not PID 1 on this runner. Nothing was verified; this is a skip, not a pass." >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 1
           fi
           T="$RUNNER_TEMP/smoke"; mkdir -p "$T/units"
           BIN=/usr/local/bin/claude-swap-server
@@ -177,11 +180,12 @@ jobs:
           $installOut = & $exe service install --data-dir $data --listen 127.0.0.1:18443 2>&1 | Out-String
           Write-Output $installOut
           if ($LASTEXITCODE) {
-            # Skipped only when the runner refuses the registration itself; any other install failure is one.
+            # windows-latest grants service rights. A refused registration verified nothing, and a green job
+            # for it is a false pass, so it fails with its own message and summary line.
             if ($installOut -match 'Access is denied|access denied|privilege') {
-              Write-Output "::warning::service-smoke SKIPPED: the runner refused CreateService ($LASTEXITCODE)"
-              if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### service-smoke (windows): SKIPPED`nThe runner refused CreateService. Nothing was verified; this is a skip, not a pass." }
-              exit 0
+              Write-Output "::error::service-smoke: the runner refused CreateService ($LASTEXITCODE); nothing was verified, and a skip is not a pass"
+              if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### service-smoke (windows): FAILED (unexpected skip)`nThe runner refused CreateService. Nothing was verified; this is a skip, not a pass." }
+              exit 1
             }
             throw "service install exited $LASTEXITCODE"
           }
