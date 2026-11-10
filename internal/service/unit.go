@@ -155,7 +155,7 @@ made=0
 if [ -d "$parent" ] && { [ -d "$dir" ] || { mkdir "$dir" && made=1; }; } && printf '{"exit":%s,"reason":"%s","ts":"%s","boot":"%s"}\n' "$st" "$reason" "$now" "$boot" > "$dir/last-fatal.json.tmp" && mv -f "$dir/last-fatal.json.tmp" "$dir/last-fatal.json"; then
   own=ok
   if [ "$made" -eq 1 ]; then chown --reference="$parent" "$dir" 2>/dev/null || own=failed; fi
-  chown --reference="$dir" "$dir/last-fatal.json" 2>/dev/null || own=failed
+  chown --reference="$parent" "$dir/last-fatal.json" 2>/dev/null || own=failed
   echo "claude-swap-server failed: result=$res exit_code=$code exit_status=$st reason=$reason$note marker=written owner=$own"
 else
   echo "claude-swap-server failed: result=$res exit_code=$code exit_status=$st reason=$reason$note marker=not-written"

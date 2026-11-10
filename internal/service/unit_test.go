@@ -395,10 +395,14 @@ func TestFailureUnitScriptReadsOnlyTheMonitorVariablesAndWritesOneFile(t *testin
 	}
 }
 
-// runFailureScript runs the failure unit's real script under /bin/sh with a stub chown that exits
-// chownStatus, and returns its one journal line. It needs a Linux userland (GNU date, /proc/uptime),
-// so it skips elsewhere rather than pass without having run anything.
-func runFailureScript(t *testing.T, chownStatus string) string {
+// runFailureScript runs the failure unit's real script under /bin/sh with a stub chown and returns
+// its one journal line and the stub's call log. The stub fails for the logs directory when dirFails
+// and for the marker when fileFails, and records every call. logsExist pre-creates the logs
+// directory, so the script takes the path where it does not chown the directory.
+//
+// It needs a Linux userland (GNU date, /proc/uptime), so it skips elsewhere rather than pass without
+// having run anything.
+func runFailureScript(t *testing.T, logsExist, dirFails, fileFails bool) (out, calls string) {
 	t.Helper()
 	if runtime.GOOS != "linux" {
 		t.Skip("the failure script needs a Linux userland")
@@ -407,42 +411,80 @@ func runFailureScript(t *testing.T, chownStatus string) string {
 	if err != nil {
 		t.Skip("no sh on PATH")
 	}
-	root := t.TempDir()
-	data := filepath.Join(root, "data")
-	if err := os.Mkdir(data, 0o700); err != nil {
+	data := filepath.Join(t.TempDir(), "data")
+	logs := filepath.Join(data, markerLogsDir)
+	if err := os.MkdirAll(data, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	stubs := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stubs, "chown"), []byte("#!/bin/sh\nexit "+chownStatus+"\n"), 0o700); err != nil {
+	if logsExist {
+		if err := os.Mkdir(logs, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := func(fails bool) string {
+		if fails {
+			return "1"
+		}
+		return "0"
+	}
+	stubs, callLog := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+	stub := "#!/bin/sh\necho \"$*\" >> '" + callLog + "'\n" +
+		"case \"$2\" in *" + MarkerFileName + ") exit " + status(fileFails) + " ;; esac\nexit " + status(dirFails) + "\n"
+	if err := os.WriteFile(filepath.Join(stubs, "chown"), []byte(stub), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	script := parseExec(t, execStartOf(t, RenderFailureUnit(data)))[2]
-	cmd := exec.Command(sh, "-c", script, "claude-swap-server-failed", filepath.Join(data, markerLogsDir))
+	cmd := exec.Command(sh, "-c", script, "claude-swap-server-failed", logs)
 	cmd.Env = append(os.Environ(), "PATH="+stubs+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"MONITOR_SERVICE_RESULT=exit-code", "MONITOR_EXIT_CODE=exited", "MONITOR_EXIT_STATUS=1")
-	out, err := cmd.CombinedOutput()
+	b, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("script failed: %v\n%s", err, out)
+		t.Fatalf("script failed: %v\n%s", err, b)
 	}
-	if _, err := os.Stat(filepath.Join(data, markerLogsDir, MarkerFileName)); err != nil {
-		t.Fatalf("marker not written: %v\n%s", err, out)
+	if _, err := os.Stat(filepath.Join(logs, MarkerFileName)); err != nil {
+		t.Fatalf("marker not written: %v\n%s", err, b)
 	}
-	return string(out)
+	c, _ := os.ReadFile(callLog)
+	return string(b), string(c)
 }
 
 func TestFailureScriptReportsAFailedChownInsteadOfSilencingIt(t *testing.T) {
 	// chown --reference is GNU-only. A failure leaves the marker root:root in a directory the service
-	// account owns, where the reader cannot open it, so the journal line has to say so.
-	out := runFailureScript(t, "1")
-	if !strings.Contains(out, "marker=written") || !strings.Contains(out, "owner=failed") {
-		t.Fatalf("a failed chown is not reported: %q", out)
+	// account owns, where the reader cannot open it, so the journal line has to say so. Each row fails
+	// exactly one chown, so deleting either call (or its `|| own=failed`) turns a row red.
+	for _, c := range []struct {
+		name                           string
+		logsExist, dirFails, fileFails bool
+	}{
+		{"the logs directory chown fails", false, true, false},
+		{"the marker chown fails after the directory was made", false, false, true},
+		{"the marker chown fails on an existing logs directory", true, false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out, _ := runFailureScript(t, c.logsExist, c.dirFails, c.fileFails)
+			if !strings.Contains(out, "marker=written") || !strings.Contains(out, "owner=failed") {
+				t.Fatalf("a failed chown is not reported: %q", out)
+			}
+		})
 	}
 }
 
 func TestFailureScriptReportsOwnerOKWhenChownWorks(t *testing.T) {
-	out := runFailureScript(t, "0")
+	out, calls := runFailureScript(t, false, false, false)
 	if !strings.Contains(out, "owner=ok") || strings.Contains(out, "owner=failed") {
 		t.Fatalf("a good chown is misreported: %q", out)
+	}
+	// Both objects take the DATA dir's owner (the parent of logs/), never the logs dir's own: a
+	// root-owned logs dir left by an earlier failed run must not hand its owner to the marker.
+	got := strings.Split(strings.TrimSpace(calls), "\n")
+	if len(got) != 2 {
+		t.Fatalf("chown called %d times, want 2 (the directory it made, then the marker):\n%s", len(got), calls)
+	}
+	for _, l := range got {
+		ref, _, _ := strings.Cut(l, " ")
+		if !strings.HasPrefix(ref, "--reference=") || strings.HasSuffix(ref, "/"+markerLogsDir) {
+			t.Errorf("chown call %q does not reference the data dir", l)
+		}
 	}
 }
 

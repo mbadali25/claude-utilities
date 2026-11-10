@@ -206,7 +206,8 @@ jobs:
             $log = Join-Path $data 'logs\server.log'
             if (-not (Test-Path $log) -or (Get-Item $log).Length -eq 0) { throw 'the service wrote no log line' }
           } catch {
-            Write-Output "::error::service-smoke: $($_.Exception.Message)"
+            $why = $_.Exception.Message
+            Write-Output "::error::service-smoke: $why"
             & $exe service status --data-dir $data
             $log = Join-Path $data 'logs\server.log'
             if (Test-Path $log) { Get-Content $log -Tail 40 } else { Write-Output "(no $log)" }
@@ -234,7 +235,7 @@ jobs:
             # A ::warning:: does not fail a step, so a leg that verified nothing would show green. This
             # leg fails instead (the job is continue-on-error, so the run is not blocked) and says so on
             # the job summary: UNVERIFIED is not a pass.
-            $msg = "service-smoke Windows leg UNVERIFIED, NOT A PASS: the service exited 1 (reason=runtime) under NT SERVICE\ClaudeSwapServer on this runner, while the same data dir runs on the console."
+            $msg = "service-smoke Windows leg UNVERIFIED, NOT A PASS: under NT SERVICE\ClaudeSwapServer on this runner the step failed ($why), while the same data dir runs on the console."
             Write-Output "::error::$msg"
             if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### service-smoke (windows): UNVERIFIED`n$msg" }
             exit 1
