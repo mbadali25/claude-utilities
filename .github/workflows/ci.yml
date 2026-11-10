@@ -72,11 +72,8 @@ jobs:
       - run: govulncheck ./...
 
   # The service smoke: the real unit (Linux) or the real service (Windows), started, probed and torn
-  # down on a disposable runner. Both legs are UNVERIFIED until their first green run - the plan's
-  # inferences are that a windows-latest runner can CreateService under a virtual account, that
-  # ubuntu-latest runs systemd as PID 1 with passwordless sudo, and that MemoryDenyWriteExecute=yes
-  # suits the Go runtime - so the job is non-blocking. The same PR that sees a leg pass removes
-  # continue-on-error. A ::warning:: does not fail a step, so a leg that cannot run says SKIPPED on the
+  # down on a disposable runner. Both legs passed on main (a925997: GET / answered, service stopped), so
+  # the job blocks. A ::warning:: does not fail a step, so a leg that cannot run says SKIPPED on the
   # job summary as well as in a warning (the runner offers no skipped state mid-job), and a leg that ran
   # and could not verify (Windows UNVERIFIED) fails: the repo rule is that a skip is not a pass.
   service-smoke:
@@ -86,7 +83,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -233,8 +229,7 @@ jobs:
           if (Get-Service -Name ClaudeSwapServer -ErrorAction SilentlyContinue) { throw 'the service is still registered after uninstall' }
           if ($unverified) {
             # A ::warning:: does not fail a step, so a leg that verified nothing would show green. This
-            # leg fails instead (the job is continue-on-error, so the run is not blocked) and says so on
-            # the job summary: UNVERIFIED is not a pass.
+            # leg fails instead (the job blocks) and says so on the job summary: UNVERIFIED is not a pass.
             $msg = "service-smoke Windows leg UNVERIFIED, NOT A PASS: under NT SERVICE\ClaudeSwapServer on this runner the step failed ($why), while the same data dir runs on the console."
             Write-Output "::error::$msg"
             if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### service-smoke (windows): UNVERIFIED`n$msg" }
