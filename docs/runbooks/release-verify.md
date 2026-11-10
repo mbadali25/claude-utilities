@@ -39,6 +39,15 @@ You need `cosign` (v2 or later) and `gh` (logged in; `gh attestation verify` nee
 
    Expected: every line `OK`. On Windows PowerShell, compare `(Get-FileHash <file>).Hash` with the line in `SHA256SUMS`.
 
+5. Check the binary reports the tag you verified. Each archive holds one binary, so extract the agent archive and the server archive for your OS, each into its own empty directory, then run them.
+
+   ```
+   ./claude-swap-agent --version
+   ./claude-swap-server --version
+   ```
+
+   Expected: `agent <tag>` and `server <tag>` (for example `agent v1.2.3`). `dev` means the binary was not built by the release workflow; do not run it. Both commands need no environment, data dir or network. On Windows use `.\claude-swap-agent.exe` and `.\claude-swap-server.exe`.
+
 ## Weaker fallback
 
 If neither `cosign` nor `gh` is present, the only check left is comparing one file's SHA-256 against a value you obtained over another channel (`CLAUDESWAP_SERVER_SHA256` in the server installer, once it exists). That proves the file matches the value you hold, not who built it. Use it only when you cannot install either tool, and say so in the ticket.

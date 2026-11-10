@@ -775,9 +775,10 @@ func serviceStopCmd(args []string, out, errOut io.Writer) int {
 // serviceStatusCmd reports the registered state, the last exit code with the table's meaning, the
 // baked command line, the data dir and the marker.
 //
-// There is no version line and no /healthz probe here: this binary carries no version string and
-// serves no /healthz route yet. Both are in the spec and neither exists on main, so printing
-// either would be a claim this command cannot see - see the PR report.
+// There is no version line and no /healthz probe here. The binary has a version string (stamped at
+// release, shown by `server --version`), but this command does not print it: it reports what the
+// SCM and the files show, not the running process. There is no /healthz route yet either, so
+// printing either would be a claim this command cannot see.
 func serviceStatusCmd(args []string, out, errOut io.Writer) int {
 	fs := flag.NewFlagSet("service status", flag.ContinueOnError)
 	fs.SetOutput(errOut)
