@@ -37,6 +37,10 @@ func TestMain(m *testing.M) {
 	runFirewall = func([]string) ([]byte, error) {
 		panic("a test tried to change the firewall: the seam exists so that can never happen")
 	}
+	// The Linux counterpart: the real sync stats /etc/credstore and writes /etc/systemd/system, so a
+	// migrate test on a root-run Linux box would otherwise install a drop-in on the developer's host.
+	// The default is "nothing to write"; a test that wants a write uses stubDropInSync.
+	kekDropInSync = func() (service.Rung, bool, error) { return 0, false, nil }
 	os.Exit(m.Run())
 }
 

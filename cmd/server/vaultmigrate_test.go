@@ -15,11 +15,13 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"claude-utilities/internal/hub"
+	"claude-utilities/internal/service"
 	"claude-utilities/internal/vault"
 )
 
@@ -947,5 +949,82 @@ func TestADefaultRunStillCannotWriteV2NowThatMigrateExists(t *testing.T) {
 	}
 	if got := mustRead(t, path); !bytes.HasPrefix(got, []byte("CSV1")) {
 		t.Fatalf("a save over a v1 file wrote %q", got[:4])
+	}
+}
+
+// --- the KEK drop-in, step 5's last act for a kek-file slot ---
+
+// stubDropInSync replaces the seam that would write /etc/systemd and returns a counter of calls.
+func stubDropInSync(t *testing.T, rung service.Rung, wrote bool, err error) *int {
+	t.Helper()
+	calls := 0
+	prev := kekDropInSync
+	kekDropInSync = func() (service.Rung, bool, error) { calls++; return rung, wrote, err }
+	t.Cleanup(func() { kekDropInSync = prev })
+	return &calls
+}
+
+func TestSyncKEKDropInOnlyRunsForAKEKFileSlot(t *testing.T) {
+	calls := stubDropInSync(t, service.RungHost, true, nil)
+	var out bytes.Buffer
+	if code := syncKEKDropIn("migrate", vault.Slot{Type: slotTypeDPAPI}, &out); code != 0 || *calls != 0 {
+		t.Fatalf("dpapi slot: code %d, calls %d; it has no unit and no drop-in", code, *calls)
+	}
+	if code := syncKEKDropIn("migrate", vault.Slot{Type: slotTypeKEKFile}, &out); code != 0 || *calls != 1 {
+		t.Fatalf("kek-file slot: code %d, calls %d, out %q", code, *calls, out.String())
+	}
+	if !strings.Contains(out.String(), "KEK drop-in") || !strings.Contains(out.String(), "host") {
+		t.Fatalf("the write is not reported with its rung: %q", out.String())
+	}
+}
+
+func TestSyncKEKDropInSaysNothingWhenThereWasNothingToWrite(t *testing.T) {
+	stubDropInSync(t, 0, false, nil)
+	var out bytes.Buffer
+	if code := syncKEKDropIn("migrate", vault.Slot{Type: slotTypeKEKFile}, &out); code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("a no-op printed %q", out.String())
+	}
+}
+
+func TestSyncKEKDropInFailureIsExitOneAndNamesNoPath(t *testing.T) {
+	stubDropInSync(t, service.RungHost, false, service.ErrNeedsRoot)
+	var out bytes.Buffer
+	code := syncKEKDropIn("migrate", vault.Slot{Type: slotTypeKEKFile}, &out)
+	if code != exitRuntime {
+		t.Fatalf("code %d, want %d", code, exitRuntime)
+	}
+	got := out.String()
+	if !strings.Contains(got, "migration is complete") {
+		t.Fatalf("the line must say the vault itself is done: %q", got)
+	}
+	for _, leak := range []string{"/etc/", "credstore", "claude-swap.vault-kek"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("output leaks %q: %q", leak, got)
+		}
+	}
+}
+
+func TestMigrateOfAKEKFileSlotWritesTheDropInOnceAndNeverOnADryRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the machine slot on Windows is dpapi, which has no drop-in")
+	}
+	dir, _ := migrateFixture(t, false)
+	calls := stubDropInSync(t, service.RungPlain, true, nil)
+	if code, out := migrateRun(t, dir, true); code != 0 || *calls != 0 {
+		t.Fatalf("dry run: code %d, calls %d: %s", code, *calls, out)
+	}
+	if code, out := migrateRun(t, dir, false); code != 0 || *calls != 1 {
+		t.Fatalf("migrate: code %d, calls %d: %s", code, *calls, out)
+	}
+	if code, out := migrateRun(t, dir, false); code != 0 || *calls != 2 {
+		t.Fatalf("already v2: code %d, calls %d (the installer's idempotent re-run syncs again): %s", code, *calls, out)
+	}
+	// The same on a v2 dir: `--dry-run` writes nothing, and the idempotent path is where a write
+	// would be easiest to leak. (Linux only - see the skip above - so CI is what runs it for the gate.)
+	if code, out := migrateRun(t, dir, true); code != 0 || *calls != 2 {
+		t.Fatalf("dry run on a v2 dir: code %d, calls %d (it must not write a drop-in): %s", code, *calls, out)
 	}
 }
