@@ -4,10 +4,10 @@ package service
 
 // The ACL policy's platform half off Windows. There is no SCM to ask and no SID to grant: a unix
 // host restricts files with 0600/0700 modes, which credfile does directly, so the policy is empty
-// and ACLPolicy never refuses.
+// and ACLPolicy never narrows.
 //
 // "Not registered" is the definitive answer here rather than an error, because an error would take
-// the G17 refusal path and stop every server command on Linux from writing anything at all. The
+// the G17 narrowing path and log a warning on every server command on Linux. The
 // Linux side of "is a unit registered, and with which data dir" is the systemd half, which lands
 // with the unit renderer in slice 4c.
 

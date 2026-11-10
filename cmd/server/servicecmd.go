@@ -902,6 +902,21 @@ func firewallArgs(listen string) []string {
 		"name=Claude Swap server", "dir=in", "action=allow", "protocol=TCP", "localport=" + port}
 }
 
+// resolveServicePolicy resolves and installs the ACL policy for the service's own start (G17). A
+// narrowing is not an error: it returns narrowed=true so the caller logs it once the log file
+// exists. Any other failure returns the exit code and the logged reason to stop the start with.
+func resolveServicePolicy() (narrowed bool, code int, reason string, err error) {
+	policy, err := aclPolicy()
+	narrowed = errors.Is(err, service.ErrACLPolicyNarrowed)
+	if err != nil && !narrowed {
+		return false, exitUsage, "acl-policy-failed", err
+	}
+	if err := setACLPolicy(policy...); err != nil {
+		return false, exitRuntime, "acl-policy-rejected", err
+	}
+	return narrowed, 0, "", nil
+}
+
 // reapplyACLPolicy re-resolves the policy and installs it. It is called after the registration, when
 // the service's SID exists for the first time, and it takes the same G17 narrowing as the entry
 // point: a registered service whose SID will not resolve gets the narrower policy, the install

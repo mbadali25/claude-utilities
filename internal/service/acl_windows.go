@@ -47,7 +47,7 @@ func platformServiceRegistered() (bool, error) {
 
 // platformLookupServiceSID resolves the virtual account `NT SERVICE\ClaudeSwapServer` to its SID
 // string. The account exists because the service is registered with SERVICE_SID_TYPE_UNRESTRICTED;
-// a lookup that fails anyway is the G17 case and the caller refuses to write.
+// a lookup that fails anyway is the G17 case and the caller narrows the policy.
 func platformLookupServiceSID() (string, error) {
 	sid, _, _, err := windows.LookupSID("", WindowsServiceAccount)
 	if err != nil {

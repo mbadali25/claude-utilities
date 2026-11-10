@@ -290,13 +290,9 @@ func runAsWindowsService() (int, bool) {
 
 	// Before the first write. A service SID that cannot be resolved narrows the policy (G17) rather
 	// than stopping the service from starting; the narrowing is logged to the log file below.
-	policy, err := aclPolicy()
-	narrowed := errors.Is(err, service.ErrACLPolicyNarrowed)
-	if err != nil && !narrowed {
-		return reportServiceStartFailure(logDir, exitUsage, "acl-policy-failed", err)
-	}
-	if err := setACLPolicy(policy...); err != nil {
-		return reportServiceStartFailure(logDir, exitRuntime, "acl-policy-rejected", err)
+	narrowed, code, reason, err := resolveServicePolicy()
+	if err != nil {
+		return reportServiceStartFailure(logDir, code, reason, err)
 	}
 
 	w, err := logx.NewRotatingWriter(filepath.Join(logDir, "server.log"), logx.DefaultLogMaxBytes, logx.DefaultLogKeep)

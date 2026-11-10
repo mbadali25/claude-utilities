@@ -590,13 +590,46 @@ func TestInstallNarrowsWhenTheServiceSIDWillNotResolveAfterRegistering(t *testin
 	if len(applied) != 1 || len(applied[0]) != 1 || applied[0][0] != service.AdministratorsSID {
 		t.Fatalf("applied %v, want exactly the Administrators SID once", applied)
 	}
-	for _, bad := range []string{"S-1-1-0", "S-1-5-32-545"} { // Everyone, Users
-		if len(applied) > 0 && applied[0][0] == bad {
-			t.Fatalf("the narrowed policy granted %s", bad)
-		}
-	}
 	if !strings.Contains(out, "narrowed") || !strings.Contains(out, "acl-policy-narrowed") {
 		t.Fatalf("the operator is not told the policy was narrowed, with its reason: %s", out)
+	}
+}
+
+// TestResolveServicePolicyNarrowsAndOnlyFailsOnOtherErrors is the service-start half of G17: a
+// narrowing applies the Administrators-only policy and reports narrowed=true with no error; a
+// different resolver error stops the start with exit 2; a rejected grant stops it with exit 1.
+func TestResolveServicePolicyNarrowsAndOnlyFailsOnOtherErrors(t *testing.T) {
+	origPolicy, origSet := aclPolicy, setACLPolicy
+	t.Cleanup(func() { aclPolicy, setACLPolicy = origPolicy, origSet })
+	var applied [][]string
+	setACLPolicy = func(sids ...string) error {
+		applied = append(applied, append([]string(nil), sids...))
+		return nil
+	}
+
+	aclPolicy = func() ([]string, error) {
+		return []string{service.AdministratorsSID}, fmt.Errorf("%w: lookup failed", service.ErrACLPolicyNarrowed)
+	}
+	narrowed, code, reason, err := resolveServicePolicy()
+	if err != nil || !narrowed || code != 0 || reason != "" {
+		t.Fatalf("narrowing: narrowed=%v code=%d reason=%q err=%v", narrowed, code, reason, err)
+	}
+	if len(applied) != 1 || len(applied[0]) != 1 || applied[0][0] != service.AdministratorsSID {
+		t.Fatalf("applied %v, want the Administrators SID once", applied)
+	}
+
+	aclPolicy = func() ([]string, error) { return nil, errors.New("boom") }
+	applied = nil
+	narrowed, code, reason, err = resolveServicePolicy()
+	if err == nil || narrowed || code != exitUsage || reason != "acl-policy-failed" || len(applied) != 0 {
+		t.Fatalf("other error: narrowed=%v code=%d reason=%q err=%v applied=%v", narrowed, code, reason, err, applied)
+	}
+
+	aclPolicy = func() ([]string, error) { return []string{service.AdministratorsSID}, nil }
+	setACLPolicy = func(...string) error { return errors.New("icacls said no") }
+	_, code, reason, err = resolveServicePolicy()
+	if err == nil || code != exitRuntime || reason != "acl-policy-rejected" {
+		t.Fatalf("rejected grant: code=%d reason=%q err=%v", code, reason, err)
 	}
 }
 
