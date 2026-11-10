@@ -13,8 +13,9 @@ import (
 
 const (
 	// MarkerFileName is the last-fatal marker's name. It lives in the directory the caller names -
-	// `<data-dir>\logs` for the server on Windows, `/var/lib/claude-swap` for the systemd
-	// OnFailure unit, `%ProgramData%\claude-swap-agent` for the agent (8.8, never the state dir).
+	// `<data-dir>\logs` for the server on Windows, `<data-dir>/logs` for the systemd
+	// OnFailure unit (RenderFailureUnit), `%ProgramData%\claude-swap-agent` for the agent (8.8, never
+	// the state dir).
 	MarkerFileName = "last-fatal.json"
 
 	// MarkerMaxAge is the window inside which a marker refuses the next start. Ten minutes covers

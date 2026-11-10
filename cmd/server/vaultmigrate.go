@@ -119,6 +119,12 @@ func vaultMigrate(dataDir string, dryRun bool, add string, plainKEK bool, stdin 
 		// The installer calls this on every run, so it is also where a drop-in a failed first run
 		// never wrote gets written. SyncKEKDropIn leaves an up-to-date one alone. A host with no
 		// machine key has no kek-file slot to sync for, and that is not an error here.
+		//
+		// Never on a dry run: it writes /etc/systemd/system and runs systemctl, and `--dry-run`
+		// writes nothing at all.
+		if dryRun {
+			return 0
+		}
 		if machine, _, merr := machineSlotFor(add); merr == nil {
 			return syncKEKDropIn(op, machine, out)
 		}

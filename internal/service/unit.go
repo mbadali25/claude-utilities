@@ -48,15 +48,20 @@ const (
 //
 // RestartPreventExitStatus comes from the server's table, never from a literal here: the codes are
 // the server's own definition (ServerTable) and the agent's unit must not inherit them by copy.
+//
+// RestartSteps= and RestartMaxDelaySec= need systemd 254. An older systemd ignores them with a
+// warning and restarts at a flat RestartSec; the start limit is what bounds a loop either way.
 func RenderServerUnit(exe, listen, dataDir string, tunnels bool) string {
 	exec := []string{exe, "run", "--listen", listen, "--data-dir", dataDir}
 	if tunnels {
 		exec = append(exec, "--tunnels")
 	}
 	rw := StateDir
-	if !underStateDir(dataDir) {
+	if path.IsAbs(dataDir) && !underStateDir(dataDir) {
 		// ProtectSystem=strict leaves everything read-only but ReadWritePaths, so a data dir the
-		// operator placed elsewhere has to be named or its first write fails.
+		// operator placed elsewhere has to be named or its first write fails. Only an absolute path
+		// is ever named: systemd reads a leading `-` or `+` on a path entry as an option AFTER
+		// unquoting, so quoting cannot defuse one, and a relative data dir is the installer's to refuse.
 		rw += " " + quoteWord(dataDir, false)
 	}
 
@@ -114,6 +119,11 @@ func RenderServerUnit(exe, listen, dataDir string, tunnels bool) string {
 //
 // Written as plain shell with a positional argument for the directory, so the one operator-chosen
 // string reaches the program as data ($1), never as text the shell parses.
+//
+// It runs as root, and the data dir belongs to the service account, so it creates NOTHING above the
+// logs directory: a missing data dir is the commonest reason a start fails, and a root-owned 0700
+// data dir made by this script would turn that into a permanent one. A logs directory it does create
+// (and the marker in it) is handed to the data dir's owner.
 const failureScript = `umask 077
 res="${MONITOR_SERVICE_RESULT:-unknown}"
 code="${MONITOR_EXIT_CODE:-unknown}"
@@ -128,7 +138,11 @@ dir="$1"
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 up=$(cut -d. -f1 /proc/uptime)
 boot=$(date -u -d "@$(( $(date +%s) - up ))" +%Y-%m-%dT%H:%M:%SZ)
-if mkdir -p "$dir" && printf '{"exit":%s,"reason":"%s","ts":"%s","boot":"%s"}\n' "$st" "$reason" "$now" "$boot" > "$dir/last-fatal.json.tmp" && mv -f "$dir/last-fatal.json.tmp" "$dir/last-fatal.json"; then
+parent="${dir%/*}"
+made=0
+if [ -d "$parent" ] && { [ -d "$dir" ] || { mkdir "$dir" && made=1; }; } && printf '{"exit":%s,"reason":"%s","ts":"%s","boot":"%s"}\n' "$st" "$reason" "$now" "$boot" > "$dir/last-fatal.json.tmp" && mv -f "$dir/last-fatal.json.tmp" "$dir/last-fatal.json"; then
+  if [ "$made" -eq 1 ]; then chown --reference="$parent" "$dir" 2>/dev/null; fi
+  chown --reference="$dir" "$dir/last-fatal.json" 2>/dev/null
   echo "claude-swap-server failed: result=$res exit_code=$code exit_status=$st reason=$reason$note marker=written"
 else
   echo "claude-swap-server failed: result=$res exit_code=$code exit_status=$st reason=$reason$note marker=not-written"
@@ -163,10 +177,21 @@ func underStateDir(p string) bool {
 }
 
 // unitJoin renders words as an ExecStart value: each word quoted only when it has to be.
+//
+// The first word is the executable, and systemd reads the characters `@ - : + !` in FRONT of it as
+// options (`+` runs it with full privileges outside the sandbox, `-` swallows its failures, `@`
+// changes argv[0]) before it looks at quoting. A word that opens with one is therefore always quoted:
+// the quote makes it a plain, and then relative, path, which systemd refuses.
 func unitJoin(words ...string) string {
 	out := make([]string, len(words))
 	for i, w := range words {
 		out[i] = unitQuote(w)
+		if i == 0 && w != "" && strings.ContainsRune("@-:+!", rune(w[0])) {
+			out[i] = quoteWord(w, true)
+			if !strings.HasPrefix(out[i], `"`) {
+				out[i] = `"` + out[i] + `"`
+			}
+		}
 	}
 	return strings.Join(out, " ")
 }

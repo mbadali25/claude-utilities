@@ -275,6 +275,46 @@ func TestServerUnitCannotBeInjectedThroughAnArgument(t *testing.T) {
 	}
 }
 
+func TestServerUnitExecutablePrefixCharsAreDefused(t *testing.T) {
+	// systemd reads `+ - @ : !` in front of the executable as options before it looks at quotes: `+`
+	// would run the server with full privileges outside the sandbox. The first word opening with one
+	// is quoted, which turns it into a (relative, and so refused) path.
+	for _, exe := range []string{"+/bin/evil", "-/bin/evil", "@/bin/evil", ":/bin/evil", "!/bin/evil"} {
+		v := execStartOf(t, RenderServerUnit(exe, goldenListen, goldenData, false))
+		if strings.ContainsRune("@-:+!", rune(v[0])) {
+			t.Errorf("exe %q: ExecStart= starts with an option character: %s", exe, v)
+		}
+		if argv := parseExec(t, v); argv[0] != exe {
+			t.Errorf("exe %q: argv[0] = %q", exe, argv[0])
+		}
+	}
+}
+
+func TestServerUnitRelativeDataDirIsNotMadeWritable(t *testing.T) {
+	// A leading - or + on a ReadWritePaths entry is an option applied after unquoting, so a relative
+	// or option-looking data dir is never named there at all.
+	for _, d := range []string{"-/etc", "+/etc", "relative/dir"} {
+		got := RenderServerUnit(goldenExe, goldenListen, d, false)
+		if !hasLine(got, "ReadWritePaths=/var/lib/claude-swap") {
+			t.Errorf("data dir %q reached ReadWritePaths:\n%s", d, got)
+		}
+	}
+}
+
+func TestFailureUnitCreatesNothingAboveTheLogsDirectory(t *testing.T) {
+	// It runs as root; the data dir belongs to the service account. A mkdir -p here would make a
+	// missing data dir root-owned 0700 and the service could never start again.
+	script := parseExec(t, execStartOf(t, RenderFailureUnit(goldenData)))[2]
+	if strings.Contains(script, "mkdir -p") {
+		t.Fatalf("the script creates parents:\n%s", script)
+	}
+	for _, want := range []string{`[ -d "$parent" ]`, `chown --reference="$parent"`} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script lacks %q:\n%s", want, script)
+		}
+	}
+}
+
 func TestFailureUnitWritesTheMarkerAndNoValues(t *testing.T) {
 	got := RenderFailureUnit(goldenData)
 	if !hasLine(got, "Type=oneshot") {

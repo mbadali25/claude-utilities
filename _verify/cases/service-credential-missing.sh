@@ -76,7 +76,8 @@ cleanup() {
     $SUDO rm -f "$RUNDIR/$MAIN" "$RUNDIR/$FAILED"
     $SUDO systemctl daemon-reload >/dev/null 2>&1
   fi
-  rm -rf "$TMP"
+  # As root when we are not: the failure unit runs as root and may have created files in here.
+  $SUDO rm -rf "$TMP"
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP

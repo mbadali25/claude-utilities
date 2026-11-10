@@ -1022,4 +1022,9 @@ func TestMigrateOfAKEKFileSlotWritesTheDropInOnceAndNeverOnADryRun(t *testing.T)
 	if code, out := migrateRun(t, dir, false); code != 0 || *calls != 2 {
 		t.Fatalf("already v2: code %d, calls %d (the installer's idempotent re-run syncs again): %s", code, *calls, out)
 	}
+	// The same on a v2 dir: `--dry-run` writes nothing, and the idempotent path is where a write
+	// would be easiest to leak. (Linux only - see the skip above - so CI is what runs it for the gate.)
+	if code, out := migrateRun(t, dir, true); code != 0 || *calls != 2 {
+		t.Fatalf("dry run on a v2 dir: code %d, calls %d (it must not write a drop-in): %s", code, *calls, out)
+	}
 }

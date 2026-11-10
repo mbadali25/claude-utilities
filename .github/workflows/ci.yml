@@ -131,26 +131,34 @@ jobs:
 
           # migrate on a v2 data dir is the idempotent re-run that writes the KEK drop-in.
           sudo "$BIN" vault migrate --data-dir "$D" | tee "$T/migrate.out"
-          grep -q "KEK drop-in" "$T/migrate.out"
+          die() { echo "::error::service-smoke: $*"; exit 1; }
+          grep -q "KEK drop-in" "$T/migrate.out" || die "migrate did not report writing the KEK drop-in"
           sudo grep -qx 'LoadCredential=vault-kek:/etc/credstore/claude-swap.vault-kek' \
-            /etc/systemd/system/claude-swap-server.service.d/10-kek.conf
+            /etc/systemd/system/claude-swap-server.service.d/10-kek.conf \
+            || die "the drop-in does not carry the plain LoadCredential line"
           sudo chown -R claude-swap:claude-swap /var/lib/claude-swap
 
           # Start. Type=notify, so `start` returns only once the server reported READY.
-          sudo systemctl start claude-swap-server
-          [ "$(systemctl show -p ActiveState --value claude-swap-server)" = active ]
+          sudo systemctl start claude-swap-server || die "systemctl start failed"
+          state="$(systemctl show -p ActiveState --value claude-swap-server)"
+          echo "ActiveState=$state SubState=$(systemctl show -p SubState --value claude-swap-server)"
+          [ "$state" = active ] || die "the unit is not active: $state"
           code="$(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:18443/ || true)"
           echo "GET / -> $code"
-          case "$code" in [1-5][0-9][0-9]) : ;; *) echo "no HTTP answer from the server"; exit 1 ;; esac
+          case "$code" in [1-5][0-9][0-9]) : ;; *) die "no HTTP answer from the server" ;; esac
           # Configured is not delivering: a line must have reached the journal.
           sudo journalctl -u claude-swap-server -o cat --no-pager | tee "$T/journal.out"
-          grep -q "listening on https://" "$T/journal.out"
+          grep -q "listening on https://" "$T/journal.out" || die "no 'listening on' line reached the journal"
           sudo systemctl stop claude-swap-server
-          [ "$(systemctl show -p Result --value claude-swap-server)" = success ]
+          result="$(systemctl show -p Result --value claude-swap-server)"
+          [ "$result" = success ] || die "the unit stopped with Result=$result"
       - name: linux - journal on failure
         if: failure() && runner.os == 'Linux'
         shell: bash
-        run: sudo journalctl -u claude-swap-server -u claude-swap-server-failed -o cat --no-pager | tail -n 60 || true
+        run: |
+          sudo systemctl status claude-swap-server --no-pager -l || true
+          sudo journalctl -u claude-swap-server -u claude-swap-server-failed -o cat --no-pager | tail -n 60 || true
+          sudo cat /etc/systemd/system/claude-swap-server.service.d/10-kek.conf || true
       - name: windows - install, start, probe, stop, uninstall
         if: runner.os == 'Windows'
         shell: pwsh
@@ -168,10 +176,15 @@ jobs:
           if ($LASTEXITCODE) { throw "vault init exited $LASTEXITCODE" }
           $admin | & $exe set-password --data-dir $data
           if ($LASTEXITCODE) { throw "set-password exited $LASTEXITCODE" }
-          & $exe service install --data-dir $data --listen 127.0.0.1:18443
+          $installOut = & $exe service install --data-dir $data --listen 127.0.0.1:18443 2>&1 | Out-String
+          Write-Output $installOut
           if ($LASTEXITCODE) {
-            Write-Output "::warning::service-smoke SKIPPED: service install exited $LASTEXITCODE (CreateService refused?)"
-            exit 0
+            # Skipped only when the runner refuses the registration itself; any other install failure is one.
+            if ($installOut -match 'Access is denied|access denied|privilege') {
+              Write-Output "::warning::service-smoke SKIPPED: the runner refused CreateService ($LASTEXITCODE)"
+              exit 0
+            }
+            throw "service install exited $LASTEXITCODE"
           }
           try {
             & $exe service start --data-dir $data
@@ -188,6 +201,16 @@ jobs:
             if ($LASTEXITCODE) { throw "service stop exited $LASTEXITCODE" }
             $log = Join-Path $data 'logs\server.log'
             if (-not (Test-Path $log) -or (Get-Item $log).Length -eq 0) { throw 'the service wrote no log line' }
+          } catch {
+            Write-Output "::error::service-smoke: $($_.Exception.Message)"
+            & $exe service status --data-dir $data
+            $log = Join-Path $data 'logs\server.log'
+            if (Test-Path $log) { Get-Content $log -Tail 40 } else { Write-Output "(no $log)" }
+            Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'ClaudeSwapServer' } -MaxEvents 10 -ErrorAction SilentlyContinue |
+              ForEach-Object { $_.Message }
+            Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } -MaxEvents 6 -ErrorAction SilentlyContinue |
+              ForEach-Object { $_.Message }
+            throw
           } finally {
             & $exe service uninstall --data-dir $data
           }
