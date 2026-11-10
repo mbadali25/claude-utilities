@@ -174,8 +174,8 @@ sleep 4
 
 if [ "$rc" -ne 0 ]; then
   # run-all.sh shows only the last five lines of a failing case, so the evidence goes on one line.
-  diag="$($SUDO journalctl -u "$MAIN" -o cat --no-pager 2>/dev/null | tail -n 4 | tr '\n' '|')"
-  echo "FAIL diag: Result=$(prop Result) ExecMainStatus=$(prop ExecMainStatus) journal: $diag"
+  diag="$($SUDO journalctl -u "$MAIN" -o cat --no-pager 2>/dev/null | tail -n 30 | cut -c1-110 | tr '\n' '|')"
+  echo "FAIL diag: Result=$(prop Result) ExecMainStatus=$(prop ExecMainStatus) NRestarts=$(prop NRestarts) journal: $diag"
 fi
 [ "$rc" -eq 0 ] && echo "PASS service-credential-missing: 5 attempts, start-limit-hit, marker and notice name the credential, no restart after"
 exit "$rc"
