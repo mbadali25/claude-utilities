@@ -70,3 +70,125 @@ jobs:
           go-version-file: go.mod
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - run: govulncheck ./...
+
+  # The service smoke: the real unit (Linux) or the real service (Windows), started, probed and torn
+  # down on a disposable runner. Both legs are UNVERIFIED until their first green run - the plan's
+  # inferences are that a windows-latest runner can CreateService under a virtual account, that
+  # ubuntu-latest runs systemd as PID 1 with passwordless sudo, and that MemoryDenyWriteExecute=yes
+  # suits the Go runtime - so the job is non-blocking. The same PR that sees a leg pass removes
+  # continue-on-error. A leg that cannot run prints a ::warning:: that says SKIPPED; it never passes
+  # silently.
+  service-smoke:
+    name: service-smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: linux - render, install, start, probe, stop
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This installs a unit, a user and a credential. It runs on a disposable CI runner and nowhere else.
+          [ "${GITHUB_ACTIONS:-}" = true ] || { echo "refusing to run outside GitHub Actions"; exit 1; }
+          if [ ! -d /run/systemd/system ]; then
+            echo "::warning::service-smoke SKIPPED: systemd is not PID 1 on this runner"
+            exit 0
+          fi
+          T="$RUNNER_TEMP/smoke"; mkdir -p "$T/units"
+          BIN=/usr/local/bin/claude-swap-server
+          go build -o "$T/claude-swap-server" ./cmd/server
+          sudo install -m 0755 "$T/claude-swap-server" "$BIN"
+
+          # The units and the useradd arguments come from the renderers, not from this file.
+          VERIFY_UNIT_DIR="$T/units" VERIFY_EXE="$BIN" VERIFY_DATA_DIR=/var/lib/claude-swap/data \
+            VERIFY_LISTEN=127.0.0.1:18443 \
+            go test -count=1 -run '^TestRenderUnitsForVerify$' ./internal/service
+          mapfile -t UA < "$T/units/useradd.args"
+          sudo useradd "${UA[@]}"
+          sudo install -m 0644 "$T/units/server.service" /etc/systemd/system/claude-swap-server.service
+          sudo install -m 0644 "$T/units/failed.service" /etc/systemd/system/claude-swap-server-failed.service
+          sudo systemd-analyze verify /etc/systemd/system/claude-swap-server.service
+
+          # A throwaway KEK in the credstore, a throwaway vault passphrase and admin password.
+          sudo install -d -m 0700 /etc/credstore
+          head -c 32 /dev/urandom | sudo tee /etc/credstore/claude-swap.vault-kek >/dev/null
+          sudo chmod 600 /etc/credstore/claude-swap.vault-kek
+          CLAUDESWAP_KEY="$(openssl rand -hex 16)"; ADMIN="$(openssl rand -hex 16)"
+          echo "::add-mask::$CLAUDESWAP_KEY"; echo "::add-mask::$ADMIN"
+          export CLAUDESWAP_KEY
+          sudo install -d -m 0700 /var/lib/claude-swap /var/lib/claude-swap/data
+          D=/var/lib/claude-swap/data
+          sudo --preserve-env=CLAUDESWAP_KEY "$BIN" vault init --data-dir "$D"
+          printf '%s\n' "$ADMIN" | sudo "$BIN" set-password --data-dir "$D"
+
+          # migrate on a v2 data dir is the idempotent re-run that writes the KEK drop-in.
+          sudo "$BIN" vault migrate --data-dir "$D" | tee "$T/migrate.out"
+          grep -q "KEK drop-in" "$T/migrate.out"
+          sudo grep -qx 'LoadCredential=vault-kek:/etc/credstore/claude-swap.vault-kek' \
+            /etc/systemd/system/claude-swap-server.service.d/10-kek.conf
+          sudo chown -R claude-swap:claude-swap /var/lib/claude-swap
+
+          # Start. Type=notify, so `start` returns only once the server reported READY.
+          sudo systemctl start claude-swap-server
+          [ "$(systemctl show -p ActiveState --value claude-swap-server)" = active ]
+          code="$(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:18443/ || true)"
+          echo "GET / -> $code"
+          case "$code" in [1-5][0-9][0-9]) : ;; *) echo "no HTTP answer from the server"; exit 1 ;; esac
+          # Configured is not delivering: a line must have reached the journal.
+          sudo journalctl -u claude-swap-server -o cat --no-pager | tee "$T/journal.out"
+          grep -q "listening on https://" "$T/journal.out"
+          sudo systemctl stop claude-swap-server
+          [ "$(systemctl show -p Result --value claude-swap-server)" = success ]
+      - name: linux - journal on failure
+        if: failure() && runner.os == 'Linux'
+        shell: bash
+        run: sudo journalctl -u claude-swap-server -u claude-swap-server-failed -o cat --no-pager | tail -n 60 || true
+      - name: windows - install, start, probe, stop, uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $T = Join-Path $env:RUNNER_TEMP 'smoke'; New-Item -ItemType Directory -Force $T | Out-Null
+          $exe = Join-Path $T 'claude-swap-server.exe'
+          $data = Join-Path $T 'data'
+          go build -o $exe ./cmd/server
+          if ($LASTEXITCODE) { throw 'build failed' }
+          $env:CLAUDESWAP_KEY = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+          $admin = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+          Write-Output "::add-mask::$($env:CLAUDESWAP_KEY)"; Write-Output "::add-mask::$admin"
+          & $exe vault init --data-dir $data
+          if ($LASTEXITCODE) { throw "vault init exited $LASTEXITCODE" }
+          $admin | & $exe set-password --data-dir $data
+          if ($LASTEXITCODE) { throw "set-password exited $LASTEXITCODE" }
+          & $exe service install --data-dir $data --listen 127.0.0.1:18443
+          if ($LASTEXITCODE) {
+            Write-Output "::warning::service-smoke SKIPPED: service install exited $LASTEXITCODE (CreateService refused?)"
+            exit 0
+          }
+          try {
+            & $exe service start --data-dir $data
+            if ($LASTEXITCODE) { throw "service start exited $LASTEXITCODE" }
+            $code = ''
+            foreach ($i in 1..20) {
+              $code = (curl.exe -sk -o NUL -w '%{http_code}' https://127.0.0.1:18443/) 2>$null
+              if ($code -match '^[1-5][0-9][0-9]$') { break }
+              Start-Sleep -Seconds 1
+            }
+            Write-Output "GET / -> $code"
+            if ($code -notmatch '^[1-5][0-9][0-9]$') { throw 'no HTTP answer from the service' }
+            & $exe service stop --data-dir $data
+            if ($LASTEXITCODE) { throw "service stop exited $LASTEXITCODE" }
+            $log = Join-Path $data 'logs\server.log'
+            if (-not (Test-Path $log) -or (Get-Item $log).Length -eq 0) { throw 'the service wrote no log line' }
+          } finally {
+            & $exe service uninstall --data-dir $data
+          }
+          if (Get-Service -Name ClaudeSwapServer -ErrorAction SilentlyContinue) { throw 'the service is still registered after uninstall' }

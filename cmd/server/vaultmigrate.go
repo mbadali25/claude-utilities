@@ -18,6 +18,7 @@ import (
 
 	"claude-utilities/internal/credfile"
 	"claude-utilities/internal/logx"
+	"claude-utilities/internal/service"
 	"claude-utilities/internal/vault"
 )
 
@@ -112,7 +113,16 @@ func vaultMigrate(dataDir string, dryRun bool, add string, plainKEK bool, stdin 
 		// re-runs. A return here that did not look would hand that journal to every other mutator
 		// to refuse, and would pass over a journal this binary cannot read at all - which this same
 		// command refuses when the files happen to be v1.
-		return settleOnAnAlreadyV2Dir(dataDir, op, out)
+		if code := settleOnAnAlreadyV2Dir(dataDir, op, out); code != 0 {
+			return code
+		}
+		// The installer calls this on every run, so it is also where a drop-in a failed first run
+		// never wrote gets written. SyncKEKDropIn leaves an up-to-date one alone. A host with no
+		// machine key has no kek-file slot to sync for, and that is not an error here.
+		if machine, _, merr := machineSlotFor(add); merr == nil {
+			return syncKEKDropIn(op, machine, out)
+		}
+		return 0
 	}
 	// The pin before the passphrase, because a data dir with no tls/ cannot pass the continuity
 	// check whatever is typed, and because the fingerprint is the one public value an operator
@@ -232,8 +242,45 @@ func runMigration(dataDir, op string, todo []migrateFile, machine vault.Slot, no
 		"still matches\n", op, after)
 
 	clearJournalFn(dataDir, op, out)
+	// Last, and after the journal is cleared: the vault is migrated and consistent whatever happens
+	// to the unit's drop-in, and a failure here must not leave an operator thinking it is not.
+	code := syncKEKDropIn(op, machine, out)
 	printRecoveryLines(op, todo, note, stamp, out)
+	if code != 0 {
+		auditLine(out, op, "", machine.Type, "migrated-dropin-failed", code)
+		return code
+	}
 	auditLine(out, op, "", machine.Type, "migrated", 0)
+	return 0
+}
+
+// kekDropInSync is service.SyncKEKDropIn unless a test replaces it. The real one writes under
+// /etc/systemd/system and runs systemctl, which no unit test may do.
+var kekDropInSync = service.SyncKEKDropIn
+
+// syncKEKDropIn makes the server unit's drop-in name the KEK this host holds, after a command has
+// wrapped the vault under it. Only a kek-file slot has one: a dpapi slot has no unit and no
+// credential. It returns the exit code to use: 0, or exitRuntime when the drop-in could not be
+// written - the vault itself is already done, and the line says so.
+//
+// Nothing is printed when there was nothing to write (a console run keyed by CLAUDESWAP_KEK_FILE, a
+// host with no credstore), and no path or credential name is ever printed: the service package
+// returns fixed sentences.
+func syncKEKDropIn(op string, machine vault.Slot, out io.Writer) int {
+	if machine.Type != slotTypeKEKFile {
+		return 0
+	}
+	rung, wrote, err := kekDropInSync()
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "vault %s: the migration is complete, but the server unit's KEK drop-in "+
+			"was not written: %s. The unit cannot find its key until it is; fix the cause and run "+
+			"`server vault migrate` again\n", op, logx.Redact(err.Error()))
+		return exitRuntime
+	}
+	if wrote {
+		_, _ = fmt.Fprintf(out, "vault %s: wrote the server unit's KEK drop-in for the %s key and reloaded "+
+			"systemd\n", op, rung)
+	}
 	return 0
 }
 
