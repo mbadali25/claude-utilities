@@ -177,6 +177,10 @@ func (v *winService) Close() error { return v.s.Close() }
 // installServiceConfig, which a portable test pins; this is the field copy.
 func toMgrConfig(cfg serviceConfig) mgr.Config {
 	m := mgr.Config{
+		// UpdateConfig sends an empty BinaryPathName as NULL, which ChangeServiceConfig reads as "leave
+		// it alone": without this a second install would report an update and keep the old flags.
+		// CreateService takes the path from its own arguments and ignores this field.
+		BinaryPathName:   cfg.BinaryPathName,
 		ServiceType:      windows.SERVICE_WIN32_OWN_PROCESS,
 		StartType:        mgr.StartManual,
 		ErrorControl:     mgr.ErrorNormal,

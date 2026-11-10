@@ -466,6 +466,8 @@ func serviceInstallCmd(args []string, out, errOut io.Writer) int {
 	// SID could not resolve and the policy this process started with is Administrators-only. Writing
 	// with that policy from here on would strip the service from every file it then touched.
 	if code := reapplyACLPolicy(out, errOut); code != 0 {
+		_, _ = fmt.Fprintln(errOut, "service install: the service is registered but the data dir was not "+
+			"granted to it; run `server service uninstall` to remove it, fix the cause above, then install again")
 		return code
 	}
 
