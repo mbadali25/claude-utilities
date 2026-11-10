@@ -198,7 +198,7 @@ jobs:
             }
             Write-Output "GET / -> $code"
             if ($code -notmatch '^[1-5][0-9][0-9]$') { throw 'no HTTP answer from the service' }
-            & $exe service stop --data-dir $data
+            & $exe service stop
             if ($LASTEXITCODE) { throw "service stop exited $LASTEXITCODE" }
             $log = Join-Path $data 'logs\server.log'
             if (-not (Test-Path $log) -or (Get-Item $log).Length -eq 0) { throw 'the service wrote no log line' }
@@ -212,7 +212,7 @@ jobs:
             Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } -MaxEvents 6 -ErrorAction SilentlyContinue |
               ForEach-Object { $_.Message }
             # Separate "the service account cannot run it" from "it cannot run": the same data dir, as the runner admin on the console.
-            & $exe service stop --data-dir $data 2>&1 | Out-Null
+            & $exe service stop 2>&1 | Out-Null
             $p = Start-Process -FilePath $exe -ArgumentList 'run','--listen','127.0.0.1:18444','--data-dir',$data -RedirectStandardError "$T\console.err" -RedirectStandardOutput "$T\console.out" -PassThru -NoNewWindow
             Start-Sleep -Seconds 6
             $exited = $p.HasExited
