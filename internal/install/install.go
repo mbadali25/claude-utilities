@@ -88,10 +88,12 @@ func SchtasksCreateArgs(exe, user string) []string {
 // and grant each principal full control, inheritable (the Windows form of 0700 when there is
 // one of them). One /grant:r term per principal, in the order given.
 //
-// /T is appended only for more than one principal. That is the server's service case, where
-// the grant has to reach files the data dir already holds — a data dir written before the
-// service was registered keeps no useful inherited ACE once a save runs /inheritance:r on it.
-// The agent's single-user call therefore keeps the argument list it has today, byte for byte.
+// /T is appended only for more than one principal. It makes icacls visit the whole tree, but it
+// does NOT put the grant on files that already exist: the (OI)(CI) flags are container-only, so
+// they land on directories alone, and a file written earlier under an explicit DACL with
+// inheritance removed keeps no ACE for the new principals. The server's service install covers
+// those files with a per-file credfile.RestrictFile pass (cmd/server restrictExistingFiles).
+// The agent's single-user call keeps the argument list it has today, byte for byte.
 //
 // An empty principal list returns nil: a lockdown that removes inheritance and grants nobody
 // locks the owner out of their own state dir.
