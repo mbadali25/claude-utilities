@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package service
 
@@ -7,10 +7,14 @@ import (
 	"time"
 )
 
-// This is the readiness half for every platform that is not Linux. Windows has no sd_notify: the
-// service handler reports StartPending with a checkpoint and then Running through the SCM, which is
-// slice 4b's `svc.Handler`, so the calls here are no-ops rather than errors. A console run on any
-// platform takes the same path, which is why `server run` needs no build tag of its own.
+// This is the readiness half for every platform that is neither Linux nor Windows: the BSDs, darwin
+// and anything else the gate builds. The same no-ops exist in windows.go, which owns the Windows
+// half of this package, because Windows has no sd_notify at all - the service handler reports
+// StartPending with a checkpoint and then Running through the SCM. A console run on any platform
+// takes the same path, which is why `server run` needs no build tag of its own.
+//
+// Windows is excluded from this file rather than sharing it so BootInstant can have a real reader
+// there: a reader that needs golang.org/x/sys/windows cannot live in a file darwin also compiles.
 
 // notifySocket is always empty off Linux: there is no notification socket to write to, and reading
 // the variable would let an inherited NOTIFY_SOCKET make this build attempt a write it cannot make.
@@ -36,13 +40,11 @@ func formatDevIno(dev, ino uint64) string {
 	return strconv.FormatUint(dev, 10) + ":" + strconv.FormatUint(ino, 10)
 }
 
-// BootInstant is the zero instant here. Windows' reader is `now - GetTickCount64()` and it needs
-// golang.org/x/sys/windows, which cannot be imported from a file this build shares with darwin and
-// the BSDs; it lands with the Windows service handler in slice 4b, in internal/service/windows.go,
-// where it is the only consumer that needs it.
+// BootInstant is the zero instant on these platforms: nothing here runs as a service, so no boot
+// reader was written. Windows' reader lives in windows.go and Linux's in notify_linux.go.
 //
-// Until then the marker rule degrades honestly rather than wrongly: the same zero instant is
-// written and read, so the boot condition holds and MarkerMaxAge alone bounds the refusal. The
-// failure mode of the alternative - a reader that returned "now" - would be a marker that never
-// matched and a restart loop that the marker was written to stop.
+// The marker rule degrades honestly rather than wrongly: the same zero instant is written and read,
+// so the boot condition holds and MarkerMaxAge alone bounds the refusal. The failure mode of the
+// alternative - a reader that returned "now" - would be a marker that never matched and a restart
+// loop that the marker was written to stop.
 func BootInstant() time.Time { return time.Time{} }
