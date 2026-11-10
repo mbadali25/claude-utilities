@@ -1,8 +1,11 @@
 package service
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -89,7 +92,7 @@ func hasLinePrefix(s, prefix string) bool {
 }
 
 func TestServerUnitMatchesTheGoldenString(t *testing.T) {
-	got := RenderServerUnit(goldenExe, goldenListen, goldenData, false)
+	got := mustRender(t, goldenExe, goldenListen, goldenData, false)
 	if got != goldenServerUnit {
 		t.Fatalf("unit differs from the spec's text.\n--- got ---\n%s\n--- want ---\n%s", got, goldenServerUnit)
 	}
@@ -97,7 +100,7 @@ func TestServerUnitMatchesTheGoldenString(t *testing.T) {
 
 func TestServerUnitHasNoCredentialLine(t *testing.T) {
 	// The drop-in owns it: a unit naming a credential that does not exist fails before ExecStart.
-	got := RenderServerUnit(goldenExe, goldenListen, goldenData, false)
+	got := mustRender(t, goldenExe, goldenListen, goldenData, false)
 	for _, l := range lines(got) {
 		if strings.HasPrefix(l, "LoadCredential") || strings.HasPrefix(l, "ImportCredential") ||
 			strings.HasPrefix(l, "SetCredential") {
@@ -108,7 +111,7 @@ func TestServerUnitHasNoCredentialLine(t *testing.T) {
 
 func TestServerUnitRestartPreventExitStatusIsFromTheServerTable(t *testing.T) {
 	want := "RestartPreventExitStatus=" + ServerTable().RestartPreventExitStatus()
-	got := RenderServerUnit(goldenExe, goldenListen, goldenData, false)
+	got := mustRender(t, goldenExe, goldenListen, goldenData, false)
 	if !hasLine(got, want) {
 		t.Fatalf("unit has no line %q:\n%s", want, got)
 	}
@@ -120,7 +123,7 @@ func TestServerUnitRestartPreventExitStatusIsFromTheServerTable(t *testing.T) {
 }
 
 func TestServerUnitHasTypeNotifyAndNotifyAccessMain(t *testing.T) {
-	got := RenderServerUnit(goldenExe, goldenListen, goldenData, false)
+	got := mustRender(t, goldenExe, goldenListen, goldenData, false)
 	for _, want := range []string{"Type=notify", "NotifyAccess=main"} {
 		if !hasLine(got, want) {
 			t.Errorf("unit has no line %q", want)
@@ -130,7 +133,7 @@ func TestServerUnitHasTypeNotifyAndNotifyAccessMain(t *testing.T) {
 
 func TestServerUnitHasTheStartLimitPairAndOnFailure(t *testing.T) {
 	// 300/5, the same numbers as the spec's block, not the 120/3 an earlier draft carried.
-	got := RenderServerUnit(goldenExe, goldenListen, goldenData, false)
+	got := mustRender(t, goldenExe, goldenListen, goldenData, false)
 	for _, want := range []string{
 		"StartLimitIntervalSec=300",
 		"StartLimitBurst=5",
@@ -146,7 +149,7 @@ func TestServerUnitHasTheStartLimitPairAndOnFailure(t *testing.T) {
 }
 
 func TestServerUnitHasTheHardeningDirectives(t *testing.T) {
-	got := RenderServerUnit(goldenExe, goldenListen, goldenData, false)
+	got := mustRender(t, goldenExe, goldenListen, goldenData, false)
 	for _, want := range []string{
 		"ProtectSystem=strict",
 		"ProtectHome=yes",
@@ -164,7 +167,7 @@ func TestServerUnitHasTheHardeningDirectives(t *testing.T) {
 }
 
 func TestServerUnitNeverContainsASecret(t *testing.T) {
-	got := RenderServerUnit(goldenExe, goldenListen, goldenData, true)
+	got := mustRender(t, goldenExe, goldenListen, goldenData, true)
 	for _, bad := range []string{"CLAUDESWAP_KEY", "CLAUDESWAP_ADMIN_PASSWORD", "password", "passphrase", "token", "Environment="} {
 		if strings.Contains(strings.ToLower(got), strings.ToLower(bad)) {
 			t.Errorf("unit mentions %q", bad)
@@ -173,8 +176,8 @@ func TestServerUnitNeverContainsASecret(t *testing.T) {
 }
 
 func TestServerUnitTunnelsAddsTheFlagOnly(t *testing.T) {
-	off := RenderServerUnit(goldenExe, goldenListen, goldenData, false)
-	on := RenderServerUnit(goldenExe, goldenListen, goldenData, true)
+	off := mustRender(t, goldenExe, goldenListen, goldenData, false)
+	on := mustRender(t, goldenExe, goldenListen, goldenData, true)
 	if strings.Contains(off, "--tunnels") {
 		t.Fatalf("tunnels off but the unit has the flag:\n%s", off)
 	}
@@ -190,11 +193,11 @@ func TestServerUnitTunnelsAddsTheFlagOnly(t *testing.T) {
 func TestServerUnitDataDirOutsideTheStateDirectoryIsWritable(t *testing.T) {
 	// ProtectSystem=strict makes everything read-only but ReadWritePaths, so a data dir the operator
 	// put elsewhere would otherwise fail on its first write.
-	got := RenderServerUnit(goldenExe, goldenListen, "/srv/swap data", false)
+	got := mustRender(t, goldenExe, goldenListen, "/srv/swap data", false)
 	if !hasLine(got, `ReadWritePaths=/var/lib/claude-swap "/srv/swap data"`) {
 		t.Fatalf("an outside data dir is not writable:\n%s", got)
 	}
-	if !hasLine(RenderServerUnit(goldenExe, goldenListen, "/var/lib/claude-swap", false), "ReadWritePaths=/var/lib/claude-swap") {
+	if !hasLine(mustRender(t, goldenExe, goldenListen, "/var/lib/claude-swap", false), "ReadWritePaths=/var/lib/claude-swap") {
 		t.Fatal("the state directory itself must not be listed twice")
 	}
 }
@@ -262,9 +265,9 @@ func execStartOf(t *testing.T, unit string) string {
 
 func TestServerUnitCannotBeInjectedThroughAnArgument(t *testing.T) {
 	// A newline in an argument would start a new directive; a $ or % would be expanded by systemd.
-	evilData := "x\nExecStartPre=/bin/evil\n[Service]"
+	evilData := "/x\nExecStartPre=/bin/evil\n[Service]"
 	evilListen := "$HOME:%h"
-	got := RenderServerUnit(goldenExe, evilListen, evilData, false)
+	got := mustRender(t, goldenExe, evilListen, evilData, false)
 	if hasLinePrefix(got, "ExecStartPre") || countLines(got, "[Service]") != 1 {
 		t.Fatalf("an argument injected a directive:\n%s", got)
 	}
@@ -280,7 +283,7 @@ func TestServerUnitExecutablePrefixCharsAreDefused(t *testing.T) {
 	// would run the server with full privileges outside the sandbox. The first word opening with one
 	// is quoted, which turns it into a (relative, and so refused) path.
 	for _, exe := range []string{"+/bin/evil", "-/bin/evil", "@/bin/evil", ":/bin/evil", "!/bin/evil"} {
-		v := execStartOf(t, RenderServerUnit(exe, goldenListen, goldenData, false))
+		v := execStartOf(t, mustRender(t, exe, goldenListen, goldenData, false))
 		if strings.ContainsRune("@-:+!", rune(v[0])) {
 			t.Errorf("exe %q: ExecStart= starts with an option character: %s", exe, v)
 		}
@@ -290,15 +293,32 @@ func TestServerUnitExecutablePrefixCharsAreDefused(t *testing.T) {
 	}
 }
 
-func TestServerUnitRelativeDataDirIsNotMadeWritable(t *testing.T) {
-	// A leading - or + on a ReadWritePaths entry is an option applied after unquoting, so a relative
-	// or option-looking data dir is never named there at all.
-	for _, d := range []string{"-/etc", "+/etc", "relative/dir"} {
-		got := RenderServerUnit(goldenExe, goldenListen, d, false)
-		if !hasLine(got, "ReadWritePaths=/var/lib/claude-swap") {
-			t.Errorf("data dir %q reached ReadWritePaths:\n%s", d, got)
+func TestServerUnitRelativeDataDirIsRefused(t *testing.T) {
+	// A leading - or + on a ReadWritePaths entry is an option applied after unquoting, and a relative
+	// path cannot be named there at all, so under ProtectSystem=strict the unit would fail on the
+	// first write. Refuse to render it rather than render a unit that cannot work.
+	for _, d := range []string{"", "-/etc", "+/etc", "relative/dir", "./data"} {
+		got, err := RenderServerUnit(goldenExe, goldenListen, d, false)
+		if err == nil {
+			t.Errorf("data dir %q: no error, unit:\n%s", d, got)
+		}
+		if got != "" {
+			t.Errorf("data dir %q: rendered a unit alongside the error:\n%s", d, got)
+		}
+		if err != nil && !errors.Is(err, ErrDataDirNotAbsolute) {
+			t.Errorf("data dir %q: err = %v, want ErrDataDirNotAbsolute", d, err)
 		}
 	}
+}
+
+// mustRender renders the server unit for an absolute data dir and fails the test on an error.
+func mustRender(t *testing.T, exe, listen, dataDir string, tunnels bool) string {
+	t.Helper()
+	got, err := RenderServerUnit(exe, listen, dataDir, tunnels)
+	if err != nil {
+		t.Fatalf("RenderServerUnit(%q): %v", dataDir, err)
+	}
+	return got
 }
 
 func TestFailureUnitCreatesNothingAboveTheLogsDirectory(t *testing.T) {
@@ -375,6 +395,99 @@ func TestFailureUnitScriptReadsOnlyTheMonitorVariablesAndWritesOneFile(t *testin
 	}
 }
 
+// runFailureScript runs the failure unit's real script under /bin/sh with a stub chown and returns
+// its one journal line and the stub's call log. The stub fails for the logs directory when dirFails
+// and for the marker when fileFails, and records every call. logsExist pre-creates the logs
+// directory, so the script takes the path where it does not chown the directory.
+//
+// It needs a Linux userland (GNU date, /proc/uptime), so it skips elsewhere rather than pass without
+// having run anything.
+func runFailureScript(t *testing.T, logsExist, dirFails, fileFails bool) (out, calls string) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("the failure script needs a Linux userland")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh on PATH")
+	}
+	data := filepath.Join(t.TempDir(), "data")
+	logs := filepath.Join(data, markerLogsDir)
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if logsExist {
+		if err := os.Mkdir(logs, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := func(fails bool) string {
+		if fails {
+			return "1"
+		}
+		return "0"
+	}
+	stubs, callLog := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+	stub := "#!/bin/sh\necho \"$*\" >> '" + callLog + "'\n" +
+		"case \"$2\" in *" + MarkerFileName + ") exit " + status(fileFails) + " ;; esac\nexit " + status(dirFails) + "\n"
+	if err := os.WriteFile(filepath.Join(stubs, "chown"), []byte(stub), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := parseExec(t, execStartOf(t, RenderFailureUnit(data)))[2]
+	cmd := exec.Command(sh, "-c", script, "claude-swap-server-failed", logs)
+	cmd.Env = append(os.Environ(), "PATH="+stubs+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"MONITOR_SERVICE_RESULT=exit-code", "MONITOR_EXIT_CODE=exited", "MONITOR_EXIT_STATUS=1")
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("script failed: %v\n%s", err, b)
+	}
+	if _, err := os.Stat(filepath.Join(logs, MarkerFileName)); err != nil {
+		t.Fatalf("marker not written: %v\n%s", err, b)
+	}
+	c, _ := os.ReadFile(callLog)
+	return string(b), string(c)
+}
+
+func TestFailureScriptReportsAFailedChownInsteadOfSilencingIt(t *testing.T) {
+	// chown --reference is GNU-only. A failure leaves the marker root:root in a directory the service
+	// account owns, where the reader cannot open it, so the journal line has to say so. Each row fails
+	// exactly one chown, so deleting either call (or its `|| own=failed`) turns a row red.
+	for _, c := range []struct {
+		name                           string
+		logsExist, dirFails, fileFails bool
+	}{
+		{"the logs directory chown fails", false, true, false},
+		{"the marker chown fails after the directory was made", false, false, true},
+		{"the marker chown fails on an existing logs directory", true, false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out, _ := runFailureScript(t, c.logsExist, c.dirFails, c.fileFails)
+			if !strings.Contains(out, "marker=written") || !strings.Contains(out, "owner=failed") {
+				t.Fatalf("a failed chown is not reported: %q", out)
+			}
+		})
+	}
+}
+
+func TestFailureScriptReportsOwnerOKWhenChownWorks(t *testing.T) {
+	out, calls := runFailureScript(t, false, false, false)
+	if !strings.Contains(out, "owner=ok") || strings.Contains(out, "owner=failed") {
+		t.Fatalf("a good chown is misreported: %q", out)
+	}
+	// Both objects take the DATA dir's owner (the parent of logs/), never the logs dir's own: a
+	// root-owned logs dir left by an earlier failed run must not hand its owner to the marker.
+	got := strings.Split(strings.TrimSpace(calls), "\n")
+	if len(got) != 2 {
+		t.Fatalf("chown called %d times, want 2 (the directory it made, then the marker):\n%s", len(got), calls)
+	}
+	for _, l := range got {
+		ref, _, _ := strings.Cut(l, " ")
+		if !strings.HasPrefix(ref, "--reference=") || strings.HasSuffix(ref, "/"+markerLogsDir) {
+			t.Errorf("chown call %q does not reference the data dir", l)
+		}
+	}
+}
+
 func TestUserAddArgsAreExact(t *testing.T) {
 	want := []string{"--system", "--home-dir", "/var/lib/claude-swap", "--shell", "/usr/sbin/nologin", "claude-swap"}
 	got := UserAddArgs()
@@ -405,7 +518,7 @@ func TestRenderUnitsForVerify(t *testing.T) {
 		listen = "127.0.0.1:0"
 	}
 	for name, body := range map[string]string{
-		"server.service": RenderServerUnit(exe, listen, data, false),
+		"server.service": mustRender(t, exe, listen, data, false),
 		"failed.service": RenderFailureUnit(data),
 		// One argument per line, for the CI smoke to hand to useradd without restating them.
 		"useradd.args": strings.Join(UserAddArgs(), "\n") + "\n",

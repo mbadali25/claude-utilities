@@ -76,8 +76,9 @@ jobs:
   # inferences are that a windows-latest runner can CreateService under a virtual account, that
   # ubuntu-latest runs systemd as PID 1 with passwordless sudo, and that MemoryDenyWriteExecute=yes
   # suits the Go runtime - so the job is non-blocking. The same PR that sees a leg pass removes
-  # continue-on-error. A leg that cannot run prints a ::warning:: that says SKIPPED; it never passes
-  # silently.
+  # continue-on-error. A ::warning:: does not fail a step, so a leg that cannot run says SKIPPED on the
+  # job summary as well as in a warning (the runner offers no skipped state mid-job), and a leg that ran
+  # and could not verify (Windows UNVERIFIED) fails: the repo rule is that a skip is not a pass.
   service-smoke:
     name: service-smoke (${{ matrix.os }})
     strategy:
@@ -100,6 +101,7 @@ jobs:
           [ "${GITHUB_ACTIONS:-}" = true ] || { echo "refusing to run outside GitHub Actions"; exit 1; }
           if [ ! -d /run/systemd/system ]; then
             echo "::warning::service-smoke SKIPPED: systemd is not PID 1 on this runner"
+            echo -e "### service-smoke (linux): SKIPPED\nsystemd is not PID 1 on this runner. Nothing was verified; this is a skip, not a pass." >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
             exit 0
           fi
           T="$RUNNER_TEMP/smoke"; mkdir -p "$T/units"
@@ -182,6 +184,7 @@ jobs:
             # Skipped only when the runner refuses the registration itself; any other install failure is one.
             if ($installOut -match 'Access is denied|access denied|privilege') {
               Write-Output "::warning::service-smoke SKIPPED: the runner refused CreateService ($LASTEXITCODE)"
+              if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### service-smoke (windows): SKIPPED`nThe runner refused CreateService. Nothing was verified; this is a skip, not a pass." }
               exit 0
             }
             throw "service install exited $LASTEXITCODE"
@@ -203,7 +206,8 @@ jobs:
             $log = Join-Path $data 'logs\server.log'
             if (-not (Test-Path $log) -or (Get-Item $log).Length -eq 0) { throw 'the service wrote no log line' }
           } catch {
-            Write-Output "::error::service-smoke: $($_.Exception.Message)"
+            $why = $_.Exception.Message
+            Write-Output "::error::service-smoke: $why"
             & $exe service status --data-dir $data
             $log = Join-Path $data 'logs\server.log'
             if (Test-Path $log) { Get-Content $log -Tail 40 } else { Write-Output "(no $log)" }
@@ -228,5 +232,11 @@ jobs:
           }
           if (Get-Service -Name ClaudeSwapServer -ErrorAction SilentlyContinue) { throw 'the service is still registered after uninstall' }
           if ($unverified) {
-            Write-Output "::warning::service-smoke Windows leg UNVERIFIED: the service exited 1 (reason=runtime) under NT SERVICE\ClaudeSwapServer on this runner, while the same data dir runs on the console. Not a pass."
+            # A ::warning:: does not fail a step, so a leg that verified nothing would show green. This
+            # leg fails instead (the job is continue-on-error, so the run is not blocked) and says so on
+            # the job summary: UNVERIFIED is not a pass.
+            $msg = "service-smoke Windows leg UNVERIFIED, NOT A PASS: under NT SERVICE\ClaudeSwapServer on this runner the step failed ($why), while the same data dir runs on the console."
+            Write-Output "::error::$msg"
+            if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### service-smoke (windows): UNVERIFIED`n$msg" }
+            exit 1
           }

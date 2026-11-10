@@ -77,8 +77,8 @@ type migrateFile struct {
 	copyAt  string
 }
 
-// vaultMigrate rewrites a v1 data dir as v2. dryRun prints the plan and writes nothing at all; add
-// overrides which machine slot type is used, and plainKEK selects the rung for the command that
+// vaultMigrate rewrites a v1 data dir as v2. dryRun prints the plan and writes nothing, except that it first settles a
+// leftover journal (a real write); add overrides which machine slot type is used, and plainKEK selects the rung for the command that
 // CREATES a KEK, which is not this one (see the note it prints).
 //
 // It returns the process exit code: 0 migrated, or planned, or already v2 and nothing to do; 2 a
@@ -120,8 +120,10 @@ func vaultMigrate(dataDir string, dryRun bool, add string, plainKEK bool, stdin 
 		// never wrote gets written. SyncKEKDropIn leaves an up-to-date one alone. A host with no
 		// machine key has no kek-file slot to sync for, and that is not an error here.
 		//
-		// Never on a dry run: it writes /etc/systemd/system and runs systemctl, and `--dry-run`
-		// writes nothing at all.
+		// Never on a dry run: it writes /etc/systemd/system and runs systemctl.
+		// That is the only write a dry run skips on this path: the settle above finishes a leftover
+		// journal with real writes (vault.SettleVaultOp) on a dry run too, because a plan printed over an
+		// unsettled pair would describe a state that is about to change.
 		if dryRun {
 			return 0
 		}

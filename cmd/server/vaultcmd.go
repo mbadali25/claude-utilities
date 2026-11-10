@@ -40,7 +40,7 @@ const vaultUsage = `usage: server vault <subcommand> [--data-dir DIR]
   migrate [--dry-run]           rewrite a v1 vault.bin and tunnelkeys.bin as v2, keeping a verified
           [--add TYPE]          byte copy of each as <name>.v1.<ts> first. The passphrase is
           [--plain-kek]          re-wrapped, never changed. Already v2 exits 0 with nothing done.
-                                --dry-run prints the plan and writes nothing at all; --add picks the
+                                --dry-run prints the plan, settling only a leftover journal; --add picks the
                                 machine slot type (dpapi or kek-file) instead of this host's default.
   downgrade                     write v1 files again with the passphrase, keeping each v2 file's
                                 bytes as <name>.v2.<ts>. The rollback the passphrase slot exists for.
@@ -128,7 +128,7 @@ func vaultCmd(args []string, stdin io.Reader, out, errOut io.Writer) int {
 		var dryRun, plainKEK bool
 		var add string
 		return withDataDir(sub, rest, func(fs *flag.FlagSet) {
-			fs.BoolVar(&dryRun, "dry-run", false, "print what would be migrated and write nothing at all")
+			fs.BoolVar(&dryRun, "dry-run", false, "print what would be migrated; writes nothing but the settle of a leftover journal")
 			fs.StringVar(&add, "add", "", "the machine slot type to add: dpapi or kek-file (default: this host's)")
 			fs.BoolVar(&plainKEK, "plain-kek", false, "on Linux, select the plain root-owned credstore file rather than an encrypted credential")
 		}, out, errOut, func(dataDir string, _ *flag.FlagSet) int {
