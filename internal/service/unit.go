@@ -1,9 +1,13 @@
 package service
 
 import (
+	"errors"
 	"path"
 	"strings"
 )
+
+// ErrDataDirNotAbsolute is RenderServerUnit's refusal of a data dir that is not an absolute path.
+var ErrDataDirNotAbsolute = errors.New("service: the data dir must be an absolute path")
 
 // The Linux server's systemd units, as text. Nothing here touches the host: the renderers are pure
 // functions, so the unit's exact bytes are a golden string in a test that runs on every OS, and the
@@ -51,17 +55,23 @@ const (
 //
 // RestartSteps= and RestartMaxDelaySec= need systemd 254. An older systemd ignores them with a
 // warning and restarts at a flat RestartSec; the start limit is what bounds a loop either way.
-func RenderServerUnit(exe, listen, dataDir string, tunnels bool) string {
+//
+// It returns ErrDataDirNotAbsolute for a data dir that is not an absolute path. ProtectSystem=strict
+// leaves everything read-only but ReadWritePaths, and a relative path (or one opening with `-` or `+`,
+// which systemd reads as an option AFTER unquoting) cannot be named there, so the unit would start and
+// then fail on the server's first write. No unit is rendered rather than one that cannot work.
+func RenderServerUnit(exe, listen, dataDir string, tunnels bool) (string, error) {
+	if !path.IsAbs(dataDir) {
+		return "", ErrDataDirNotAbsolute
+	}
 	exec := []string{exe, "run", "--listen", listen, "--data-dir", dataDir}
 	if tunnels {
 		exec = append(exec, "--tunnels")
 	}
 	rw := StateDir
-	if path.IsAbs(dataDir) && !underStateDir(dataDir) {
-		// ProtectSystem=strict leaves everything read-only but ReadWritePaths, so a data dir the
-		// operator placed elsewhere has to be named or its first write fails. Only an absolute path
-		// is ever named: systemd reads a leading `-` or `+` on a path entry as an option AFTER
-		// unquoting, so quoting cannot defuse one, and a relative data dir is the installer's to refuse.
+	if !underStateDir(dataDir) {
+		// A data dir the operator placed outside the state directory has to be named or its first
+		// write fails.
 		rw += " " + quoteWord(dataDir, false)
 	}
 
@@ -105,7 +115,7 @@ func RenderServerUnit(exe, listen, dataDir string, tunnels bool) string {
 	line("")
 	line("[Install]")
 	line("WantedBy=multi-user.target")
-	return b.String()
+	return b.String(), nil
 }
 
 // failureScript is what the OnFailure unit runs. systemd hands an OnFailure= unit the failed
@@ -123,7 +133,9 @@ func RenderServerUnit(exe, listen, dataDir string, tunnels bool) string {
 // It runs as root, and the data dir belongs to the service account, so it creates NOTHING above the
 // logs directory: a missing data dir is the commonest reason a start fails, and a root-owned 0700
 // data dir made by this script would turn that into a permanent one. A logs directory it does create
-// (and the marker in it) is handed to the data dir's owner.
+// (and the marker in it) is handed to the data dir's owner. chown --reference is GNU-only, so a
+// failure is not silent: the journal line ends owner=failed, because a marker left root:root in the
+// service account's directory is one the reader cannot open.
 const failureScript = `umask 077
 res="${MONITOR_SERVICE_RESULT:-unknown}"
 code="${MONITOR_EXIT_CODE:-unknown}"
@@ -141,9 +153,10 @@ boot=$(date -u -d "@$(( $(date +%s) - up ))" +%Y-%m-%dT%H:%M:%SZ)
 parent="${dir%/*}"
 made=0
 if [ -d "$parent" ] && { [ -d "$dir" ] || { mkdir "$dir" && made=1; }; } && printf '{"exit":%s,"reason":"%s","ts":"%s","boot":"%s"}\n' "$st" "$reason" "$now" "$boot" > "$dir/last-fatal.json.tmp" && mv -f "$dir/last-fatal.json.tmp" "$dir/last-fatal.json"; then
-  if [ "$made" -eq 1 ]; then chown --reference="$parent" "$dir" 2>/dev/null; fi
-  chown --reference="$dir" "$dir/last-fatal.json" 2>/dev/null
-  echo "claude-swap-server failed: result=$res exit_code=$code exit_status=$st reason=$reason$note marker=written"
+  own=ok
+  if [ "$made" -eq 1 ]; then chown --reference="$parent" "$dir" 2>/dev/null || own=failed; fi
+  chown --reference="$dir" "$dir/last-fatal.json" 2>/dev/null || own=failed
+  echo "claude-swap-server failed: result=$res exit_code=$code exit_status=$st reason=$reason$note marker=written owner=$own"
 else
   echo "claude-swap-server failed: result=$res exit_code=$code exit_status=$st reason=$reason$note marker=not-written"
 fi
@@ -181,12 +194,13 @@ func underStateDir(p string) bool {
 // The first word is the executable, and systemd reads the characters `@ - : + !` in FRONT of it as
 // options (`+` runs it with full privileges outside the sandbox, `-` swallows its failures, `@`
 // changes argv[0]) before it looks at quoting. A word that opens with one is therefore always quoted:
-// the quote makes it a plain, and then relative, path, which systemd refuses.
+// the quote makes it a plain, and then relative, path, which systemd refuses. `!` is already quoted by
+// needsQuote (it is not in the bare set), so only `@ - : +` need the explicit step here.
 func unitJoin(words ...string) string {
 	out := make([]string, len(words))
 	for i, w := range words {
 		out[i] = unitQuote(w)
-		if i == 0 && w != "" && strings.ContainsRune("@-:+!", rune(w[0])) {
+		if i == 0 && w != "" && strings.ContainsRune("@-:+", rune(w[0])) {
 			out[i] = quoteWord(w, true)
 			if !strings.HasPrefix(out[i], `"`) {
 				out[i] = `"` + out[i] + `"`
