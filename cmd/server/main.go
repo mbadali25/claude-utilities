@@ -41,10 +41,11 @@ import (
 // that nothing can observe is one that breaks silently. They are variables so a test records the
 // order against the real implementations rather than against a mock of the whole entry point.
 //
-// registeredDataDir is the exception: it has no implementation yet. Reading the service's baked
-// --data-dir means the SCM on Windows (mgr.Service.Config().BinaryPathName) and the unit's
-// ExecStart= on Linux, which arrive with the service halves in slices 4b and 4c. Until then it
-// answers "no service registered", which is the truth on a host where none is.
+// registeredDataDir reads the service's baked --data-dir. On Windows that is the SCM
+// (mgr.Service.Config().BinaryPathName, read through servicecmd.go's seam); on every other OS it
+// still answers "no service registered", because the unit's ExecStart= arrives with the systemd
+// half in the next slice. The read is read-only - connect, open for query, close - so every console
+// run can make it.
 var (
 	acquireLock       = vault.AcquireLock
 	readVaultOp       = vault.ReadVaultOp
@@ -52,7 +53,7 @@ var (
 	listenTCP         = net.Listen
 	notifyReady       = service.NotifyReady
 	notifyStopping    = service.NotifyStopping
-	registeredDataDir = func() (string, bool) { return "", false }
+	registeredDataDir = serviceRegisteredDataDir
 )
 
 const (
@@ -64,11 +65,16 @@ const (
 // usageText is the command summary; the name avoids the internal/usage import.
 const usageText = `usage: server run <flags> | server <flags> | server set-password [--data-dir DIR]
        server cert renew [--data-dir DIR] | server vault <subcommand> [--data-dir DIR]
+       server service install|uninstall|start|stop|status [flags]
   run                    run the hub and admin UI. This is the preferred form; the bare flag form
                          below is kept unchanged for existing scripts (scripts/start-server.ps1 and
                          the e2e start script pass --listen with no subcommand).
   vault <subcommand>     status, verify, add-slot, remove-slot, rotate, change-passphrase.
                          Run "server vault" with no subcommand to list them.
+  service <subcommand>   install, uninstall, start, stop, status. Windows only: it registers this
+                         binary as a service under the virtual account NT SERVICE\ClaudeSwapServer,
+                         bakes --listen and --data-dir into its command line and grants the data dir
+                         to the service and to Administrators. Run "server service" to list them.
   --listen host:port     run the hub and admin UI (required, no default)
   --data-dir DIR         vault, host list, TLS certificate and admin password hash
   --tunnels              supervise the reverse SSH tunnels to the Linux hosts, and
@@ -94,6 +100,13 @@ const usageText = `usage: server run <flags> | server <flags> | server set-passw
                          every agent must re-enrol. It asks for a typed confirmation.`
 
 func main() {
+	// The service control manager, when it is what started this process: the handler owns the
+	// context, the log file and the exit code it reports back. `svc.Run` is entered only when
+	// svc.IsWindowsService() is true, so a console run - and every test process - falls straight
+	// through to the path below, unchanged.
+	if code, isService := runAsWindowsService(); isService {
+		os.Exit(code)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := run(ctx, os.Args[1:], os.Getenv, os.Stdin, os.Stderr)
 	stop()
@@ -153,6 +166,9 @@ func dispatchTable() map[string]subcommand {
 		"vault": func(_ context.Context, args []string, _ func(string) string, in io.Reader, errOut io.Writer) int {
 			return vaultCmd(args, in, errOut, errOut)
 		},
+		"service": func(_ context.Context, args []string, _ func(string) string, in io.Reader, errOut io.Writer) int {
+			return serviceCmd(args, in, errOut, errOut)
+		},
 	}
 }
 
@@ -160,12 +176,57 @@ func dispatchTable() map[string]subcommand {
 // secrets, 3 a vault no slot could unwrap, 4 a vault this binary cannot read, 5 a refused
 // certificate.
 func run(ctx context.Context, args []string, getenv func(string) string, in io.Reader, errOut io.Writer) int {
+	// The data-dir ACL policy, before anything writes. This is the one place it is set: main() calls
+	// nothing else, so every entry point - `run`, the bare flag form, every vault mutator, `cert`,
+	// `set-password` and every `service` command - passes through here, and there is one definition
+	// of the policy rather than one per command to drift.
+	if code := applyACLPolicy(args, errOut); code != 0 {
+		return code
+	}
 	if len(args) > 0 {
 		if handler, ok := dispatchTable()[args[0]]; ok {
 			return handler(ctx, args[1:], getenv, in, errOut)
 		}
 	}
 	return serveCmd(ctx, args, getenv, errOut)
+}
+
+// applyACLPolicy resolves the data-dir ACL policy (Decision 11) and installs it in credfile before
+// the first write of whatever command follows.
+//
+// The refusal is G17, approved by Matthew 2026-11-07: a REGISTERED service whose SID will not
+// resolve means exit 2 with reason=acl-policy-unresolved and nothing written, never a narrower
+// policy. Narrowing there would re-ACL the data dir without the service SID and the service could
+// no longer read vault.bin, admin-password.json or tls/ - silently, because every write succeeds
+// and only the next service start fails.
+//
+// The read-only commands are exempt, and deliberately so: `service status`, `vault status` and
+// `vault verify` write nothing and are exactly what an operator needs in order to find out WHY the
+// policy is unresolved. A refusal that took those away would leave nothing to diagnose with.
+func applyACLPolicy(args []string, errOut io.Writer) int {
+	policy, err := aclPolicy()
+	if err != nil {
+		if readOnlyInvocation(args) {
+			logx.New(errOut).Warn("acl policy", "reason", service.ACLPolicyUnresolvedReason,
+				"op", opName(args), "result", "read-only-continues")
+			return 0
+		}
+		logx.New(errOut).Error("acl policy", "reason", service.ACLPolicyUnresolvedReason,
+			"op", opName(args), "exit", exitUsage)
+		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
+		return exitUsage
+	}
+	if err := setACLPolicy(policy...); err != nil {
+		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
+		return exitRuntime
+	}
+	// No service registered is the right answer for a console install, and the command that makes
+	// the policy complete is named. A console run is excluded: it installs nothing, and a developer
+	// running `server run` every few minutes does not need the line each time.
+	if len(policy) > 0 && !service.ACLPolicyNamesTheService(policy) && opName(args) != "run" {
+		_, _ = fmt.Fprintln(errOut, "server: "+service.NotRegisteredHint)
+	}
+	return 0
 }
 
 // serveCmd parses the console run's flags and serves. It is reached two ways and must behave
