@@ -210,6 +210,14 @@ jobs:
               ForEach-Object { $_.Message }
             Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } -MaxEvents 6 -ErrorAction SilentlyContinue |
               ForEach-Object { $_.Message }
+            # Separate "the service account cannot run it" from "it cannot run": the same data dir, as the runner admin on the console.
+            & $exe service stop --data-dir $data 2>&1 | Out-Null
+            $p = Start-Process -FilePath $exe -ArgumentList 'run','--listen','127.0.0.1:18444','--data-dir',$data -RedirectStandardError "$T\console.err" -RedirectStandardOutput "$T\console.out" -PassThru -NoNewWindow
+            Start-Sleep -Seconds 6
+            $exited = $p.HasExited
+            if (-not $exited) { Stop-Process -Id $p.Id -Force }
+            Write-Output "console run: exited=$exited"
+            Get-Content "$T\console.err" -Tail 15 -ErrorAction SilentlyContinue
             throw
           } finally {
             & $exe service uninstall --data-dir $data
