@@ -87,42 +87,55 @@ func TestServiceACLPolicyIsAdministratorsOnlyWhenNotRegistered(t *testing.T) {
 	}
 }
 
-// TestServiceACLPolicyRefusesWhenRegisteredButTheSIDWillNotResolve is G17, approved by Matthew
-// 2026-11-07: REFUSE, never narrow.
-//
-// The failure this guards: Administrators-only is right when no service is registered and WRONG
-// when one is registered and the lookup merely failed. Applying it then re-ACLs the data dir
-// without the service SID, and the service can no longer read vault.bin, admin-password.json or
-// tls/ - the same outcome as the restrictACL bug slice 2 was written to fix, arriving through the
-// fallback instead of the default.
-func TestServiceACLPolicyRefusesWhenRegisteredButTheSIDWillNotResolve(t *testing.T) {
+// TestServiceACLPolicyNarrowsWhenRegisteredButTheSIDWillNotResolve is G17 as decided by Matthew on
+// 2026-11-10: NARROW, never refuse. The policy is Administrators alone, returned with an error that
+// wraps ErrACLPolicyNarrowed so the caller can log the reason and tell the operator.
+func TestServiceACLPolicyNarrowsWhenRegisteredButTheSIDWillNotResolve(t *testing.T) {
 	stubPolicy(t, true, nil, "", errors.New("LookupAccountName: mapping between account names and security IDs was not done"))
 	got, err := ACLPolicy()
-	if !errors.Is(err, ErrACLPolicyUnresolved) {
-		t.Fatalf("err %v, want ErrACLPolicyUnresolved", err)
+	if !errors.Is(err, ErrACLPolicyNarrowed) {
+		t.Fatalf("err %v, want ErrACLPolicyNarrowed", err)
 	}
-	if got != nil {
-		t.Fatalf("policy %v, want nothing at all: a narrower policy is the bug this refuses", got)
-	}
+	assertNarrowedToAdministrators(t, got)
 	if !strings.Contains(err.Error(), "server service install") {
 		t.Fatalf("the error %q does not name the command that fixes it", err)
 	}
-	if ACLPolicyUnresolvedReason != "acl-policy-unresolved" {
-		t.Fatalf("the logged reason is %q, want acl-policy-unresolved", ACLPolicyUnresolvedReason)
+	if ACLPolicyNarrowedReason != "acl-policy-narrowed" {
+		t.Fatalf("the logged reason is %q, want acl-policy-narrowed", ACLPolicyNarrowedReason)
 	}
 }
 
-// TestServiceACLPolicyRefusesWhenTheSCMCannotBeReached: a host where the SCM query itself fails
-// cannot answer "is a service registered", so it cannot answer "which SIDs must keep access"
-// either. It takes the same refusal as G17 rather than guessing Administrators-only.
-func TestServiceACLPolicyRefusesWhenTheSCMCannotBeReached(t *testing.T) {
+// TestServiceACLPolicyNarrowsWhenTheLookupReturnsNoSID: an empty SID with no error is the same
+// unresolved case and must not leak an empty principal into the policy.
+func TestServiceACLPolicyNarrowsWhenTheLookupReturnsNoSID(t *testing.T) {
+	stubPolicy(t, true, nil, "", nil)
+	got, err := ACLPolicy()
+	if !errors.Is(err, ErrACLPolicyNarrowed) {
+		t.Fatalf("err %v, want ErrACLPolicyNarrowed", err)
+	}
+	assertNarrowedToAdministrators(t, got)
+}
+
+// TestServiceACLPolicyNarrowsWhenTheSCMCannotBeReached: a host where the SCM query itself fails
+// cannot answer "is a service registered", so it takes the same narrowing as G17.
+func TestServiceACLPolicyNarrowsWhenTheSCMCannotBeReached(t *testing.T) {
 	stubPolicy(t, false, errors.New("OpenSCManager: access is denied"), fixtureServiceSID, nil)
 	got, err := ACLPolicy()
-	if !errors.Is(err, ErrACLPolicyUnresolved) {
-		t.Fatalf("err %v, want ErrACLPolicyUnresolved", err)
+	if !errors.Is(err, ErrACLPolicyNarrowed) {
+		t.Fatalf("err %v, want ErrACLPolicyNarrowed", err)
 	}
-	if got != nil {
-		t.Fatalf("policy %v, want nothing at all", got)
+	assertNarrowedToAdministrators(t, got)
+}
+
+// assertNarrowedToAdministrators pins that narrowing never widens: the policy is exactly the
+// Administrators SID, so it cannot hold Everyone (S-1-1-0), Users (S-1-5-32-545) or the service SID.
+func assertNarrowedToAdministrators(t *testing.T, got []string) {
+	t.Helper()
+	if len(got) != 1 || got[0] != AdministratorsSID {
+		t.Fatalf("policy %v, want the Administrators SID alone", got)
+	}
+	if ACLPolicyNamesTheService(got) {
+		t.Fatal("a narrowed policy claims to name the service")
 	}
 }
 

@@ -288,12 +288,12 @@ func runAsWindowsService() (int, bool) {
 	}
 	logDir := serviceLogDir(dataDir)
 
-	// Before the first write. A policy that cannot be resolved is NOT a reason to write with a
-	// narrower one (G17), so the service refuses to start rather than re-ACLing its own log
-	// directory without the service SID on it.
+	// Before the first write. A service SID that cannot be resolved narrows the policy (G17) rather
+	// than stopping the service from starting; the narrowing is logged to the log file below.
 	policy, err := aclPolicy()
-	if err != nil {
-		return reportServiceStartFailure(logDir, exitUsage, service.ACLPolicyUnresolvedReason, err)
+	narrowed := errors.Is(err, service.ErrACLPolicyNarrowed)
+	if err != nil && !narrowed {
+		return reportServiceStartFailure(logDir, exitUsage, "acl-policy-failed", err)
 	}
 	if err := setACLPolicy(policy...); err != nil {
 		return reportServiceStartFailure(logDir, exitRuntime, "acl-policy-rejected", err)
@@ -304,6 +304,9 @@ func runAsWindowsService() (int, bool) {
 		return reportServiceStartFailure(logDir, exitRuntime, "log-unwritable", err)
 	}
 	defer func() { _ = w.Close() }()
+	if narrowed {
+		logx.New(w).Warn("acl policy", "reason", service.ACLPolicyNarrowedReason, "op", "run")
+	}
 
 	elog, elogErr := eventlog.Open(service.EventSourceName)
 	if elogErr == nil {

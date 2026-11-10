@@ -903,10 +903,16 @@ func firewallArgs(listen string) []string {
 }
 
 // reapplyACLPolicy re-resolves the policy and installs it. It is called after the registration, when
-// the service's SID exists for the first time, and it takes the same G17 refusal as the entry point:
-// a registered service whose SID will not resolve means nothing more is written.
+// the service's SID exists for the first time, and it takes the same G17 narrowing as the entry
+// point: a registered service whose SID will not resolve gets the narrower policy, the install
+// finishes, and the operator is told in the output and in one structured log line.
 func reapplyACLPolicy(out, errOut io.Writer) int {
 	policy, err := aclPolicy()
+	if errors.Is(err, service.ErrACLPolicyNarrowed) {
+		logx.New(errOut).Warn("acl policy", "reason", service.ACLPolicyNarrowedReason, "op", "service install")
+		_, _ = fmt.Fprintln(errOut, "service install: WARNING:", logx.Redact(err.Error()))
+		err = nil
+	}
 	if err != nil {
 		_, _ = fmt.Fprintln(errOut, "service install:", logx.Redact(err.Error()))
 		return exitUsage
@@ -943,10 +949,9 @@ func confirmTyped(in io.Reader, out io.Writer, word, prompt string) bool {
 	return strings.TrimRight(line, "\r\n") == word
 }
 
-// readOnlyInvocations are the commands that write nothing. They stay reachable when the ACL policy
-// is unresolved, because they are exactly the commands an operator needs in order to find out WHY
-// it is unresolved - a refusal that also took away `service status` and `vault verify` would leave
-// nothing to diagnose with.
+// readOnlyInvocations are the commands that write nothing. They apply no ACL policy when it is
+// narrowed (G17), because they are exactly the commands an operator needs in order to find out WHY
+// it is narrowed.
 var readOnlyInvocations = map[string]map[string]bool{
 	"service": {"status": true},
 	"vault":   {"status": true, "verify": true},

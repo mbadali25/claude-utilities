@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -564,32 +565,72 @@ func TestInstallReappliesTheACLPolicyAfterRegistering(t *testing.T) {
 	}
 }
 
-// TestInstallRefusesWhenTheServiceSIDWillNotResolveAfterRegistering is G17 on the install path:
-// the service is registered but its SID will not resolve, so nothing further is written and the
-// exit is 2.
-func TestInstallRefusesWhenTheServiceSIDWillNotResolveAfterRegistering(t *testing.T) {
+// TestInstallNarrowsWhenTheServiceSIDWillNotResolveAfterRegistering is G17 on the install path
+// (Matthew, 2026-11-10): the service is registered but its SID will not resolve, so the install
+// finishes with the narrower policy (Administrators only), says so, and never widens.
+func TestInstallNarrowsWhenTheServiceSIDWillNotResolveAfterRegistering(t *testing.T) {
 	useSCM(t, newFakeSCM())
 	fakeExe(t, "server.exe")
-	origPolicy, origSet, origIcacls := aclPolicy, setACLPolicy, runICacls
-	t.Cleanup(func() { aclPolicy, setACLPolicy, runICacls = origPolicy, origSet, origIcacls })
+	origPolicy, origSet := aclPolicy, setACLPolicy
+	t.Cleanup(func() { aclPolicy, setACLPolicy = origPolicy, origSet })
 
 	aclPolicy = func() ([]string, error) {
-		return nil, fmt.Errorf("%w: lookup failed", service.ErrACLPolicyUnresolved)
+		return []string{service.AdministratorsSID}, fmt.Errorf("%w: lookup failed", service.ErrACLPolicyNarrowed)
+	}
+	var applied [][]string
+	setACLPolicy = func(sids ...string) error {
+		applied = append(applied, append([]string(nil), sids...))
+		return nil
+	}
+
+	code, out := capture(t, []string{"install", "--listen", "127.0.0.1:8443", "--data-dir", t.TempDir()}, "")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0: %s", code, out)
+	}
+	if len(applied) != 1 || len(applied[0]) != 1 || applied[0][0] != service.AdministratorsSID {
+		t.Fatalf("applied %v, want exactly the Administrators SID once", applied)
+	}
+	for _, bad := range []string{"S-1-1-0", "S-1-5-32-545"} { // Everyone, Users
+		if len(applied) > 0 && applied[0][0] == bad {
+			t.Fatalf("the narrowed policy granted %s", bad)
+		}
+	}
+	if !strings.Contains(out, "narrowed") || !strings.Contains(out, "acl-policy-narrowed") {
+		t.Fatalf("the operator is not told the policy was narrowed, with its reason: %s", out)
+	}
+}
+
+// TestApplyACLPolicyNarrowsInsteadOfRefusing: the entry point applies the narrowed policy, logs the
+// reason and exits 0 for a writing command; a read-only command applies nothing.
+func TestApplyACLPolicyNarrowsInsteadOfRefusing(t *testing.T) {
+	origPolicy, origSet := aclPolicy, setACLPolicy
+	t.Cleanup(func() { aclPolicy, setACLPolicy = origPolicy, origSet })
+	aclPolicy = func() ([]string, error) {
+		return []string{service.AdministratorsSID}, fmt.Errorf("%w: lookup failed", service.ErrACLPolicyNarrowed)
 	}
 	applied := 0
 	setACLPolicy = func(...string) error { applied++; return nil }
-	icacls := 0
-	runICacls = func([]string) ([]byte, error) { icacls++; return nil, nil }
 
-	code, out := capture(t, []string{"install", "--listen", "127.0.0.1:8443", "--data-dir", t.TempDir()}, "")
-	if code != exitUsage {
-		t.Fatalf("exit %d, want %d: %s", code, exitUsage, out)
+	var errOut bytes.Buffer
+	if code := applyACLPolicy([]string{"init"}, &errOut); code != 0 {
+		t.Fatalf("exit %d, want 0: %s", code, errOut.String())
 	}
-	if applied != 0 {
-		t.Fatalf("the ACL policy was applied %d times despite the refusal", applied)
+	if applied != 1 {
+		t.Fatalf("applied %d times, want 1", applied)
 	}
-	if icacls != 0 {
-		t.Fatalf("icacls ran %d times despite the refusal", icacls)
+	if !strings.Contains(errOut.String(), "acl-policy-narrowed") || strings.Contains(errOut.String(), "service not registered") {
+		t.Fatalf("output %q: want the narrowed reason and not the not-registered hint", errOut.String())
+	}
+
+	applied = 0
+	errOut.Reset()
+	if code := applyACLPolicy([]string{"service", "status"}, &errOut); code != 0 || applied != 0 {
+		t.Fatalf("read-only: exit %d, applied %d, want 0 and 0", code, applied)
+	}
+
+	aclPolicy = func() ([]string, error) { return nil, errors.New("boom") }
+	if code := applyACLPolicy([]string{"init"}, &errOut); code != exitUsage {
+		t.Fatalf("a non-narrowing error exited %d, want %d", code, exitUsage)
 	}
 }
 
@@ -936,8 +977,8 @@ func TestFlagValueReadsBothSpellings(t *testing.T) {
 	}
 }
 
-// TestReadOnlyInvocationKeepsTheDiagnosticsReachable: the G17 refusal must not take away the
-// commands that explain it. The mutation this catches is a mutator sneaking into the exempt set.
+// TestReadOnlyInvocationKeepsTheDiagnosticsReachable: the commands that explain a G17 narrowing
+// write nothing and must apply no policy. The mutation this catches is a mutator sneaking into the exempt set.
 func TestReadOnlyInvocationKeepsTheDiagnosticsReachable(t *testing.T) {
 	readOnly := [][]string{
 		nil, {"--help"}, {"-h"},

@@ -34,32 +34,34 @@ const (
 	EventSourceName = WindowsServiceName
 )
 
-// ACLPolicyUnresolvedReason is the `reason` token logged with the G17 refusal. It is a plain token
-// so it can go in a marker and in a logx line unchanged.
-const ACLPolicyUnresolvedReason = "acl-policy-unresolved"
+// ACLPolicyNarrowedReason is the `reason` token logged when G17 narrows the policy. It is a plain
+// token so it can go in a marker and in a logx line unchanged.
+const ACLPolicyNarrowedReason = "acl-policy-narrowed"
 
 // NotRegisteredHint is what a command prints when no service is registered: the policy is
 // Administrators-only, which is correct for a console install, and the command that makes it the
 // full policy is named rather than implied.
 const NotRegisteredHint = "service not registered: run `server service install`, which re-grants the data dir"
 
-// ErrACLPolicyUnresolved is the G17 refusal (approved by Matthew, 2026-11-07): when a service IS
-// registered and its SID will not resolve, the answer is to write nothing, not to apply a narrower
-// policy.
+// ErrACLPolicyNarrowed is the G17 outcome (Matthew, 2026-11-10, superseding the 2026-11-07 refusal):
+// when a service IS registered and its SID will not resolve, the policy is narrowed to the SIDs
+// that do resolve - Administrators, which is well known and cannot fail - and the caller continues
+// instead of refusing. The owner (the install account) keeps access through the file's owner entry.
 //
-// Why refusing is the safe answer and narrowing is not. Administrators-only is right when no
-// service is registered (a console install before `service install` has run) and WRONG when one is
-// registered and the lookup merely failed: applying it re-ACLs the data dir without the service
-// SID, and the service then cannot read vault.bin, admin-password.json or tls/. That is the same
-// outcome as the restrictACL bug slice 2 was written to fix, arriving through the fallback instead
-// of the default - and it arrives silently, because every write succeeds and only the next service
-// start fails.
+// ACLPolicy returns this error TOGETHER with the narrowed policy, so a caller that wants to apply it
+// must check errors.Is rather than treat any error as fatal. The narrowing only removes principals
+// from the full policy; it never adds one, and never grants Everyone or Users.
 //
-// A host where the SCM query itself fails takes the same refusal: a process that cannot tell
+// The cost, stated plainly: the service SID is missing from the data dir, so the service cannot
+// read vault.bin, admin-password.json or tls/ until `server service install` re-grants it. Every
+// write succeeds and only the next service start fails, which is why the caller logs the reason and
+// tells the operator in the same breath.
+//
+// A host where the SCM query itself fails is narrowed the same way: a process that cannot tell
 // whether a service is registered cannot tell which SIDs must keep access either.
-var ErrACLPolicyUnresolved = errors.New("the data-dir ACL policy is unresolved: a " + WindowsServiceName +
-	" service is registered but its SID did not resolve, so nothing was written " +
-	"(re-run `server service install`, which re-grants the data dir)")
+var ErrACLPolicyNarrowed = errors.New("the data-dir ACL policy was narrowed to Administrators and the " +
+	"owner: a " + WindowsServiceName + " service SID did not resolve, so the service has no access " +
+	"until `server service install` re-grants the data dir")
 
 // The two platform seams ACLPolicy reads. They are variables so the policy's rules are tested
 // without an SCM on any OS, and so no test on a developer's machine depends on what that machine
@@ -79,8 +81,9 @@ var (
 //   - Windows, a service registered and its SID resolved: Administrators plus the service SID.
 //   - Windows, no service registered: Administrators alone, and the caller prints
 //     NotRegisteredHint. ACLPolicyNamesTheService reports which of the two this is.
-//   - Windows, registered but unresolvable, or an unreachable SCM: no policy and
-//     ErrACLPolicyUnresolved. The caller refuses with exit 2 and writes nothing (G17).
+//   - Windows, registered but unresolvable, or an unreachable SCM: Administrators alone AND an
+//     error wrapping ErrACLPolicyNarrowed. The caller applies the policy, logs
+//     ACLPolicyNarrowedReason and tells the operator (G17).
 //   - Anything but Windows: empty and no error. ACLs are a Windows concept; credfile's unix
 //     restrictACL sets 0600/0700 modes directly and ignores the policy.
 //
@@ -89,19 +92,20 @@ func ACLPolicy() ([]string, error) {
 	if !aclSupported {
 		return nil, nil
 	}
+	narrowed := []string{AdministratorsSID}
 	registered, err := serviceRegistered()
 	if err != nil {
-		return nil, fmt.Errorf("service: %w: %v", ErrACLPolicyUnresolved, err)
+		return narrowed, fmt.Errorf("service: %w: %v", ErrACLPolicyNarrowed, err)
 	}
 	if !registered {
-		return []string{AdministratorsSID}, nil
+		return narrowed, nil
 	}
 	sid, err := lookupServiceSID()
 	if err != nil {
-		return nil, fmt.Errorf("service: %w: %v", ErrACLPolicyUnresolved, err)
+		return narrowed, fmt.Errorf("service: %w: %v", ErrACLPolicyNarrowed, err)
 	}
 	if sid == "" {
-		return nil, fmt.Errorf("service: %w: the lookup returned no SID", ErrACLPolicyUnresolved)
+		return narrowed, fmt.Errorf("service: %w: the lookup returned no SID", ErrACLPolicyNarrowed)
 	}
 	return []string{AdministratorsSID, sid}, nil
 }

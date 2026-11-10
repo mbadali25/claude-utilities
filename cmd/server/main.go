@@ -194,27 +194,31 @@ func run(ctx context.Context, args []string, getenv func(string) string, in io.R
 // applyACLPolicy resolves the data-dir ACL policy (Decision 11) and installs it in credfile before
 // the first write of whatever command follows.
 //
-// The refusal is G17, approved by Matthew 2026-11-07: a REGISTERED service whose SID will not
-// resolve means exit 2 with reason=acl-policy-unresolved and nothing written, never a narrower
-// policy. Narrowing there would re-ACL the data dir without the service SID and the service could
-// no longer read vault.bin, admin-password.json or tls/ - silently, because every write succeeds
-// and only the next service start fails.
+// G17 (Matthew, 2026-11-10): a REGISTERED service whose SID will not resolve NARROWS the policy to
+// the SIDs that do resolve (Administrators; the owner keeps access) and continues. It logs
+// reason=acl-policy-narrowed and tells the operator that the service has no access until
+// `server service install` re-grants the data dir. Narrowing only removes principals; it never adds
+// one. Any other error from the resolver is still fatal (exit 2).
 //
-// The read-only commands are exempt, and deliberately so: `service status`, `vault status` and
-// `vault verify` write nothing and are exactly what an operator needs in order to find out WHY the
-// policy is unresolved. A refusal that took those away would leave nothing to diagnose with.
+// The read-only commands write nothing, so they apply no policy and log the narrowing as a
+// warning: `service status`, `vault status` and `vault verify` are what an operator uses to find
+// out WHY the policy is narrowed.
 func applyACLPolicy(args []string, errOut io.Writer) int {
 	policy, err := aclPolicy()
-	if err != nil {
-		if readOnlyInvocation(args) {
-			logx.New(errOut).Warn("acl policy", "reason", service.ACLPolicyUnresolvedReason,
-				"op", opName(args), "result", "read-only-continues")
-			return 0
-		}
-		logx.New(errOut).Error("acl policy", "reason", service.ACLPolicyUnresolvedReason,
+	narrowed := errors.Is(err, service.ErrACLPolicyNarrowed)
+	if err != nil && !narrowed {
+		logx.New(errOut).Error("acl policy", "reason", "acl-policy-failed",
 			"op", opName(args), "exit", exitUsage)
 		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
 		return exitUsage
+	}
+	if narrowed {
+		logx.New(errOut).Warn("acl policy", "reason", service.ACLPolicyNarrowedReason,
+			"op", opName(args))
+		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
+		if readOnlyInvocation(args) {
+			return 0
+		}
 	}
 	if err := setACLPolicy(policy...); err != nil {
 		_, _ = fmt.Fprintln(errOut, "server:", logx.Redact(err.Error()))
@@ -223,7 +227,7 @@ func applyACLPolicy(args []string, errOut io.Writer) int {
 	// No service registered is the right answer for a console install, and the command that makes
 	// the policy complete is named. A console run is excluded: it installs nothing, and a developer
 	// running `server run` every few minutes does not need the line each time.
-	if len(policy) > 0 && !service.ACLPolicyNamesTheService(policy) && opName(args) != "run" {
+	if !narrowed && len(policy) > 0 && !service.ACLPolicyNamesTheService(policy) && opName(args) != "run" {
 		_, _ = fmt.Fprintln(errOut, "server: "+service.NotRegisteredHint)
 	}
 	return 0

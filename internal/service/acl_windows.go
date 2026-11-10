@@ -18,7 +18,7 @@ const platformACLSupported = true
 // ERROR_SERVICE_DOES_NOT_EXIST is the one failure that is an answer rather than a problem: it means
 // no service, which is the normal state before `service install` has run. Anything else - an SCM
 // this process cannot connect to, a handle it cannot open - is returned as an error, and ACLPolicy
-// turns that into the G17 refusal rather than guessing Administrators-only.
+// turns that into the G17 narrowing (Administrators alone plus a logged reason).
 //
 // mgr.Connect() asks for full access, which needs elevation; this uses the narrower
 // SC_MANAGER_CONNECT so an unelevated `server vault status` can still answer the question.
