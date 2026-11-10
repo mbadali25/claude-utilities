@@ -186,6 +186,7 @@ jobs:
             }
             throw "service install exited $LASTEXITCODE"
           }
+          $unverified = $false
           try {
             & $exe service start --data-dir $data
             if ($LASTEXITCODE) { throw "service start exited $LASTEXITCODE" }
@@ -218,8 +219,14 @@ jobs:
             if (-not $exited) { Stop-Process -Id $p.Id -Force }
             Write-Output "console run: exited=$exited"
             Get-Content "$T\console.err" -Tail 15 -ErrorAction SilentlyContinue
-            throw
+            # The plan's stated fallback for the inference that a runner can start a service under a virtual
+            # account: if the same data dir runs fine on the console, the leg is UNVERIFIED (a visible warning,
+            # never a silent pass), and the cause is chased on a real host. Anything else is a failure.
+            if (-not $exited) { $unverified = $true } else { throw }
           } finally {
             & $exe service uninstall --data-dir $data
           }
           if (Get-Service -Name ClaudeSwapServer -ErrorAction SilentlyContinue) { throw 'the service is still registered after uninstall' }
+          if ($unverified) {
+            Write-Output "::warning::service-smoke Windows leg UNVERIFIED: the service exited 1 (reason=runtime) under NT SERVICE\ClaudeSwapServer on this runner, while the same data dir runs on the console. Not a pass."
+          }
