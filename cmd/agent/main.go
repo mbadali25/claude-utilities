@@ -26,7 +26,8 @@ const usage = `usage: agent <command>
   install                                start the agent at login
   hooks   install | uninstall            opt in to (or out of) the session-control hook;
                                          edits only this program's block in settings.json
-  hook    --tag TAG [--state-dir DIR]    the hook itself: reads the hook payload on stdin`
+  hook    --tag TAG [--state-dir DIR]    the hook itself: reads the hook payload on stdin
+  --version                              print the version and exit`
 
 // codeEnv names the environment variable holding the pre-approved enrolment code.
 const codeEnv = "CLAUDESWAP_ENROL_CODE"
@@ -45,6 +46,12 @@ func dispatch(ctx context.Context, args []string, out, errOut io.Writer) int {
 		return 1
 	}
 	switch args[0] {
+	case "--version", "-version", "version":
+		if len(args) != 1 {
+			break
+		}
+		_, _ = fmt.Fprintln(out, "agent", version)
+		return 0
 	case "enrol":
 		return enrolCmd(ctx, args[1:], out, errOut)
 	case "run":

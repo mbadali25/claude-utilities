@@ -92,6 +92,7 @@ const usageText = `usage: server run <flags> | server <flags> | server set-passw
                          since start.
   --stale-after DUR     flag a stored login older than this (default 6h; access tokens
                          last about 8h). A flagged login still swaps, with a warning.
+  --version              print the version and exit (needs no environment or data dir)
   set-password           replace the admin UI password; it is read from a no-echo
                          prompt when stdin is a terminal, else one line of stdin.
                          There is no flag for it, by design.
@@ -100,6 +101,10 @@ const usageText = `usage: server run <flags> | server <flags> | server set-passw
                          every agent must re-enrol. It asks for a typed confirmation.`
 
 func main() {
+	// Before everything, so `--version` needs no environment, data dir or ACL policy.
+	if versionCmd(os.Args[1:], os.Stdout) {
+		os.Exit(0)
+	}
 	// The service control manager, when it is what started this process: the handler owns the
 	// context, the log file and the exit code it reports back. `svc.Run` is entered only when
 	// svc.IsWindowsService() is true, so a console run - and every test process - falls straight
