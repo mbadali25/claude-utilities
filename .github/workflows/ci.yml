@@ -130,9 +130,9 @@ jobs:
           printf '%s\n' "$ADMIN" | sudo "$BIN" set-password --data-dir "$D"
 
           # migrate on a v2 data dir is the idempotent re-run that writes the KEK drop-in.
-          sudo "$BIN" vault migrate --data-dir "$D" | tee "$T/migrate.out"
+          sudo "$BIN" vault migrate --data-dir "$D" 2>&1 | tee "$T/migrate.out"
           die() { echo "::error::service-smoke: $*"; exit 1; }
-          grep -q "KEK drop-in" "$T/migrate.out" || die "migrate did not report writing the KEK drop-in"
+          grep -q "KEK drop-in" "$T/migrate.out" || { cat -A "$T/migrate.out"; die "migrate did not report writing the KEK drop-in"; }
           sudo grep -qx 'LoadCredential=vault-kek:/etc/credstore/claude-swap.vault-kek' \
             /etc/systemd/system/claude-swap-server.service.d/10-kek.conf \
             || die "the drop-in does not carry the plain LoadCredential line"
