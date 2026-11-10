@@ -39,14 +39,14 @@ You need `cosign` (v2 or later) and `gh` (logged in; `gh attestation verify` nee
 
    Expected: every line `OK`. On Windows PowerShell, compare `(Get-FileHash <file>).Hash` with the line in `SHA256SUMS`.
 
-5. Check the binary reports the tag you verified. Extract one archive of each kind into its own empty directory, then run it.
+5. Check the binary reports the tag you verified. Each archive holds one binary, so extract the agent archive and the server archive for your OS, each into its own empty directory, then run them.
 
    ```
-   ./agent --version
-   ./server --version
+   ./claude-swap-agent --version
+   ./claude-swap-server --version
    ```
 
-   Expected: `agent <tag>` and `server <tag>` (for example `agent v1.2.3`). `dev` means the binary was not built by the release workflow; do not run it. Both commands need no environment, data dir or network. On Windows use `.\agent.exe` and `.\server.exe`.
+   Expected: `agent <tag>` and `server <tag>` (for example `agent v1.2.3`). `dev` means the binary was not built by the release workflow; do not run it. Both commands need no environment, data dir or network. On Windows use `.\claude-swap-agent.exe` and `.\claude-swap-server.exe`.
 
 ## Weaker fallback
 
