@@ -115,32 +115,50 @@ jobs:
       - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-checksums: dist/SHA256SUMS
+      - name: Write the verifier
+        run: |
+          cat > "$RUNNER_TEMP/verify.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # usage: verify.sh DIR  - DIR holds the release files. Fails on a short release.
+          set -euo pipefail
+          cd "$1"
+          if [ "$KIND" = dry ]; then
+            id='^https://github\.com/mbadali25/claude-utilities/\.github/workflows/release\.yml@refs/tags/v0\.0\.0-rc\.[0-9]+$'
+          else
+            id='^https://github\.com/mbadali25/claude-utilities/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+          fi
+          cosign verify-blob \
+            --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity-regexp "$id" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            SHA256SUMS
+          sha256sum -c SHA256SUMS
+          archives=$(find . -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) | wc -l)
+          if [ "$archives" -ne 4 ]; then
+            echo "::error::expected 4 archives (server and agent, linux and windows), found $archives"
+            exit 1
+          fi
+          for f in ./*.zip ./*.tar.gz; do
+            gh attestation verify "$f" --repo "$REPO" \
+              --cert-identity-regex "$id"
+          done
+          EOF
+          chmod +x "$RUNNER_TEMP/verify.sh"
+      - name: Verify before publishing
+        run: '"$RUNNER_TEMP/verify.sh" dist'
       - name: Create the release (dry runs stay drafts)
         run: |
           set -eu
           draft=""; [ "$KIND" = dry ] && draft="--draft"
           gh release create "$TAG" dist/* --repo "$REPO" --title "$TAG" --verify-tag $draft \
             --notes "Verify with docs/runbooks/release-verify.md before running anything from this release."
-      - name: Verify what was published
+      # A draft is not reliably downloadable by tag, so only a published release is re-checked here.
+      - name: Verify the published copy
+        if: ${{ env.KIND == 'real' }}
         run: |
-          set -eu
-          if [ "$KIND" = dry ]; then
-            id='^https://github\.com/mbadali25/claude-utilities/\.github/workflows/release\.yml@refs/tags/v0\.0\.0-rc\.[0-9]+$'
-          else
-            id='^https://github\.com/mbadali25/claude-utilities/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
-          fi
-          mkdir verify
-          gh release download "$TAG" --repo "$REPO" --dir verify
-          cd verify
-          cosign verify-blob \
-            --bundle SHA256SUMS.sigstore.json \
-            --certificate-identity-regexp "$id" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            SHA256SUMS
-          sha256sum -c SHA256SUMS --ignore-missing
-          for f in *.zip *.tar.gz; do
-            gh attestation verify "$f" --repo "$REPO"
-          done
+          mkdir published
+          gh release download "$TAG" --repo "$REPO" --dir published
+          "$RUNNER_TEMP/verify.sh" published
       - name: Delete the dry-run draft
         if: ${{ always() && env.KIND == 'dry' }}
-        run: gh release delete "$TAG" --repo "$REPO" --yes || true
+        run: gh release delete "$TAG" --repo "$REPO" --yes || echo "::warning::could not delete the draft release for $TAG; delete it by hand"

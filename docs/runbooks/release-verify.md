@@ -26,7 +26,7 @@ You need `cosign` (v2 or later) and `gh` (logged in; `gh attestation verify` nee
 3. Check each archive's provenance attestation. The attested files are the archives, not `SHA256SUMS`.
 
    ```
-   gh attestation verify <archive> --repo mbadali25/claude-utilities
+   gh attestation verify <archive> --repo mbadali25/claude-utilities --cert-identity-regex '^https://github\.com/mbadali25/claude-utilities/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
    ```
 
    Run it once per `.zip` and `.tar.gz`.
@@ -45,4 +45,4 @@ If neither `cosign` nor `gh` is present, the only check left is comparing one fi
 
 ## Dry run (Matthew only)
 
-The workflow can be exercised without a real release. Push a tag `v0.0.0-rc.N`: the workflow builds, creates a draft release, runs steps 2 to 4 with the `v0\.0\.0-rc\.[0-9]+` identity, then deletes the draft. Delete the tag afterwards (`git push origin :v0.0.0-rc.N`). A failing run shows the identity mismatch or the cosign error in the `Verify what was published` step. Tag protection and required review on `.github/workflows` are repo settings the supply-chain argument relies on; this workflow does not set them.
+The workflow can be exercised without a real release. Push a tag `v0.0.0-rc.N`: the workflow builds, creates a draft release, runs the same checks (steps 2 to 4 above, plus a count of four archives, before the draft is created) with the `v0\.0\.0-rc\.[0-9]+` identity, then deletes the draft. Delete the tag afterwards (`git push origin :v0.0.0-rc.N`). A failing run shows the identity mismatch or the cosign error in the `Verify before publishing` step. Tag protection and required review on `.github/workflows` are repo settings the supply-chain argument relies on; this workflow does not set them.
