@@ -66,6 +66,13 @@ func TestInstallGrantReachesAFileWrittenBeforeTheService(t *testing.T) {
 		t.Fatalf("icacls %v: %v: %s", args, err, strings.TrimSpace(string(out)))
 	}
 
+	// Control: the /T grant alone must NOT have reached the file, or the assertions below would pass
+	// with restrictExistingFiles deleted and prove nothing.
+	if daclNames(t, pw, "TrustedInstaller") {
+		t.Fatalf("the icacls grant already put %s on the pre-existing file, so this test no longer "+
+			"demonstrates what restrictExistingFiles is for: %s", standInServiceAccount, dacl(t, pw))
+	}
+
 	// reapplyACLPolicy has run by now: the policy names the service SID. The stand-in is the
 	// TrustedInstaller SID, which every Windows install has.
 	if err := credfile.SetACLPolicy(service.AdministratorsSID, standInServiceSID); err != nil {

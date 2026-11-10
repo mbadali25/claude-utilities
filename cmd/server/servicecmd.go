@@ -491,10 +491,14 @@ func serviceInstallCmd(args []string, out, errOut io.Writer) int {
 	// Files written before the service existed (admin-password.json, vault.bin, tunnelkeys.bin) hold
 	// an explicit DACL with inheritance removed, so the grant above never reached them. Re-apply the
 	// process policy to each one: owner plus the policy SIDs reapplyACLPolicy installed, nothing
-	// wider, so a narrowed policy (G17) leaves the service off the file rather than widening it.
+	// wider (RestrictFile grants the current user, which on an elevated install is the installer),
+	// so a narrowed policy (G17) never widens a file. It also never removes a service ACE an earlier
+	// install granted; `server service uninstall` is the way to take that back.
 	n, err := restrictExistingFiles(abs)
 	if err != nil {
 		_, _ = fmt.Fprintln(errOut, "service install:", logx.Redact(err.Error()))
+		_, _ = fmt.Fprintln(errOut, "service install: the service is registered but a file in the data dir "+
+			"was not granted to it; close whatever holds that file open, then run `server service install` again")
 		return exitRuntime
 	}
 	_, _ = fmt.Fprintf(out, "service install: re-applied the ACL policy to %d files already in %s\n", n,
