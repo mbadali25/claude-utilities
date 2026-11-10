@@ -17,9 +17,11 @@ import (
 // The KEK drop-in: the one systemd file that tells the server unit where its vault key comes from.
 //
 // It is a drop-in, not a line in the unit, because `service install` runs before anyone knows which
-// form this host gets, and a unit that names a credential that does not exist (or names
-// LoadCredentialEncrypted= for a plain file) fails before ExecStart. The command that creates the KEK
-// writes the drop-in; this file is the writer and the preflight that makes the failure rare.
+// form this host gets, and a unit that names an encrypted credential that does not exist (or
+// LoadCredentialEncrypted= for a plain file) fails before ExecStart. (A plain LoadCredential= with a
+// missing file does not: CI showed the server is exec'd with no key, falls through to the passphrase
+// and exits 3 or 4.) The command that creates the KEK writes the drop-in; this file is the writer and
+// the preflight that makes the failure rare.
 //
 // Everything that touches the machine goes through `host`, so the tests need no systemd, no root and
 // no /etc. Every error this file returns is a fixed sentence: an OS error carries the path it failed
@@ -92,8 +94,8 @@ func (r Rung) String() string {
 var (
 	// ErrNeedsRoot: the operation changes /etc/systemd and reads root-only credentials.
 	ErrNeedsRoot = errors.New("kek drop-in: this needs root")
-	// ErrCredentialMissing: the credential the drop-in would name is not there, and a unit that
-	// names one that is not fails before ExecStart.
+	// ErrCredentialMissing: the credential the drop-in would name is not there. An encrypted one
+	// fails the start; a plain one starts a server with no key. Neither is worth writing ahead of.
 	ErrCredentialMissing = errors.New("kek drop-in: the credential the drop-in would name does not exist")
 	// ErrCredentialMode: the credential is not root-owned and closed to everyone else.
 	ErrCredentialMode = errors.New("kek drop-in: the credential is not owned by root with mode 0600")

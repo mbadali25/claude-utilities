@@ -27,6 +27,12 @@
 #     that does not name the credential, or a restart after the limit. A 77 for any of those would
 #     read green for ever.
 #
+# Why LoadCredentialEncrypted= and not LoadCredential=: only the encrypted form is KNOWN to fail the
+# start when its file is gone. The first CI run showed a plain LoadCredential= with a missing file
+# does NOT stop systemd from exec'ing the server - the plain-rung host instead falls through to the
+# passphrase and exits 3 or 4 (non-restarting, so no loop either, but a different failure and not
+# one this case can pin down without a real vault). The host-key rungs use the encrypted form.
+#
 # What differs from the real unit, deliberately: RestartSec=1 and no RestartSteps/RestartMaxDelaySec
 # (the real ramp takes minutes; the COUNT and the LIMIT are what is under test), no User=/
 # StateDirectory= (so nothing is created under /var/lib), and the credential path is the fixture's.
@@ -112,7 +118,7 @@ fail() { echo "FAIL $*"; rc=1; }
   echo "[Service]"
   grep -E '^(Type|NotifyAccess|Restart|RestartPreventExitStatus|ExecStart)=' "$TMP/units/server.service"
   echo "RestartSec=1"
-  echo "LoadCredential=vault-kek:$CRED"
+  echo "LoadCredentialEncrypted=vault-kek:$CRED"
 } >"$TMP/units/verify.service"
 for k in StartLimitIntervalSec StartLimitBurst Type NotifyAccess Restart RestartPreventExitStatus ExecStart; do
   grep -q "^$k=" "$TMP/units/verify.service" || fail "the real unit has no $k= line to copy"
@@ -166,5 +172,10 @@ sleep 4
 [ "$(prop ActiveState)" = "failed" ] || fail "the unit left failed after the limit: '$(prop ActiveState)'"
 [ "$(attempts)" -eq 5 ] || fail "a restart happened after the limit: $(attempts) attempts"
 
+if [ "$rc" -ne 0 ]; then
+  # run-all.sh shows only the last five lines of a failing case, so the evidence goes on one line.
+  diag="$($SUDO journalctl -u "$MAIN" -o cat --no-pager 2>/dev/null | tail -n 4 | tr '\n' '|')"
+  echo "FAIL diag: Result=$(prop Result) ExecMainStatus=$(prop ExecMainStatus) journal: $diag"
+fi
 [ "$rc" -eq 0 ] && echo "PASS service-credential-missing: 5 attempts, start-limit-hit, marker and notice name the credential, no restart after"
 exit "$rc"
